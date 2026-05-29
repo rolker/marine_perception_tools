@@ -22,7 +22,7 @@ Motivated by deployment
 (small-buoy marking under dark skies) and doubles as the validation harness for
 [rolker/unh_marine_perception#22](https://github.com/rolker/unh_marine_perception/issues/22).
 
-### Status — Milestone A (forward-camera viewer + live re-tuning)
+### Status — forward-camera viewer + live #22 parameter tuning
 
 Implemented: the forward camera (`oak_forward`) segmentation is replayed beside
 the re-simulated costmap, with a frame scrubber and a parameter dock. Editing a
@@ -38,20 +38,22 @@ ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
   (boat-centred, N-up, log-odds palette).
 - **Scrubber**: seek through the loaded frame window (forward seeks accumulate
   incrementally; rewinds re-simulate from the window start).
-- **Parameter dock** (Milestone-A, #22-stable knobs): `decay_half_life_s`,
-  `lethal_threshold`, `max_range`, `min_grazing_angle_deg`. Invalid values are
-  rejected (status bar) and reverted.
+- **Parameter dock** — the live-tunable `sea_surface_segmentation` knobs
+  ([unh_marine_perception#22](https://github.com/rolker/unh_marine_perception/issues/22)):
+  - occupancy: `decay_half_life_s`, `lethal_threshold`, `obstacle_clamp`,
+    `clear_floor`, `free_threshold`
+  - accumulation: `max_range`, `min_grazing_angle_deg`, `obstacle_prob_min`,
+    `max_evidence_step`
+
+  Invalid values are rejected (status bar) and reverted. Window geometry
+  (`--window-m`/`--res`) is CLI-only (it sizes the buffer at construction).
 
 The segmentation that drives the costmap is the raw `rgb8` `Image` on
 `/bizzy/sensors/cameras/oak_forward/segmentation` (no ffmpeg decode); camera pose
 and boat pose are resolved from TF (`bizzy/map_tide` → optical / `base_link`).
 
-**Milestone B** (after
-[rolker/unh_marine_perception#22](https://github.com/rolker/unh_marine_perception/issues/22)
-Phase 1 lands its new parameter model): the dock's knob table extends to #22's
-per-pixel-log-odds / asymmetric-clamp / reflex-gate parameters, making this a
-#22 *tuning* harness. The 4-camera mosaic and recorded-costmap overlay remain
-future work. See
+**Future work**: the 4-camera mosaic, recorded-costmap overlay (ground-truth
+compare), and `nav2_overlay.yaml` param export remain to do. See
 [#1](https://github.com/rolker/marine_perception_tools/issues/1).
 
 ## Qt version

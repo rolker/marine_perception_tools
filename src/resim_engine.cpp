@@ -46,13 +46,16 @@ ReSimEngine::ReSimEngine(
   const LoadedBag & bag, double window_m, double res, double max_range,
   const sea_surface_segmentation::OccupancyParams & occ, double min_grazing_angle_deg)
 : bag_(bag),
-  window_m_(window_m),
-  res_(res),
-  max_range_(max_range),
-  min_grazing_angle_deg_(min_grazing_angle_deg),
   occ_(occ),
   buffer_(window_m, window_m, res, grid_map::Position(0.0, 0.0), occ)
 {
+  // Window geometry is construction-fixed; the rest of acc_ keeps the struct's
+  // defaults (obstacle_prob_min, max_evidence_step) until tuned via the dock.
+  acc_.res = res;
+  acc_.half_extent = window_m / 2.0;
+  acc_.plane_z = 0.0;  // map_tide water plane
+  acc_.max_range = max_range;
+  acc_.min_grazing_angle_deg = min_grazing_angle_deg;
   // Populate the buffer for the first frame so the engine is immediately
   // renderable. accumulate() moves the window to the frame's boat position.
   accumulate(0);
@@ -61,12 +64,9 @@ ReSimEngine::ReSimEngine(
 void ReSimEngine::accumulate(std::size_t i)
 {
   const PreparedFrame & f = bag_.frames[i];
-  const sea_surface_segmentation::AccumulateParams params{
-    max_range_, res_, window_m_ / 2.0, 0.0 /* plane_z: map_tide water plane */,
-    min_grazing_angle_deg_};
   sea_surface_segmentation::accumulate_frame(
     buffer_, f.mask_rgb8, bag_.camera_model, f.camera_origin, f.rotation_cam_to_target,
-    f.boat_x, f.boat_y, f.stamp_s, params);
+    f.boat_x, f.boat_y, f.stamp_s, acc_);
 }
 
 void ReSimEngine::seekTo(std::size_t k)
@@ -110,22 +110,36 @@ bool ReSimEngine::setOccupancyParams(
   return true;
 }
 
-bool ReSimEngine::setProjectionParams(
-  double max_range, double min_grazing_angle_deg, std::string & why)
+bool ReSimEngine::setAccumulateParams(
+  const sea_surface_segmentation::AccumulateParams & p, std::string & why)
 {
-  // AccumulateParams has no library validator; mirror the offline tool's guards.
-  if (!(std::isfinite(max_range) && max_range > 0.0)) {
+  // AccumulateParams has no library validator; guard the tunable fields here
+  // (mirrors the offline tool's --arg checks + the per-pixel-log-odds gate range).
+  if (!(std::isfinite(p.max_range) && p.max_range > 0.0)) {
     why = "max_range must be finite and > 0";
     return false;
   }
-  if (!(std::isfinite(min_grazing_angle_deg) &&
-    min_grazing_angle_deg >= 0.0 && min_grazing_angle_deg < 90.0))
+  if (!(std::isfinite(p.min_grazing_angle_deg) &&
+    p.min_grazing_angle_deg >= 0.0 && p.min_grazing_angle_deg < 90.0))
   {
     why = "min_grazing_angle_deg must be in [0, 90)";
     return false;
   }
-  max_range_ = max_range;
-  min_grazing_angle_deg_ = min_grazing_angle_deg;
+  if (!(std::isfinite(p.obstacle_prob_min) &&
+    p.obstacle_prob_min >= 0.0 && p.obstacle_prob_min <= 1.0))
+  {
+    why = "obstacle_prob_min must be in [0, 1]";
+    return false;
+  }
+  if (!(std::isfinite(p.max_evidence_step) && p.max_evidence_step > 0.0)) {
+    why = "max_evidence_step must be finite and > 0";
+    return false;
+  }
+  // Window geometry is construction-fixed — preserve it regardless of `p`.
+  acc_.max_range = p.max_range;
+  acc_.min_grazing_angle_deg = p.min_grazing_angle_deg;
+  acc_.obstacle_prob_min = p.obstacle_prob_min;
+  acc_.max_evidence_step = p.max_evidence_step;
   resimToCurrent();
   return true;
 }
@@ -137,8 +151,8 @@ cv::Mat ReSimEngine::renderGrid(int panel_px) const
   cv::Mat panel(panel_px, panel_px, CV_8UC3);
   for (int v = 0; v < panel_px; ++v) {
     for (int u = 0; u < panel_px; ++u) {
-      const double wx = bx + (u - panel_px / 2) * res_;
-      const double wy = by - (v - panel_px / 2) * res_;  // image y down → world y up
+      const double wx = bx + (u - panel_px / 2) * acc_.res;
+      const double wy = by - (v - panel_px / 2) * acc_.res;  // image y down → world y up
       panel.at<cv::Vec3b>(v, u) =
         colour_logodds(buffer_.logOdds(grid_map::Position(wx, wy)), occ_.lethal_threshold);
     }

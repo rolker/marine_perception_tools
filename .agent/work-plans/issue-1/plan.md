@@ -61,18 +61,16 @@ Mirror the live layer's praised separation: a Qt-free, ROS-free **re-sim core**
 + a thin ROS **bag loader** + a Qt **UI**. Delivered as two stacked PRs driven by
 the #22 coupling above:
 
-- **Milestone A (PR-A, now):** pipeline + replay/re-sim viewer + a param dock for
-  only the **#22-stable knobs** (`decay_half_life_s`, `lethal_threshold`,
-  `max_range`, `min_grazing_angle_deg`, window `res`/`half_extent`), with re-sim
-  on change. A fully functional bag-replay costmap viewer.
-- **Milestone B (PR-B, after #22 — now merged, PR #25):** extend the
-  (data-driven) dock to #22's model. The merged `OccupancyParams` replaced
-  `hit/miss/clamp` with **`obstacle_clamp`, `clear_floor`, `free_threshold`**
-  (+ existing `lethal_threshold`, `decay_half_life_s`); `AccumulateParams` added
-  **`obstacle_prob_min`, `max_evidence_step`**. (No `reflex_tau` in the costmap
-  params — the reflex gate lives in `segments_to_pointcloud`, outside the
-  buffer/accumulator the tuner drives.) Adding these rows makes it a #22 *tuning*
-  harness.
+- **Milestone A:** pipeline + replay/re-sim viewer + frame scrubber.
+- **Milestone B — folded into the same PR** once #22 (PR #25) merged
+  mid-implementation (the A/B split's rationale — "don't build a dock for
+  soon-changing knobs" — was gone). The dock exposes the full live-tunable #22
+  set: `OccupancyParams` `decay_half_life_s`, `lethal_threshold`,
+  `obstacle_clamp`, `clear_floor`, `free_threshold`; `AccumulateParams`
+  `max_range`, `min_grazing_angle_deg`, `obstacle_prob_min`, `max_evidence_step`.
+  (No `reflex_tau` in the costmap params — the reflex gate lives in
+  `segments_to_pointcloud`, outside the buffer/accumulator the tuner drives.)
+  Window geometry (`res`/`half_extent`) stays CLI-only.
 
 1. **Add dependencies** — `package.xml`/`CMakeLists.txt`: `sea_surface_segmentation`
    (exported headers), `grid_map_core`, `image_geometry`, `cv_bridge`, `rclcpp`,
@@ -115,11 +113,13 @@ the #22 coupling above:
    - `setOccupancyParams(p)` — runs `OccupancyBuffer::validate(p)` first; on pass,
      `setParams` + re-sim on the current index; on fail, returns the reason
      (no state change).
-   - `setProjectionParams(max_range, min_grazing_angle_deg)` — the live-tunable
-     `AccumulateParams` knobs (projection only, no buffer rebuild). The library
-     has **no validator** for these, so the engine bounds-checks them itself
-     (`max_range > 0`; `0 ≤ min_grazing_angle_deg < 90`), mirroring the driver,
-     then re-sims. Geometry (`res`/`half_extent`) is intentionally not settable.
+   - `setAccumulateParams(p)` — the live-tunable `AccumulateParams` knobs
+     (`max_range`, `min_grazing_angle_deg`, `obstacle_prob_min`,
+     `max_evidence_step`; no buffer rebuild). The library has **no validator** for
+     these, so the engine bounds-checks them itself (`max_range > 0`;
+     `0 ≤ min_grazing_angle_deg < 90`; `obstacle_prob_min ∈ [0,1]`;
+     `max_evidence_step > 0`), then re-sims. The window-geometry fields
+     (`res`/`half_extent`/`plane_z`) of `p` are ignored — construction-fixed.
 
 4. **Qt UI** — extend `MainWindow`. Two image panes side-by-side
    (`oak_forward` segmentation `rgb8` | re-sim lethal grid) via a `cv::Mat`→
@@ -238,3 +238,10 @@ Two stacked PRs. **PR-A** (now) ~450–600 lines incl. test. **PR-B** (after
   `setParams`-able / projection knobs. `OccupancyBuffer::validate()` covers only
   `OccupancyParams`, so the engine bounds-checks the `AccumulateParams` knobs
   (`max_range`, `min_grazing_angle_deg`) itself.
+- **Milestone B folded into PR #2 (2026-05-29).** #22 (PR #25) merged while
+  Milestone A was in review, so rather than ship the stable-knob subset and a
+  follow-up PR, the full #22 knob set was added to the dock in the same PR
+  (Roland's call — "fold into PR #2, all 5 new tunables"). The engine grew a
+  `setAccumulateParams` (mirroring `setOccupancyParams`) so the `AccumulateParams`
+  knobs are tunable too; window geometry stays construction-fixed. The
+  table-driven dock made this a member-pointer table edit, as designed.

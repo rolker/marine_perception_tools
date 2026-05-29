@@ -27,7 +27,9 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <initializer_list>
 #include <string>
+#include <utility>
 
 #include "cv_qt.hpp"
 
@@ -67,39 +69,52 @@ MainWindow::MainWindow(ReSimEngine & engine, QWidget * parent)
 
 void MainWindow::buildParamDock()
 {
-  // Each row: {label, getter, setter}. Setter copies current params, mutates one
-  // field, applies via the engine (which validates / bounds-checks and re-sims).
-  // Milestone A exposes only the #22-stable, live-tunable knobs.
-  knobs_.push_back({"decay_half_life_s",
-      [this] {return engine_.occupancyParams().decay_half_life_s;},
-      [this](double v, std::string & why) {
-        auto p = engine_.occupancyParams();
-        p.decay_half_life_s = v;
-        return engine_.setOccupancyParams(p, why);
-      }, nullptr});
-  knobs_.push_back({"lethal_threshold",
-      [this] {return engine_.occupancyParams().lethal_threshold;},
-      [this](double v, std::string & why) {
-        auto p = engine_.occupancyParams();
-        p.lethal_threshold = v;
-        return engine_.setOccupancyParams(p, why);
-      }, nullptr});
-  knobs_.push_back({"max_range",
-      [this] {return engine_.maxRange();},
-      [this](double v, std::string & why) {
-        return engine_.setProjectionParams(v, engine_.minGrazingAngleDeg(), why);
-      }, nullptr});
-  knobs_.push_back({"min_grazing_angle_deg",
-      [this] {return engine_.minGrazingAngleDeg();},
-      [this](double v, std::string & why) {
-        return engine_.setProjectionParams(engine_.maxRange(), v, why);
-      }, nullptr});
+  // Data-driven knob table: a row per tunable field, addressed by member pointer.
+  // Each setter copies the current params struct, mutates one field, and applies
+  // it via the engine (which validates / bounds-checks and re-sims).
+  using sea_surface_segmentation::AccumulateParams;
+  using sea_surface_segmentation::OccupancyParams;
+
+  // OccupancyParams knobs (validated by OccupancyBuffer::validate).
+  for (const auto & [label, field] : std::initializer_list<
+      std::pair<const char *, double OccupancyParams::*>>{
+      {"decay_half_life_s", &OccupancyParams::decay_half_life_s},
+      {"lethal_threshold", &OccupancyParams::lethal_threshold},
+      {"obstacle_clamp", &OccupancyParams::obstacle_clamp},
+      {"clear_floor", &OccupancyParams::clear_floor},
+      {"free_threshold", &OccupancyParams::free_threshold}})
+  {
+    knobs_.push_back({label,
+        [this, field] {return engine_.occupancyParams().*field;},
+        [this, field](double v, std::string & why) {
+          auto p = engine_.occupancyParams();
+          p.*field = v;
+          return engine_.setOccupancyParams(p, why);
+        }, nullptr});
+  }
+
+  // AccumulateParams knobs (engine-bounds-checked; window geometry is not here).
+  for (const auto & [label, field] : std::initializer_list<
+      std::pair<const char *, double AccumulateParams::*>>{
+      {"max_range", &AccumulateParams::max_range},
+      {"min_grazing_angle_deg", &AccumulateParams::min_grazing_angle_deg},
+      {"obstacle_prob_min", &AccumulateParams::obstacle_prob_min},
+      {"max_evidence_step", &AccumulateParams::max_evidence_step}})
+  {
+    knobs_.push_back({label,
+        [this, field] {return engine_.accumulateParams().*field;},
+        [this, field](double v, std::string & why) {
+          auto p = engine_.accumulateParams();
+          p.*field = v;
+          return engine_.setAccumulateParams(p, why);
+        }, nullptr});
+  }
 
   auto * panel = new QWidget;
   auto * form = new QFormLayout(panel);
   for (auto & knob : knobs_) {
     auto * box = new QDoubleSpinBox(panel);
-    box->setRange(0.0, 1000.0);
+    box->setRange(-1000.0, 1000.0);  // clear_floor/free_threshold can be negative
     box->setDecimals(3);
     box->setSingleStep(0.1);
     box->setValue(knob.get());

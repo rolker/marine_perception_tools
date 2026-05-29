@@ -20,6 +20,7 @@
 
 #include <opencv2/core.hpp>
 
+#include "sea_surface_segmentation/occupancy_accumulator.hpp"
 #include "sea_surface_segmentation/occupancy_buffer.hpp"
 
 #include "bag_loader.hpp"
@@ -60,11 +61,13 @@ public:
   // state unchanged. On success, apply and re-simulate to the current frame.
   bool setOccupancyParams(
     const sea_surface_segmentation::OccupancyParams & p, std::string & why);
-  bool setProjectionParams(double max_range, double min_grazing_angle_deg, std::string & why);
+  // The window geometry fields of `p` (res / half_extent / plane_z) are ignored —
+  // they are construction-fixed; only the tunable accumulate knobs are applied.
+  bool setAccumulateParams(
+    const sea_surface_segmentation::AccumulateParams & p, std::string & why);
 
   const sea_surface_segmentation::OccupancyParams & occupancyParams() const {return occ_;}
-  double maxRange() const {return max_range_;}
-  double minGrazingAngleDeg() const {return min_grazing_angle_deg_;}
+  const sea_surface_segmentation::AccumulateParams & accumulateParams() const {return acc_;}
 
   const cv::Mat & currentMask() const {return bag_.frames[current_].mask_rgb8;}
   double currentStamp() const {return bag_.frames[current_].stamp_s;}
@@ -83,10 +86,7 @@ private:
   void resimToCurrent();  // clear + replay [0, current_]
 
   const LoadedBag & bag_;
-  double window_m_;
-  double res_;
-  double max_range_;
-  double min_grazing_angle_deg_;
+  sea_surface_segmentation::AccumulateParams acc_;  // res/half_extent fixed; rest tunable
   sea_surface_segmentation::OccupancyParams occ_;
   sea_surface_segmentation::OccupancyBuffer buffer_;
   std::size_t current_ = 0;

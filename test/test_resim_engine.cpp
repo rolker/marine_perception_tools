@@ -205,7 +205,7 @@ TEST(ReSimEngine, RejectsInvalidOccupancyParamsWithoutStateChange)
   EXPECT_TRUE(grids_equal(before, sample_grid(engine)));
 }
 
-TEST(ReSimEngine, RejectsInvalidProjectionParamsWithoutStateChange)
+TEST(ReSimEngine, RejectsInvalidAccumulateParamsWithoutStateChange)
 {
   const auto bag = make_bag(3);
   mpt::ReSimEngine engine(bag, kWindowM, kRes, kMaxRange);
@@ -213,13 +213,23 @@ TEST(ReSimEngine, RejectsInvalidProjectionParamsWithoutStateChange)
   const auto before = sample_grid(engine);
   std::string why;
 
-  EXPECT_FALSE(engine.setProjectionParams(-5.0, 0.0, why));   // max_range <= 0
-  EXPECT_FALSE(engine.setProjectionParams(100.0, 95.0, why));  // grazing >= 90
-  EXPECT_DOUBLE_EQ(engine.maxRange(), kMaxRange);
+  auto bad = engine.accumulateParams();
+  bad.max_range = -5.0;  // <= 0
+  EXPECT_FALSE(engine.setAccumulateParams(bad, why));
+  bad = engine.accumulateParams();
+  bad.min_grazing_angle_deg = 95.0;  // >= 90
+  EXPECT_FALSE(engine.setAccumulateParams(bad, why));
+  bad = engine.accumulateParams();
+  bad.obstacle_prob_min = 1.5;  // outside [0, 1]
+  EXPECT_FALSE(engine.setAccumulateParams(bad, why));
+  EXPECT_DOUBLE_EQ(engine.accumulateParams().max_range, kMaxRange);
   EXPECT_TRUE(grids_equal(before, sample_grid(engine)));
 
-  EXPECT_TRUE(engine.setProjectionParams(80.0, 5.0, why)) << why;  // valid path works
-  EXPECT_DOUBLE_EQ(engine.maxRange(), 80.0);
+  auto good = engine.accumulateParams();
+  good.max_range = 80.0;
+  good.min_grazing_angle_deg = 5.0;
+  EXPECT_TRUE(engine.setAccumulateParams(good, why)) << why;  // valid path works
+  EXPECT_DOUBLE_EQ(engine.accumulateParams().max_range, 80.0);
 }
 
 int main(int argc, char ** argv)
