@@ -36,8 +36,8 @@ issue: 1
 **Verdict**: approve-with-suggestions
 
 ### Findings
-- [ ] (must-fix) `res`/`half_extent` are `OccupancyBuffer` construction-time geometry, not `setParams`-able — engine must reconstruct on change, or make them CLI-only for Milestone A (recommended). — `plan.md` Approach step 3–4
-- [ ] (suggestion) `OccupancyBuffer::validate()` covers only `OccupancyParams`; `AccumulateParams` knobs (max_range, min_grazing_angle, res, half_extent) need the engine's own bounds-check (mirror driver `val>0`). — `plan.md` step 3/4
-- [ ] (suggestion) Fidelity wording: `accumulate_frame` is boat-centred (matches the #23 offline core / bag_to_costmap_video), not the camera-centred live SeaSurfaceLayer; soften "exactly the live accumulation order" / "offline result matches the boat". — `plan.md` step 3, Principles
-- [ ] (suggestion) `render_new`/`colour_logodds` are NOT exported (tool anonymous namespace) — tuner copies ~15 lines of rendering; clarify "algorithm reused, rendering reproduced" + palette-drift note. — `plan.md` Context/step 3
-- [ ] (suggestion) Note per-frame TF-lookup-failure handling (early stamps; mirror driver) and `plane_z=0` in `bizzy/map_tide`. — `plan.md` step 2
+- [x] (must-fix) `res`/`half_extent` are `OccupancyBuffer` construction-time geometry, not `setParams`-able — engine must reconstruct on change, or make them CLI-only for Milestone A (recommended). — `plan.md` Approach step 3–4
+- [x] (suggestion) `OccupancyBuffer::validate()` covers only `OccupancyParams`; `AccumulateParams` knobs (max_range, min_grazing_angle, res, half_extent) need the engine's own bounds-check (mirror driver `val>0`). — `plan.md` step 3/4
+- [x] (suggestion) Fidelity wording: `accumulate_frame` is boat-centred (matches the #23 offline core / bag_to_costmap_video), not the camera-centred live SeaSurfaceLayer; soften "exactly the live accumulation order" / "offline result matches the boat". — `plan.md` step 3, Principles
+- [x] (suggestion) `render_new`/`colour_logodds` are NOT exported (tool anonymous namespace) — tuner copies ~15 lines of rendering; clarify "algorithm reused, rendering reproduced" + palette-drift note. — `plan.md` Context/step 3
+- [x] (suggestion) Note per-frame TF-lookup-failure handling (early stamps; mirror driver) and `plane_z=0` in `bizzy/map_tide`. — `plan.md` step 2

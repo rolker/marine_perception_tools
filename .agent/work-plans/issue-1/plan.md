@@ -11,17 +11,25 @@ placeholder `sea_surface_tuner` (empty `QMainWindow`), Qt5 with
 version-agnostic CMake. This plan adds the `sea_surface_segmentation`
 dependency and the actual MVP tuner on top.
 
-The real algorithm is reused via the exported headers from
-`unh_marine_perception#23` — no reimplementation:
+The **algorithm** is reused via the exported headers from
+`unh_marine_perception#23` — no reimplementation of the marking logic:
 - `occupancy_buffer.hpp` — `OccupancyBuffer` + `OccupancyParams`
   (`hit_log_odds`, `miss_log_odds`, `clamp`, `lethal_threshold`,
-  `decay_half_life_s`); `setParams`/`validate`/`clear`/`logOdds`.
+  `decay_half_life_s`); `setParams`/`validate`/`clear`/`logOdds`. Note
+  `validate()` checks **only `OccupancyParams`** — the `AccumulateParams`
+  knobs below have no library validator (the driver does its own `>0` checks).
 - `occupancy_accumulator.hpp` — `accumulate_frame()` + `AccumulateParams`
   (`max_range`, `res`, `half_extent`, `plane_z`, `min_grazing_angle_deg`).
+  `res`/`half_extent` define the iteration **window geometry**, which is fixed
+  at `OccupancyBuffer` construction (`setGeometry`) — they are *not*
+  runtime-`setParams`-able (see step 3).
 - `segments_projection.hpp` — `project_observations_inverse`.
 - `tools/bag_to_costmap_video.cpp` — the existing offline driver; its
-  two-pass bag read (pass 1: TF buffer + camera models; pass 2: replay) and
-  its `render_new()` (log-odds → BGR panel) are the template to extract.
+  two-pass bag read (pass 1: TF buffer + camera models; pass 2: replay) is the
+  template to extract. Its `render_new()`/`colour_logodds()` are in the tool's
+  **anonymous namespace (not exported)**, so the grid rendering is *reproduced*
+  (~15 lines copied), not linked — a cosmetic palette that can drift from the
+  tool independently of the (reused) algorithm.
 
 **Open technical items from the issue — resolved by reading the driver:**
 - The segmentation that drives the costmap is a **raw `rgb8` `Image`** on
@@ -76,15 +84,37 @@ the #22 coupling above:
    requested `[start_s, end_s]` window (the issue's "frame window preloaded in
    memory"). `PreparedFrame{ stamp_s, cv::Mat mask_rgb8, cv::Vec3d origin,
    cv::Matx33d rot, double boat_x, boat_y }`. No occupancy logic here.
+   - **TF-lookup failures** (early frames before TF is populated, or a gap) are
+     handled like the driver: **skip** that frame (don't abort the load, don't
+     emit a `PreparedFrame` with stale geometry). Hard errors — no
+     `oak_forward` segmentation/`camera_info` topic at all, or zero usable
+     frames — fail loudly.
+   - **`plane_z`**: the world frame is `bizzy/map_tide` (tide-corrected), so the
+     water plane is `plane_z = 0` — the driver's convention; the loader sets it
+     once, not per frame.
 
 3. **`resim_engine` (pure: sea_surface_segmentation + OpenCV + grid_map, no Qt/no
    ROS-msgs)** — `src/resim_engine.{hpp,cpp}`. Owns an `OccupancyBuffer`,
-   `OccupancyParams`, `AccumulateParams`. Given the prepared frames and a target
-   index `k`, **`resimulateTo(k)`** does `clear()` then replays frames `0..k`
-   through `accumulate_frame()` — path-dependent, exactly the live accumulation
-   order. `renderGrid(...)` reproduces `render_new()` (boat-centred, N-up,
-   log-odds palette) into a `cv::Mat`. `setOccupancyParams`/`setAccumulateParams`
-   call `OccupancyBuffer::validate()` first and re-sim on the current index.
+   `OccupancyParams`, `AccumulateParams`. Constructed with the fixed **window
+   geometry** (`res`, `half_extent`) — these size the `OccupancyBuffer` and are
+   **not** live-tunable (changing them would require rebuilding the buffer), so
+   they are set once from CLI args (see step 5), not from the dock. Given the
+   prepared frames and a target index `k`, **`resimulateTo(k)`** does `clear()`
+   then replays frames `0..k` through `accumulate_frame()` — path-dependent,
+   reproducing the **#23 shared offline core** (`bag_to_costmap_video`)
+   accumulation order. (Fidelity caveat: `accumulate_frame` iterates a
+   **boat-centred** window; the *live* `SeaSurfaceLayer` centres iteration on the
+   camera instead — so the tuner matches the offline core exactly, and the live
+   layer up to that small window-centre offset.) `renderGrid(...)` reproduces
+   `render_new()` (boat-centred, N-up, log-odds palette) into a `cv::Mat`.
+   - `setOccupancyParams(p)` — runs `OccupancyBuffer::validate(p)` first; on pass,
+     `setParams` + re-sim on the current index; on fail, returns the reason
+     (no state change).
+   - `setProjectionParams(max_range, min_grazing_angle_deg)` — the live-tunable
+     `AccumulateParams` knobs (projection only, no buffer rebuild). The library
+     has **no validator** for these, so the engine bounds-checks them itself
+     (`max_range > 0`; `0 ≤ min_grazing_angle_deg < 90`), mirroring the driver,
+     then re-sims. Geometry (`res`/`half_extent`) is intentionally not settable.
 
 4. **Qt UI** — extend `MainWindow`. Two image panes side-by-side
    (`oak_forward` segmentation `rgb8` | re-sim lethal grid) via a `cv::Mat`→
@@ -95,9 +125,11 @@ the #22 coupling above:
    `validate()`) surface a status-bar message and revert the spinbox. The
    table-driven design is deliberate — Milestone B swaps the knob set for #22's
    model by editing the table, not the widget code.
-   - **Milestone A knob set (#22-stable only):** `decay_half_life_s`,
-     `lethal_threshold`, `max_range`, `min_grazing_angle_deg`, window
-     `res`/`half_extent`. (`hit_log_odds`/`miss_log_odds`/`clamp` are
+   - **Milestone A dock knobs (#22-stable, live-tunable only):**
+     `decay_half_life_s`, `lethal_threshold` (`OccupancyParams`, validator-backed)
+     and `max_range`, `min_grazing_angle_deg` (`AccumulateParams`, engine
+     bounds-checked). Window `res`/`half_extent` are **CLI-only** (construction
+     geometry, not live-tunable). (`hit_log_odds`/`miss_log_odds`/`clamp` are
      intentionally *omitted* now — #22-P1 removes/replaces them; exposing them
      would tune soon-dead knobs.)
    - **Milestone B (after #22-P1):** add `obstacle_ceiling`, `clear_floor`,
@@ -113,7 +145,9 @@ the #22 coupling above:
    equivalence: `resimulateTo(k)` matches a direct fresh `accumulate_frame` loop;
    (c) a param change followed by re-sim equals constructing the buffer fresh
    with the new params (no residue from the prior run — guards the `clear()`);
-   (d) `validate()` rejection leaves the engine state unchanged.
+   (d) rejection paths leave engine state unchanged — both `setOccupancyParams`
+   with a `validate()`-failing value and `setProjectionParams` with an
+   out-of-bounds `max_range`/`min_grazing_angle_deg`.
 
 ## Files to Change
 
@@ -140,7 +174,7 @@ the #22 coupling above:
 | Test what breaks | The path-dependent re-sim + param-change `clear()` is the breakable logic; covered by the engine GTest. UI is thin and excluded (no display in CI). |
 | A change includes its consequences | Adds the `sea_surface_segmentation` cross-layer dep (ui→sensors, valid); README + `.agents/README.md` updated in the same PR; CI already builds+lints. |
 | Capture decisions | Qt5/version-agnostic rationale already in CMake + README; any non-obvious UI pivot → `## Implementation Notes`. |
-| Primary framework first, portability where free | Qt5 (Jazzy) now; version-agnostic CMake keeps the Qt6 path free. Reuse the real algorithm rather than fork it — offline result matches the boat. |
+| Primary framework first, portability where free | Qt5 (Jazzy) now; version-agnostic CMake keeps the Qt6 path free. Reuse the real algorithm rather than fork it — the re-sim reproduces the #23 offline core exactly (and the live layer up to the boat-vs-camera window-centre offset noted in step 3). |
 
 ## ADR Compliance
 
@@ -191,3 +225,10 @@ Two stacked PRs. **PR-A** (now) ~450–600 lines incl. test. **PR-B** (after
   (Milestone A); the #22 knob set lands after #22-P1 (Milestone B). The
   param dock is built table-driven specifically so Milestone B is a data edit,
   not a UI rewrite. Decision confirmed by Roland.
+- **Window geometry is CLI-only (plan-review finding 1).** `res`/`half_extent`
+  size the `OccupancyBuffer` at construction (`setGeometry`); there's no resize,
+  so making them live dock knobs would force a buffer rebuild on every edit.
+  They're set once from CLI args instead. The live dock holds only genuinely
+  `setParams`-able / projection knobs. `OccupancyBuffer::validate()` covers only
+  `OccupancyParams`, so the engine bounds-checks the `AccumulateParams` knobs
+  (`max_range`, `min_grazing_angle_deg`) itself.
