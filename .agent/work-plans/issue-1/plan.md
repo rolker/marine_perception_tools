@@ -71,9 +71,10 @@ the #22 coupling above:
   the step that makes it a #22 *tuning* harness.
 
 1. **Add dependencies** — `package.xml`/`CMakeLists.txt`: `sea_surface_segmentation`
-   (exported headers), `grid_map_core`, `image_geometry`, `cv_bridge`,
-   `rosbag2_cpp`, `sensor_msgs`, `nav_msgs`, `tf2`, `tf2_msgs`,
-   `builtin_interfaces`, `libopencv-dev`. Keep Qt5 wiring as-is.
+   (exported headers), `grid_map_core`, `image_geometry`, `cv_bridge`, `rclcpp`,
+   `rosbag2_cpp`, `sensor_msgs`, `tf2`, `tf2_msgs`, `builtin_interfaces`,
+   `libopencv-dev`. (`nav_msgs` is *not* needed in Milestone A — it's only for the
+   recorded-costmap overlay, deferred to "Full".) Keep Qt5 wiring as-is.
 
 2. **`bag_loader` (ROS, no Qt)** — `src/bag_loader.{hpp,cpp}`. Extract the
    driver's two passes for the **forward camera only**: pass 1 fills a

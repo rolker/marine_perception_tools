@@ -59,8 +59,12 @@ int main(int argc, char ** argv)
   const double max_range = arg_double(argc, argv, "--max-range", 150.0);
   const double min_grazing = arg_double(argc, argv, "--min-grazing-deg", 0.0);
 
-  if (!(window_m > 0.0) || !(res > 0.0)) {
-    std::fprintf(stderr, "error: --window-m and --res must be > 0\n");
+  if (!(window_m > 0.0) || !(res > 0.0) || !(max_range > 0.0)) {
+    std::fprintf(stderr, "error: --window-m, --res, and --max-range must be > 0\n");
+    return 1;
+  }
+  if (!(min_grazing >= 0.0 && min_grazing < 90.0)) {
+    std::fprintf(stderr, "error: --min-grazing-deg must be in [0, 90)\n");
     return 1;
   }
 

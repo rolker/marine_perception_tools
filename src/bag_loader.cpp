@@ -107,6 +107,10 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
     std::numeric_limits<int64_t>::max() :
     bag_start_ns + static_cast<int64_t>(opts.end_s * 1e9);
 
+  // Window gating uses bag receive time (recv_timestamp); the frame stamp and TF
+  // lookup below use the image header stamp. These differ by recording latency —
+  // faithful to the reference driver (bag_to_costmap_video.cpp); --start-s/--end-s
+  // are documented as "from bag start" (receive time).
   std::size_t tf_skipped = 0;
   while (reader.has_next()) {
     auto bag_msg = reader.read_next();
@@ -114,8 +118,11 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
     if (bag_msg->recv_timestamp > end_ns) {break;}
     if (bag_msg->topic_name != seg_topic) {continue;}
 
+    // The camera model is already pinned to the forward camera by topic name; the
+    // TF lookup uses `optical_frame` (the camera_info frame_id). We don't filter on
+    // the image's own frame_id — a republished/differing image frame_id would
+    // otherwise silently drop every frame.
     auto img_msg = deserialize<sensor_msgs::msg::Image>(bag_msg);
-    if (img_msg.header.frame_id != optical_frame) {continue;}
 
     cv::Mat mask;
     try {

@@ -79,10 +79,13 @@ void ReSimEngine::seekTo(std::size_t k)
       accumulate(i);
     }                                                                   // incremental
   } else {
+    // rewind — full replay. clear() also re-seeds the decay clock, which is what
+    // makes the replay's decay sequence identical to a forward run (relied on by
+    // the IncrementalEqualsReplay test).
     buffer_.clear();
     for (std::size_t i = 0; i <= k; ++i) {
       accumulate(i);
-    }                                                        // rewind — full replay
+    }
   }
   current_ = k;
 }
