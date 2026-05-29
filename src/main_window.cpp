@@ -14,14 +14,145 @@
 
 #include "main_window.hpp"
 
+#include <QDockWidget>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPixmap>
+#include <QSlider>
+#include <QStatusBar>
+#include <QString>
+#include <QVBoxLayout>
+#include <QWidget>
+
+#include <algorithm>
+#include <string>
+
+#include "cv_qt.hpp"
+
 namespace marine_perception_tools
 {
 
-MainWindow::MainWindow(QWidget * parent)
-: QMainWindow(parent)
+MainWindow::MainWindow(ReSimEngine & engine, QWidget * parent)
+: QMainWindow(parent), engine_(engine)
 {
   setWindowTitle("sea_surface_tuner");
-  resize(1280, 720);
+
+  seg_label_ = new QLabel(this);
+  seg_label_->setAlignment(Qt::AlignCenter);
+  seg_label_->setMinimumSize(320, 240);
+  grid_label_ = new QLabel(this);
+  grid_label_->setAlignment(Qt::AlignCenter);
+  grid_label_->setMinimumSize(panel_px_, panel_px_);
+
+  auto * images = new QHBoxLayout;
+  images->addWidget(seg_label_, 1);
+  images->addWidget(grid_label_, 1);
+
+  scrubber_ = new QSlider(Qt::Horizontal, this);
+  scrubber_->setRange(0, static_cast<int>(engine_.frameCount()) - 1);
+  scrubber_->setValue(0);
+  connect(scrubber_, &QSlider::valueChanged, this, &MainWindow::onSeek);
+
+  auto * central = new QWidget(this);
+  auto * layout = new QVBoxLayout(central);
+  layout->addLayout(images, 1);
+  layout->addWidget(scrubber_);
+  setCentralWidget(central);
+
+  buildParamDock();
+  refreshViews();
+}
+
+void MainWindow::buildParamDock()
+{
+  // Each row: {label, getter, setter}. Setter copies current params, mutates one
+  // field, applies via the engine (which validates / bounds-checks and re-sims).
+  // Milestone A exposes only the #22-stable, live-tunable knobs.
+  knobs_.push_back({"decay_half_life_s",
+      [this] {return engine_.occupancyParams().decay_half_life_s;},
+      [this](double v, std::string & why) {
+        auto p = engine_.occupancyParams();
+        p.decay_half_life_s = v;
+        return engine_.setOccupancyParams(p, why);
+      }, nullptr});
+  knobs_.push_back({"lethal_threshold",
+      [this] {return engine_.occupancyParams().lethal_threshold;},
+      [this](double v, std::string & why) {
+        auto p = engine_.occupancyParams();
+        p.lethal_threshold = v;
+        return engine_.setOccupancyParams(p, why);
+      }, nullptr});
+  knobs_.push_back({"max_range",
+      [this] {return engine_.maxRange();},
+      [this](double v, std::string & why) {
+        return engine_.setProjectionParams(v, engine_.minGrazingAngleDeg(), why);
+      }, nullptr});
+  knobs_.push_back({"min_grazing_angle_deg",
+      [this] {return engine_.minGrazingAngleDeg();},
+      [this](double v, std::string & why) {
+        return engine_.setProjectionParams(engine_.maxRange(), v, why);
+      }, nullptr});
+
+  auto * panel = new QWidget;
+  auto * form = new QFormLayout(panel);
+  for (auto & knob : knobs_) {
+    auto * box = new QDoubleSpinBox(panel);
+    box->setRange(0.0, 1000.0);
+    box->setDecimals(3);
+    box->setSingleStep(0.1);
+    box->setValue(knob.get());
+    connect(box, qOverload<double>(&QDoubleSpinBox::valueChanged),
+      this, &MainWindow::onParamEdited);
+    form->addRow(QString::fromStdString(knob.label), box);
+    knob.box = box;
+  }
+
+  auto * dock = new QDockWidget("Parameters", this);
+  dock->setWidget(panel);
+  addDockWidget(Qt::RightDockWidgetArea, dock);
+}
+
+void MainWindow::onSeek(int index)
+{
+  engine_.seekTo(static_cast<std::size_t>(std::max(0, index)));
+  refreshViews();
+}
+
+void MainWindow::onParamEdited()
+{
+  auto * box = qobject_cast<QDoubleSpinBox *>(sender());
+  if (box == nullptr) {return;}
+  for (auto & knob : knobs_) {
+    if (knob.box != box) {continue;}
+    std::string why;
+    if (knob.apply(box->value(), why)) {
+      refreshViews();
+    } else {
+      statusBar()->showMessage(QString::fromStdString(knob.label + ": " + why), 5000);
+      box->blockSignals(true);   // revert without re-triggering this slot
+      box->setValue(knob.get());
+      box->blockSignals(false);
+    }
+    return;
+  }
+}
+
+void MainWindow::refreshViews()
+{
+  const QImage seg = cvMatToQImage(engine_.currentMask(), /*bgr=*/false);
+  seg_label_->setPixmap(
+    QPixmap::fromImage(seg).scaledToHeight(panel_px_, Qt::SmoothTransformation));
+
+  const QImage grid = cvMatToQImage(engine_.renderGrid(panel_px_), /*bgr=*/true);
+  grid_label_->setPixmap(QPixmap::fromImage(grid));
+
+  statusBar()->showMessage(
+    QString("frame %1 / %2   t=%3 s")
+    .arg(engine_.currentIndex())
+    .arg(engine_.frameCount() - 1)
+    .arg(engine_.currentStamp(), 0, 'f', 1));
 }
 
 }  // namespace marine_perception_tools

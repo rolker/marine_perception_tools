@@ -17,19 +17,54 @@
 
 #include <QMainWindow>
 
+#include <functional>
+#include <string>
+#include <vector>
+
+#include "resim_engine.hpp"
+
+class QDoubleSpinBox;
+class QLabel;
+class QSlider;
+
 namespace marine_perception_tools
 {
 
-// Top-level window for the sea_surface_tuner. A placeholder shell at this
-// stage; the bag-replay timeline, camera/segmentation/costmap panes, and
-// parameter widgets described in marine_perception_tools#1 are layered in by
-// the MVP that follows this skeleton.
+// The sea_surface_tuner main window: a forward-camera segmentation pane beside
+// the re-simulated costmap, a frame scrubber, and a parameter dock. Editing a
+// knob re-simulates and refreshes the costmap; scrubbing seeks the engine.
 class MainWindow : public QMainWindow
 {
   Q_OBJECT
 
 public:
-  explicit MainWindow(QWidget * parent = nullptr);
+  explicit MainWindow(ReSimEngine & engine, QWidget * parent = nullptr);
+
+private slots:
+  void onSeek(int index);
+  void onParamEdited();
+
+private:
+  // One row of the data-driven param dock. Milestone B (after
+  // unh_marine_perception#22-P1) swaps the knob set by editing the table that
+  // builds these — not the widget code.
+  struct Knob
+  {
+    std::string label;
+    std::function<double()> get;                       // current value
+    std::function<bool(double, std::string &)> apply;  // false + why on reject
+    QDoubleSpinBox * box = nullptr;
+  };
+
+  void buildParamDock();
+  void refreshViews();
+
+  ReSimEngine & engine_;
+  QLabel * seg_label_ = nullptr;
+  QLabel * grid_label_ = nullptr;
+  QSlider * scrubber_ = nullptr;
+  int panel_px_ = 480;
+  std::vector<Knob> knobs_;
 };
 
 }  // namespace marine_perception_tools

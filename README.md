@@ -22,11 +22,37 @@ Motivated by deployment
 (small-buoy marking under dark skies) and doubles as the validation harness for
 [rolker/unh_marine_perception#22](https://github.com/rolker/unh_marine_perception/issues/22).
 
-**Status: skeleton.** The current executable is a placeholder Qt window. The
-bag-replay timeline, camera/segmentation/costmap panes, parameter widgets, and
-path-dependent re-simulation described in
-[#1](https://github.com/rolker/marine_perception_tools/issues/1) are layered in
-on top of this foundation.
+### Status — Milestone A (forward-camera viewer + live re-tuning)
+
+Implemented: the forward camera (`oak_forward`) segmentation is replayed beside
+the re-simulated costmap, with a frame scrubber and a parameter dock. Editing a
+knob re-simulates the loaded window and refreshes the costmap.
+
+```bash
+ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
+    [--start-s S] [--end-s S] [--window-m 120] [--res 0.25] \
+    [--max-range 150] [--min-grazing-deg 0]
+```
+
+- **Panes**: `oak_forward` segmentation (`rgb8`) | re-simulated lethal grid
+  (boat-centred, N-up, log-odds palette).
+- **Scrubber**: seek through the loaded frame window (forward seeks accumulate
+  incrementally; rewinds re-simulate from the window start).
+- **Parameter dock** (Milestone-A, #22-stable knobs): `decay_half_life_s`,
+  `lethal_threshold`, `max_range`, `min_grazing_angle_deg`. Invalid values are
+  rejected (status bar) and reverted.
+
+The segmentation that drives the costmap is the raw `rgb8` `Image` on
+`/bizzy/sensors/cameras/oak_forward/segmentation` (no ffmpeg decode); camera pose
+and boat pose are resolved from TF (`bizzy/map_tide` → optical / `base_link`).
+
+**Milestone B** (after
+[rolker/unh_marine_perception#22](https://github.com/rolker/unh_marine_perception/issues/22)
+Phase 1 lands its new parameter model): the dock's knob table extends to #22's
+per-pixel-log-odds / asymmetric-clamp / reflex-gate parameters, making this a
+#22 *tuning* harness. The 4-camera mosaic and recorded-costmap overlay remain
+future work. See
+[#1](https://github.com/rolker/marine_perception_tools/issues/1).
 
 ## Qt version
 
