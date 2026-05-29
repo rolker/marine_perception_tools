@@ -33,10 +33,34 @@ The real algorithm is reused via the exported headers from
   world frame `bizzy/map_tide`, boat `bizzy/base_link`; forward camera
   `oak_forward`. All present in the bag and consumed by the existing driver.
 
+**Coupling to `unh_marine_perception#22` (decided sequencing).** #22 (plan PR
+#25, not yet implemented) rewrites the marking algorithm and its *parameter
+model*: it drops the argmax gate for per-pixel softmax log-odds
+(`Δ=clamp(log(R/(255−R)))`), so the fixed `hit_log_odds`/`miss_log_odds`
+increments stop being the vote source; splits the symmetric `clamp` into
+`obstacle_ceiling`/`clear_floor`; adds `reflex_tau`; and (P2) adds a graded cost
+ramp (`clear_thresh`/`lethal_thresh`). The tuner is #22's validation harness, so
+its full param dock must target #22's model — but #22 isn't built yet.
+**Decision: build the algorithm-agnostic pipeline now; the param dock for the
+#22-specific knobs lands after #22-P1.** The split below reflects this. The
+pipeline (`bag_loader`, `resim_engine`, UI shell, scrubber, panes) reuses
+`accumulate_frame`/`render_new` whose *signatures* are stable across #22 (only
+the param structs + internals change), so none of it is throwaway.
+
 ## Approach
 
 Mirror the live layer's praised separation: a Qt-free, ROS-free **re-sim core**
-+ a thin ROS **bag loader** + a Qt **UI**.
++ a thin ROS **bag loader** + a Qt **UI**. Delivered as two stacked PRs driven by
+the #22 coupling above:
+
+- **Milestone A (PR-A, now):** pipeline + replay/re-sim viewer + a param dock for
+  only the **#22-stable knobs** (`decay_half_life_s`, `lethal_threshold`,
+  `max_range`, `min_grazing_angle_deg`, window `res`/`half_extent`), with re-sim
+  on change. A fully functional bag-replay costmap viewer.
+- **Milestone B (PR-B, after #22-P1):** extend the (data-driven) dock to #22's
+  model — drop `hit/miss/clamp` as separate knobs, add
+  `obstacle_ceiling`/`clear_floor`/`reflex_tau` (and P2 ramp thresholds). This is
+  the step that makes it a #22 *tuning* harness.
 
 1. **Add dependencies** — `package.xml`/`CMakeLists.txt`: `sea_surface_segmentation`
    (exported headers), `grid_map_core`, `image_geometry`, `cv_bridge`,
@@ -65,10 +89,19 @@ Mirror the live layer's praised separation: a Qt-free, ROS-free **re-sim core**
 4. **Qt UI** — extend `MainWindow`. Two image panes side-by-side
    (`oak_forward` segmentation `rgb8` | re-sim lethal grid) via a `cv::Mat`→
    `QImage` helper (`src/cv_qt.hpp`). A `QSlider` scrubber over frame index
-   (drives `resimulateTo`). A parameter dock: one `QDoubleSpinBox` per knob
-   (5 occupancy + `max_range`, `min_grazing_angle_deg`); editing re-sims and
-   refreshes the grid pane. Invalid params (rejected by `validate()`) surface a
-   status-bar message and revert the spinbox.
+   (drives `resimulateTo`). **Data-driven param dock**: a table of
+   `{label, getter, setter, range}` rows renders one `QDoubleSpinBox` each;
+   editing re-sims and refreshes the grid pane; invalid params (rejected by
+   `validate()`) surface a status-bar message and revert the spinbox. The
+   table-driven design is deliberate — Milestone B swaps the knob set for #22's
+   model by editing the table, not the widget code.
+   - **Milestone A knob set (#22-stable only):** `decay_half_life_s`,
+     `lethal_threshold`, `max_range`, `min_grazing_angle_deg`, window
+     `res`/`half_extent`. (`hit_log_odds`/`miss_log_odds`/`clamp` are
+     intentionally *omitted* now — #22-P1 removes/replaces them; exposing them
+     would tune soon-dead knobs.)
+   - **Milestone B (after #22-P1):** add `obstacle_ceiling`, `clear_floor`,
+     `reflex_tau` (+ P2 ramp thresholds) as table rows.
 
 5. **CLI entry** — `main.cpp` parses `<bag_uri> [--start-s] [--end-s] [--res]
    [--window-m] [--max-range]` (mirror the driver's flags), loads frames, hands
@@ -91,17 +124,19 @@ Mirror the live layer's praised separation: a Qt-free, ROS-free **re-sim core**
 | `src/bag_loader.hpp` / `.cpp` | New — two-pass forward-camera bag → `vector<PreparedFrame>` |
 | `src/resim_engine.hpp` / `.cpp` | New — `OccupancyBuffer` wrapper, `resimulateTo`, `renderGrid`, param setters |
 | `src/cv_qt.hpp` | New — `cv::Mat`(BGR/rgb8) → `QImage`/`QPixmap` helper |
-| `src/main_window.hpp` / `.cpp` | Two image panes, scrubber, param dock, status-bar validation feedback |
+| `src/main_window.hpp` / `.cpp` | Two image panes, scrubber, **data-driven** param dock (Milestone-A knobs), status-bar validation feedback |
 | `src/main.cpp` | CLI arg parse → load frames → construct engine + window |
 | `test/test_resim_engine.cpp` | New — GTest for the re-sim core |
-| `README.md` | Replace "skeleton" status with MVP usage + screenshot-less feature list |
+| `README.md` | Replace "skeleton" status with viewer usage + feature list |
 | `.agents/README.md` | Update package inventory/layout to the real modules |
+
+(Milestone B, after #22-P1, edits the dock's knob table + `README` only.)
 
 ## Principles Self-Check
 
 | Principle | Consideration |
 |---|---|
-| Only what's needed | MVP = forward camera, the 7 listed knobs, seg+grid panes, scrubber, re-sim. 4-camera mosaic, recorded-costmap overlay, #22 gate knobs, param export → deferred to "Full" (issue already scopes this). |
+| Only what's needed | Milestone A = forward camera, seg+grid panes, scrubber, re-sim, dock for #22-*stable* knobs only. 4-camera mosaic, recorded-costmap overlay, param export → "Full". The #22 gate/grading knobs deferred to Milestone B (after #22-P1) so we don't build a dock for params #22 is removing. |
 | Test what breaks | The path-dependent re-sim + param-change `clear()` is the breakable logic; covered by the engine GTest. UI is thin and excluded (no display in CI). |
 | A change includes its consequences | Adds the `sea_surface_segmentation` cross-layer dep (ui→sensors, valid); README + `.agents/README.md` updated in the same PR; CI already builds+lints. |
 | Capture decisions | Qt5/version-agnostic rationale already in CMake + README; any non-obvious UI pivot → `## Implementation Notes`. |
@@ -124,6 +159,7 @@ Mirror the live layer's praised separation: a Qt-free, ROS-free **re-sim core**
 | Reuse `accumulate_frame`/`render_new` | Stay in lockstep with `sea_surface_segmentation` exported API; if #23 headers change signature, the tuner breaks at build | Yes — pinned to jazzy; CI catches |
 | README "skeleton" status | `.agents/README.md` package inventory | Yes |
 | New `oak_forward` assumptions | If a bag lacks `oak_forward` seg/camera_info/TF, loader must fail loudly (not silently empty) | Yes — explicit error |
+| #22-P1 lands (param model changes) | Dock knob table (Milestone B), README; `accumulate_frame`/`render_new` callers pick up new behavior automatically | Milestone B — table-driven dock makes it a small edit |
 
 ## Open Questions
 
@@ -132,13 +168,26 @@ Mirror the live layer's praised separation: a Qt-free, ROS-free **re-sim core**
   `bizzy/map_tide`→`base_link` is needed to eyeball the tuner. Confirm a usable
   bag path (e.g. under `~/data/logs/bizzy*`) before the verify step. Does not
   block implementation.
-- **Stacked vs single PR.** This is implementable as one PR, or split: PR-A =
-  `bag_loader` + `resim_engine` + a headless `--dump-frame N out.png` CLI
-  (fully testable, proves the #23 reuse); PR-B = the Qt UI on top. Recommend
-  **single PR** unless review prefers the split — flagging per
-  "surface scope deferrals."
+- ~~Stacked vs single PR~~ **Resolved (user, 2026-05-29):** stacked, driven by
+  the #22 coupling — **Milestone A (PR-A)** = pipeline + viewer + #22-stable dock,
+  buildable now; **Milestone B (PR-B)** = #22 knob set, after #22-P1 is
+  implemented.
+- **Milestone B depends on `unh_marine_perception#22` Phase 1** (plan PR #25)
+  being implemented and the new `OccupancyParams`/`AccumulateParams` fields
+  landing on `jazzy`. Track #25; PR-B starts when those headers update.
 
 ## Estimated Scope
 
-Single PR (~500–700 lines incl. test). Cleanly splittable into a headless-core
-PR + a Qt-UI PR if preferred.
+Two stacked PRs. **PR-A** (now) ~450–600 lines incl. test. **PR-B** (after
+#22-P1) small — a dock knob-table edit + README.
+
+## Implementation Notes
+
+- **#22 sequencing (2026-05-29).** `unh_marine_perception#22` (plan PR #25) was
+  found mid-planning to replace the tuner's parameter model (per-pixel softmax
+  log-odds, asymmetric clamp, reflex gate, graded ramp). Rather than build a
+  dock for the soon-removed `hit/miss/clamp` knobs, the work was split: the
+  algorithm-agnostic pipeline + viewer + a dock for #22-stable knobs lands now
+  (Milestone A); the #22 knob set lands after #22-P1 (Milestone B). The
+  param dock is built table-driven specifically so Milestone B is a data edit,
+  not a UI rewrite. Decision confirmed by Roland.
