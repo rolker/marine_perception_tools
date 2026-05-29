@@ -65,10 +65,14 @@ the #22 coupling above:
   only the **#22-stable knobs** (`decay_half_life_s`, `lethal_threshold`,
   `max_range`, `min_grazing_angle_deg`, window `res`/`half_extent`), with re-sim
   on change. A fully functional bag-replay costmap viewer.
-- **Milestone B (PR-B, after #22-P1):** extend the (data-driven) dock to #22's
-  model — drop `hit/miss/clamp` as separate knobs, add
-  `obstacle_ceiling`/`clear_floor`/`reflex_tau` (and P2 ramp thresholds). This is
-  the step that makes it a #22 *tuning* harness.
+- **Milestone B (PR-B, after #22 — now merged, PR #25):** extend the
+  (data-driven) dock to #22's model. The merged `OccupancyParams` replaced
+  `hit/miss/clamp` with **`obstacle_clamp`, `clear_floor`, `free_threshold`**
+  (+ existing `lethal_threshold`, `decay_half_life_s`); `AccumulateParams` added
+  **`obstacle_prob_min`, `max_evidence_step`**. (No `reflex_tau` in the costmap
+  params — the reflex gate lives in `segments_to_pointcloud`, outside the
+  buffer/accumulator the tuner drives.) Adding these rows makes it a #22 *tuning*
+  harness.
 
 1. **Add dependencies** — `package.xml`/`CMakeLists.txt`: `sea_surface_segmentation`
    (exported headers), `grid_map_core`, `image_geometry`, `cv_bridge`, `rclcpp`,
@@ -133,8 +137,9 @@ the #22 coupling above:
      geometry, not live-tunable). (`hit_log_odds`/`miss_log_odds`/`clamp` are
      intentionally *omitted* now — #22-P1 removes/replaces them; exposing them
      would tune soon-dead knobs.)
-   - **Milestone B (after #22-P1):** add `obstacle_ceiling`, `clear_floor`,
-     `reflex_tau` (+ P2 ramp thresholds) as table rows.
+   - **Milestone B (after #22, merged):** add `obstacle_clamp`, `clear_floor`,
+     `free_threshold` (`OccupancyParams`) and `obstacle_prob_min`,
+     `max_evidence_step` (`AccumulateParams`) as table rows.
 
 5. **CLI entry** — `main.cpp` parses `<bag_uri> [--start-s] [--end-s] [--res]
    [--window-m] [--max-range]` (mirror the driver's flags), loads frames, hands

@@ -197,11 +197,11 @@ TEST(ReSimEngine, RejectsInvalidOccupancyParamsWithoutStateChange)
   const auto before = sample_grid(engine);
 
   sea_surface_segmentation::OccupancyParams bad;
-  bad.hit_log_odds = -1.0;  // must be > 0
+  bad.obstacle_clamp = -1.0;  // must be finite and > 0
   std::string why;
   EXPECT_FALSE(engine.setOccupancyParams(bad, why));
   EXPECT_FALSE(why.empty());
-  EXPECT_DOUBLE_EQ(engine.occupancyParams().hit_log_odds, 0.85);  // unchanged default
+  EXPECT_DOUBLE_EQ(engine.occupancyParams().obstacle_clamp, 5.0);  // unchanged default
   EXPECT_TRUE(grids_equal(before, sample_grid(engine)));
 }
 
