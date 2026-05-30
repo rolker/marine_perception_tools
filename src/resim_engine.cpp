@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <utility>
 
 #include "sea_surface_segmentation/occupancy_accumulator.hpp"
 
@@ -43,9 +44,9 @@ cv::Vec3b colour_logodds(double v, double threshold)
 }  // namespace
 
 ReSimEngine::ReSimEngine(
-  const LoadedBag & bag, double window_m, double res, double max_range,
+  LoadedBag bag, double window_m, double res, double max_range,
   const sea_surface_segmentation::OccupancyParams & occ, double min_grazing_angle_deg)
-: bag_(bag),
+: bag_(std::move(bag)),
   occ_(occ),
   buffer_(window_m, window_m, res, grid_map::Position(0.0, 0.0), occ)
 {

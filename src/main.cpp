@@ -13,15 +13,14 @@
 // limitations under the License.
 
 #include <QApplication>
+#include <QString>
 
 #include <cstdio>
 #include <cstdlib>
-#include <exception>
 #include <string>
 
 #include "bag_loader.hpp"
 #include "main_window.hpp"
-#include "resim_engine.hpp"
 
 namespace
 {
@@ -40,15 +39,18 @@ int main(int argc, char ** argv)
 {
   QApplication app(argc, argv);
 
-  if (argc < 2 || argv[1][0] == '-') {
+  // A leading flag (or no args) means "open with no bag" — use File -> Open Bag…
+  // A positional first arg is treated as a bag URI and opened on startup.
+  const bool has_bag = (argc >= 2 && argv[1][0] != '-');
+  if (!has_bag && argc >= 2 && std::string(argv[1]) == "--help") {
     std::fprintf(stderr,
-      "usage: %s <bag_uri> [--start-s S] [--end-s S] [--window-m 120] [--res 0.25]\n"
+      "usage: %s [bag_uri] [--start-s S] [--end-s S] [--window-m 120] [--res 0.25]\n"
       "          [--max-range 150] [--min-grazing-deg 0]\n"
-      "Replays the oak_forward segmentation from <bag_uri> and tunes the\n"
-      "segmentation->costmap marking interactively. --start-s/--end-s window the\n"
-      "replay (end<0 == to end); the buffer accumulates from --start-s.\n",
+      "Replays the oak_forward segmentation and tunes the segmentation->costmap\n"
+      "marking interactively. With no bag_uri the window opens empty — use\n"
+      "File -> Open Bag…. --start-s/--end-s window the replay (end<0 == to end).\n",
       argv[0]);
-    return 1;
+    return 0;
   }
 
   marine_perception_tools::BagLoadOptions opts;
@@ -68,22 +70,11 @@ int main(int argc, char ** argv)
     return 1;
   }
 
-  marine_perception_tools::LoadedBag bag;
-  try {
-    std::fprintf(stderr, "loading %s ...\n", argv[1]);
-    bag = marine_perception_tools::load_forward_camera(argv[1], opts);
-    std::fprintf(stderr, "loaded %zu frames\n", bag.frames.size());
-  } catch (const std::exception & e) {
-    std::fprintf(stderr, "error: %s\n", e.what());
-    return 1;
-  }
-
-  marine_perception_tools::ReSimEngine engine(
-    bag, window_m, res, max_range,
-    sea_surface_segmentation::OccupancyParams{}, min_grazing);
-
-  marine_perception_tools::MainWindow window(engine);
+  marine_perception_tools::MainWindow window(opts, window_m, res, max_range, min_grazing);
   window.resize(1280, 720);
   window.show();
+  if (has_bag) {
+    window.openBag(QString::fromUtf8(argv[1]));  // errors surface in the status bar
+  }
   return app.exec();
 }

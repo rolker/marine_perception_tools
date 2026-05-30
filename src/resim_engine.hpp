@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <string>
+#include <utility>
 
 #include <opencv2/core.hpp>
 
@@ -42,9 +43,11 @@ class ReSimEngine
 public:
   // `window_m` (full side) and `res` (cell pitch) size the OccupancyBuffer at
   // construction. Buffer geometry is not resizable, so these are fixed for the
-  // engine's lifetime — change them by constructing a new engine.
+  // engine's lifetime — change them by constructing a new engine. The engine
+  // takes ownership of `bag` (by value) so the window can replace the whole
+  // engine on File->Open without dangling references into a prior load.
   ReSimEngine(
-    const LoadedBag & bag, double window_m, double res, double max_range,
+    LoadedBag bag, double window_m, double res, double max_range,
     const sea_surface_segmentation::OccupancyParams & occ =
     sea_surface_segmentation::OccupancyParams{},
     double min_grazing_angle_deg = 0.0);
@@ -85,7 +88,7 @@ private:
   void accumulate(std::size_t i);
   void resimToCurrent();  // clear + replay [0, current_]
 
-  const LoadedBag & bag_;
+  LoadedBag bag_;
   sea_surface_segmentation::AccumulateParams acc_;  // res/half_extent fixed; rest tunable
   sea_surface_segmentation::OccupancyParams occ_;
   sea_surface_segmentation::OccupancyBuffer buffer_;
