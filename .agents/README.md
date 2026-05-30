@@ -22,20 +22,20 @@ apply.
 
 | Package | Language | Description |
 |---------|----------|-------------|
-| `marine_perception_tools` | C++ (Qt5) | Builds `sea_surface_tuner` — a forward-camera bag-replay + costmap re-tuning viewer (Milestone A of [#1](https://github.com/rolker/marine_perception_tools/issues/1)). |
+| `marine_perception_tools` | C++ (Qt5) | Builds `sea_surface_tuner` — a 4-camera bag-replay + costmap re-tuning viewer (menu/File→Open, fused costmap, raw+compressed segmentation, H.265 RGB decode, recorded-vs-regenerated compare) ([#1](https://github.com/rolker/marine_perception_tools/issues/1)). |
 
 ## Repository Layout
 
 ```
 marine_perception_tools/
 ├── src/
-│   ├── bag_loader.{hpp,cpp}    # two-pass bag read → forward-camera PreparedFrames (TF, camera model)
-│   ├── resim_engine.{hpp,cpp}  # OccupancyBuffer wrapper: replay via accumulate_frame, re-sim, render
+│   ├── bag_loader.{hpp,cpp}    # multi-pass bag read → 4-camera merged PreparedFrames + RGB (H.265) + recorded costmap (TF, per-camera models, raw/compressed seg)
+│   ├── resim_engine.{hpp,cpp}  # OccupancyBuffer wrapper: fuse all cameras, re-sim, render regenerated + recorded costmaps
 │   ├── cv_qt.hpp               # cv::Mat (rgb8/BGR) → QImage helper
-│   ├── main_window.{hpp,cpp}   # MainWindow: panes, scrubber, data-driven param dock
-│   └── main.cpp                # CLI parse → load bag → engine + window
+│   ├── main_window.{hpp,cpp}   # MainWindow: menu/File→Open, 4+4+2 pane grid, scrubber, data-driven param dock
+│   └── main.cpp                # CLI parse (+ --probe headless) → window → openBag
 ├── test/
-│   └── test_resim_engine.cpp   # GTest: determinism, re-sim equivalence, clear, bounds-reject
+│   └── test_resim_engine.cpp   # GTest: determinism, re-sim equivalence, clear, bounds-reject, multi-camera fusion + per-camera latest lookup
 ├── CMakeLists.txt              # ament_cmake; tuner_core library + Qt exe + gtest
 ├── package.xml
 ├── .github/workflows/ci.yml

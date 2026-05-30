@@ -92,6 +92,42 @@ mpt::LoadedBag make_bag(int n_frames)
   return bag;
 }
 
+// A multi-camera bag: n_per frames per camera, interleaved in time (ascending
+// stamps), each camera's mask tagged with a distinct obstacle column so
+// latestMask is checkable per camera.
+mpt::LoadedBag make_multicam_bag(int n_cams, int n_per)
+{
+  mpt::LoadedBag bag;
+  bag.camera_models.resize(n_cams);
+  std::vector<cv::Mat> masks;
+  for (int c = 0; c < n_cams; ++c) {
+    bag.camera_models[c].fromCameraInfo(make_camera_info());
+    cv::Mat m(kH, kW, CV_8UC3, cv::Vec3b(0, 200, 0));  // green water
+    for (int r = 20; r <= 28; ++r) {
+      for (int col = 24 + 2 * c; col <= 30 + 2 * c; ++col) {
+        m.at<cv::Vec3b>(r, col) = cv::Vec3b(220, 0, 0);  // distinct obstacle block
+      }
+    }
+    masks.push_back(m);
+  }
+  double t = 0.0;
+  for (int i = 0; i < n_per; ++i) {
+    for (int c = 0; c < n_cams; ++c) {
+      mpt::PreparedFrame f;
+      f.cam = c;
+      f.stamp_s = t;
+      t += 0.1;
+      f.mask_rgb8 = masks[c];
+      f.camera_origin = cv::Vec3d(0.0, 0.0, 2.0);
+      f.rotation_cam_to_target = down_look_rotation();
+      f.boat_x = 0.0;
+      f.boat_y = 0.0;
+      bag.frames.push_back(f);
+    }
+  }
+  return bag;
+}
+
 // Sample the buffer's log-odds on a grid spanning the window.
 std::vector<double> sample_grid(const mpt::ReSimEngine & e)
 {
@@ -232,6 +268,36 @@ TEST(ReSimEngine, RejectsInvalidAccumulateParamsWithoutStateChange)
   good.min_grazing_angle_deg = 5.0;
   EXPECT_TRUE(engine.setAccumulateParams(good, why)) << why;  // valid path works
   EXPECT_DOUBLE_EQ(engine.accumulateParams().max_range, 80.0);
+}
+
+// All four (here two) cameras feed one shared buffer, and the per-camera latest
+// lookup returns each camera's own mask — the multi-camera fusion + lookup is the
+// logic added for the 4-camera tuner, so it gets its own coverage.
+TEST(ReSimEngine, FusesMultipleCamerasAndTracksLatestMask)
+{
+  const auto bag = make_multicam_bag(/*n_cams=*/2, /*n_per=*/3);
+  mpt::ReSimEngine e(bag, kWindowM, kRes, kMaxRange);
+  e.seekTo(e.frameCount() - 1);
+
+  EXPECT_GT(finite_count(sample_grid(e)), 0u)
+    << "no cells observed — neither camera fused into the shared buffer";
+
+  const cv::Mat m0 = e.latestMask(0);
+  const cv::Mat m1 = e.latestMask(1);
+  ASSERT_FALSE(m0.empty());
+  ASSERT_FALSE(m1.empty());
+  EXPECT_GT(cv::norm(m0, m1, cv::NORM_L1), 0.0)
+    << "latestMask returned the same mask for two different cameras";
+}
+
+// A camera with no frames in the bag yields an empty mask (UI shows a
+// placeholder) rather than indexing out of range.
+TEST(ReSimEngine, LatestMaskEmptyForAbsentCamera)
+{
+  const auto bag = make_multicam_bag(/*n_cams=*/2, /*n_per=*/2);  // cams 0,1 only
+  mpt::ReSimEngine e(bag, kWindowM, kRes, kMaxRange);
+  e.seekTo(e.frameCount() - 1);
+  EXPECT_TRUE(e.latestMask(3).empty());  // aft camera not present in this bag
 }
 
 int main(int argc, char ** argv)

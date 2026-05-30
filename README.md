@@ -22,21 +22,38 @@ Motivated by deployment
 (small-buoy marking under dark skies) and doubles as the validation harness for
 [rolker/unh_marine_perception#22](https://github.com/rolker/unh_marine_perception/issues/22).
 
-### Status — forward-camera viewer + live #22 parameter tuning
+### Status — interactive 4-camera tuner
 
-Implemented: the forward camera (`oak_forward`) segmentation is replayed beside
-the re-simulated costmap, with a frame scrubber and a parameter dock. Editing a
-knob re-simulates the loaded window and refreshes the costmap.
+All four OAK cameras are fused and replayed beside the recorded and re-simulated
+costmaps, with a menu bar, frame scrubber, and live parameter dock. Editing a
+knob re-simulates the loaded window and refreshes the regenerated costmap.
 
 ```bash
+# Open empty, then File → Open Bag…
+ros2 run marine_perception_tools sea_surface_tuner
+
+# …or open a *_ffmpeg_seg bag on startup
 ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
     [--start-s S] [--end-s S] [--window-m 120] [--res 0.25] \
-    [--max-range 150] [--min-grazing-deg 0]
+    [--max-range 150] [--min-grazing-deg 0] [--probe]
 ```
 
-- **Panes**: `oak_forward` segmentation (`rgb8`) | re-simulated lethal grid
-  (boat-centred, N-up, log-odds palette).
-- **Scrubber**: seek through the loaded frame window (forward seeks accumulate
+- **Menu bar** — *File → Open Bag…* (open a rosbag2 directory at runtime;
+  re-tunable without relaunching), *File → Quit*. The window can open empty.
+- **Layout**:
+  - Row 1 — camera RGB (H.265 `image_raw/ffmpeg`, decoded): port | fwd | stbd | aft
+  - Row 2 — segmentation masks: port | fwd | stbd | aft
+  - Row 3 — recorded costmap (`/bizzy/local_costmap/costmap`) | regenerated
+    (tuned) costmap, both boat-centred / N-up / 1:1 for direct comparison
+- **Cameras fused into one costmap.** All four cameras' segmentation frames feed
+  a single `OccupancyBuffer`, exactly as the deployed `SeaSurfaceLayer` fuses its
+  observation sources — so the tuned result matches the boat.
+- **Segmentation source** is the raw `rgb8` `Image` when present, else the
+  `.../segmentation/compressed` `CompressedImage` (size-trimmed bags); the UI
+  notes the fallback (a JPEG-compressed mask corrupts the obstacle-probability
+  channel). Camera/boat pose resolved from TF (`bizzy/map_tide` → optical /
+  `base_link`).
+- **Scrubber**: seek through the loaded window (forward seeks accumulate
   incrementally; rewinds re-simulate from the window start).
 - **Parameter dock** — the live-tunable `sea_surface_segmentation` knobs
   ([unh_marine_perception#22](https://github.com/rolker/unh_marine_perception/issues/22)):
@@ -47,14 +64,16 @@ ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
 
   Invalid values are rejected (status bar) and reverted. Window geometry
   (`--window-m`/`--res`) is CLI-only (it sizes the buffer at construction).
+- **`--probe`** loads the bag, prints seg/RGB/costmap counts (and the first RGB
+  frame's size + channel means), and exits — a headless check of the loader,
+  incl. H.265 decode, against a real bag. Run under `QT_QPA_PLATFORM=offscreen`.
 
-The segmentation that drives the costmap is the raw `rgb8` `Image` on
-`/bizzy/sensors/cameras/oak_forward/segmentation` (no ffmpeg decode); camera pose
-and boat pose are resolved from TF (`bizzy/map_tide` → optical / `base_link`).
+The `*_ffmpeg_seg` bags under `~/data/logs/bizzy_images/` are self-contained
+(all four cameras' RGB + segmentation + camera_info, `/tf`, and the recorded
+costmap), so File → Open targets one such bag.
 
-**Future work**: the 4-camera mosaic, recorded-costmap overlay (ground-truth
-compare), and `nav2_overlay.yaml` param export remain to do. See
-[#1](https://github.com/rolker/marine_perception_tools/issues/1).
+**Future work**: `nav2_overlay.yaml` parameter export (save tuned values back
+out). See [#1](https://github.com/rolker/marine_perception_tools/issues/1).
 
 ## Qt version
 
