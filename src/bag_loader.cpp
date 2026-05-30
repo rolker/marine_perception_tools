@@ -30,6 +30,7 @@
 
 #include "builtin_interfaces/msg/time.hpp"
 #include "cv_bridge/cv_bridge.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
 #include "rclcpp/serialization.hpp"
 #include "rclcpp/serialized_message.hpp"
 #include "rosbag2_cpp/reader.hpp"
@@ -151,6 +152,7 @@ LoadedBag load_bag(const std::string & bag_uri, const BagLoadOptions & opts)
   }
 
   // ---- Pass 2: replay every camera's segmentation into one merged timeline. ----
+  const std::string costmap_topic = "/bizzy/local_costmap/costmap";
   rosbag2_cpp::Reader reader;
   reader.open(bag_uri);
   const int64_t bag_start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -169,6 +171,20 @@ LoadedBag load_bag(const std::string & bag_uri, const BagLoadOptions & opts)
     auto bag_msg = reader.read_next();
     if (bag_msg->recv_timestamp < start_ns) {continue;}
     if (bag_msg->recv_timestamp > end_ns) {break;}
+
+    if (bag_msg->topic_name == costmap_topic) {
+      auto grid = deserialize<nav_msgs::msg::OccupancyGrid>(bag_msg);
+      RecordedCostmap rc;
+      rc.stamp_s = grid.header.stamp.sec + grid.header.stamp.nanosec * 1e-9;
+      rc.origin_x = grid.info.origin.position.x;
+      rc.origin_y = grid.info.origin.position.y;
+      rc.resolution = grid.info.resolution;
+      rc.width = static_cast<int>(grid.info.width);
+      rc.height = static_cast<int>(grid.info.height);
+      rc.data.assign(grid.data.begin(), grid.data.end());
+      loaded.costmaps.push_back(std::move(rc));
+      continue;
+    }
 
     auto cam_it = seg_topic_to_cam.find(bag_msg->topic_name);
     if (cam_it == seg_topic_to_cam.end()) {continue;}
@@ -225,6 +241,9 @@ LoadedBag load_bag(const std::string & bag_uri, const BagLoadOptions & opts)
   std::stable_sort(
     loaded.frames.begin(), loaded.frames.end(),
     [](const PreparedFrame & a, const PreparedFrame & b) {return a.stamp_s < b.stamp_s;});
+  std::stable_sort(
+    loaded.costmaps.begin(), loaded.costmaps.end(),
+    [](const RecordedCostmap & a, const RecordedCostmap & b) {return a.stamp_s < b.stamp_s;});
 
   if (loaded.frames.empty()) {
     throw std::runtime_error(

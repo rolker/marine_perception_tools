@@ -41,6 +41,20 @@ cv::Vec3b colour_logodds(double v, double threshold)
   return {70, 40, 20};  // free / negative — dark blue
 }
 
+// Colour a nav2 OccupancyGrid cost (-1 unknown, 0 free, 100 lethal) with the SAME
+// palette as colour_logodds so recorded and regenerated compare apples-to-apples.
+// Reproduces the offline tool's `colour_cost()` (anonymous-namespace, so copied).
+cv::Vec3b colour_cost(int v)
+{
+  if (v < 0) {return {110, 110, 110};}            // NO_INFORMATION — grey
+  if (v >= 99) {return {40, 40, 230};}            // inscribed/lethal — red
+  if (v > 0) {                                     // intermediate cost — green→yellow
+    const double f = std::min(v / 99.0, 1.0);
+    return {30, static_cast<uchar>(120 + 100 * f), static_cast<uchar>(200 * f)};
+  }
+  return {70, 40, 20};  // free — dark blue
+}
+
 }  // namespace
 
 ReSimEngine::ReSimEngine(
@@ -194,6 +208,33 @@ cv::Mat ReSimEngine::renderGrid(int panel_px) const
       const double wy = by - (v - panel_px / 2) * acc_.res;  // image y down → world y up
       panel.at<cv::Vec3b>(v, u) =
         colour_logodds(buffer_.logOdds(grid_map::Position(wx, wy)), occ_.lethal_threshold);
+    }
+  }
+  return panel;
+}
+
+cv::Mat ReSimEngine::renderRecorded(int panel_px) const
+{
+  // Boat-centred, world-aligned (N-up) sample of the recorded OccupancyGrid into
+  // the same window as renderGrid. Grid origin is in its own frame (bizzy/map),
+  // which shares the xy plane with map_tide (the tide transform is z-only), so
+  // boat-xy and grid-xy are consistent. Outside the grid reads as unknown.
+  const RecordedCostmap c = currentRecordedCostmap();
+  const double bx = bag_.frames[current_].boat_x;
+  const double by = bag_.frames[current_].boat_y;
+  cv::Mat panel(panel_px, panel_px, CV_8UC3, cv::Scalar(110, 110, 110));
+  if (c.resolution <= 0.0) {return panel;}  // no recorded costmap yet
+  for (int v = 0; v < panel_px; ++v) {
+    for (int u = 0; u < panel_px; ++u) {
+      const double wx = bx + (u - panel_px / 2) * acc_.res;
+      const double wy = by - (v - panel_px / 2) * acc_.res;  // image y down → world y up
+      const int gx = static_cast<int>(std::floor((wx - c.origin_x) / c.resolution));
+      const int gy = static_cast<int>(std::floor((wy - c.origin_y) / c.resolution));
+      int cost = -1;  // outside the recorded window reads as unknown
+      if (gx >= 0 && gx < c.width && gy >= 0 && gy < c.height) {
+        cost = c.data[static_cast<std::size_t>(gy) * c.width + gx];
+      }
+      panel.at<cv::Vec3b>(v, u) = colour_cost(cost);
     }
   }
   return panel;

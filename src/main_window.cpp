@@ -303,9 +303,9 @@ void MainWindow::refreshViews()
     }
   }
 
-  // Row 3 right: regenerated (tuned) costmap. Left (recorded) is wired in the
-  // recorded-costmap commit; until then it stays a placeholder.
-  recorded_label_->setText("recorded costmap");
+  // Row 3: recorded costmap (bag) | regenerated (tuned) costmap, same window.
+  const QImage recorded = cvMatToQImage(engine_->renderRecorded(panel_px_), /*bgr=*/true);
+  recorded_label_->setPixmap(QPixmap::fromImage(recorded));
   const QImage grid = cvMatToQImage(engine_->renderGrid(panel_px_), /*bgr=*/true);
   grid_label_->setPixmap(QPixmap::fromImage(grid));
 

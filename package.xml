@@ -19,6 +19,7 @@
   <depend>grid_map_core</depend>
   <depend>image_geometry</depend>
   <depend>cv_bridge</depend>
+  <depend>nav_msgs</depend>
   <depend>rclcpp</depend>
   <depend>rosbag2_cpp</depend>
   <depend>sensor_msgs</depend>

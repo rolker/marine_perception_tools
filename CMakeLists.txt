@@ -15,6 +15,7 @@ find_package(builtin_interfaces REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(grid_map_core REQUIRED)
 find_package(image_geometry REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(sea_surface_segmentation REQUIRED)
@@ -40,6 +41,7 @@ set(CORE_DEPS
   cv_bridge
   grid_map_core
   image_geometry
+  nav_msgs
   rclcpp
   rosbag2_cpp
   sea_surface_segmentation

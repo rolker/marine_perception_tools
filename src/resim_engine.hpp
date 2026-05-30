@@ -92,6 +92,12 @@ public:
   // tool's `render_new()`/`colour_logodds()` palette (not exported, so copied).
   cv::Mat renderGrid(int panel_px) const;
 
+  // The recorded costmap sampled into the SAME boat-centred window/scale as
+  // renderGrid, so the two panes overlay 1:1. Promotes the offline driver's
+  // `render_live()`/`colour_cost()` (nav2 cost palette matched to the log-odds
+  // one). An all-grey panel means no recorded costmap at/before the current frame.
+  cv::Mat renderRecorded(int panel_px) const;
+
   // Raw log-odds at a world cell — exposed for tests/diagnostics.
   double logOddsAt(double wx, double wy) const {return buffer_.logOdds(grid_position(wx, wy));}
 
