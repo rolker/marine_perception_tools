@@ -88,9 +88,10 @@ int main(int argc, char ** argv)
     try {
       const auto bag = marine_perception_tools::load_bag(argv[1], opts);
       std::fprintf(stderr,
-        "probe: %zu seg frames, %zu rgb frames, %zu recorded costmaps, compressed_seg=%d\n",
+        "probe: %zu seg frames, %zu rgb frames, %zu recorded costmaps, "
+        "compressed_seg=%d, tf_skipped=%zu\n",
         bag.frames.size(), bag.rgb_frames.size(), bag.costmaps.size(),
-        static_cast<int>(bag.used_compressed_segmentation));
+        static_cast<int>(bag.used_compressed_segmentation), bag.frames_skipped_no_tf);
       if (!bag.rgb_frames.empty()) {
         const cv::Mat & m = bag.rgb_frames.front().bgr;
         const cv::Scalar mean = cv::mean(m);

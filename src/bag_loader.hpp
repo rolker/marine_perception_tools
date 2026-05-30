@@ -16,6 +16,7 @@
 #define BAG_LOADER_HPP_
 
 #include <array>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -94,6 +95,11 @@ struct LoadedBag
   // probability the #22 softmax reads, so tuned values from such a bag are
   // suspect. Raw is preferred per-camera whenever present.
   bool used_compressed_segmentation = false;
+
+  // Count of segmentation frames dropped because no TF was available at their
+  // stamp (so no pose to project from). A large value relative to `frames` means
+  // a degraded TF stream — surfaced by --probe so a partial load isn't silent.
+  std::size_t frames_skipped_no_tf = 0;
 };
 
 // What/where to read. Defaults match the BizzyBoat recording convention.

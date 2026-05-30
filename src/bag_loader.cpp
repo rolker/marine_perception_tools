@@ -23,7 +23,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -92,6 +91,12 @@ void decode_camera_rgb(
 
   std::array<std::unique_ptr<ffmpeg_encoder_decoder::Decoder>, kNumCameras> decoders;
   std::mutex rgb_mutex;  // decoded callbacks may fire off a worker thread
+
+  // H.265 is a GOP stream: starting from a non-zero --start-s feeds the decoder
+  // mid-GOP, so libav drops frames until the next keyframe. The first ~second of
+  // RGB after a windowed start can therefore be absent (the UI shows a "(no RGB)"
+  // tile until an IDR passes). Display-only — the projected segmentation, and so
+  // the costmap, are unaffected.
 
   rosbag2_cpp::Reader reader;
   reader.open(bag_uri);
@@ -170,15 +175,22 @@ LoadedBag load_bag(const std::string & bag_uri, const BagLoadOptions & opts)
     rosbag2_cpp::Reader reader;
     reader.open(bag_uri);
 
-    std::set<std::string> present;
-    for (const auto & t : reader.get_all_topics_and_types()) {
-      present.insert(t.name);
+    // Select by message count, not mere topic registration: a bag that registers
+    // a camera's raw `segmentation` topic but recorded zero messages on it must
+    // not shadow a populated `.../compressed` topic for the same camera.
+    std::map<std::string, std::size_t> counts;
+    for (const auto & t : reader.get_metadata().topics_with_message_count) {
+      counts[t.topic_metadata.name] = t.message_count;
     }
+    auto has_msgs = [&counts](const std::string & topic) {
+        auto it = counts.find(topic);
+        return it != counts.end() && it->second > 0;
+      };
     for (int i = 0; i < kNumCameras; ++i) {
-      if (present.count(topics[i].seg) != 0) {
+      if (has_msgs(topics[i].seg)) {
         seg_source[i] = topics[i].seg;
         seg_compressed[i] = false;
-      } else if (present.count(topics[i].compressed) != 0) {
+      } else if (has_msgs(topics[i].compressed)) {
         seg_source[i] = topics[i].compressed;
         seg_compressed[i] = true;
         loaded.used_compressed_segmentation = true;
@@ -315,6 +327,8 @@ LoadedBag load_bag(const std::string & bag_uri, const BagLoadOptions & opts)
   std::stable_sort(
     loaded.costmaps.begin(), loaded.costmaps.end(),
     [](const RecordedCostmap & a, const RecordedCostmap & b) {return a.stamp_s < b.stamp_s;});
+
+  loaded.frames_skipped_no_tf = tf_skipped;
 
   // Display-only RGB: decode the H.265 camera streams over the same window.
   decode_camera_rgb(bag_uri, start_ns, end_ns, loaded);
