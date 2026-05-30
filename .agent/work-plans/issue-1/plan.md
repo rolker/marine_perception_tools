@@ -245,3 +245,88 @@ Two stacked PRs. **PR-A** (now) ~450–600 lines incl. test. **PR-B** (after
   `setAccumulateParams` (mirroring `setOccupancyParams`) so the `AccumulateParams`
   knobs are tunable too; window geometry stays construction-fixed. The
   table-driven dock made this a member-pointer table edit, as designed.
+
+## Milestone C — interactive 4-camera tuner (2026-05-29)
+
+Folded into PR #2 at Roland's direction after the deployment window was missed,
+so the tool can be finished deliberately rather than fast. Three asks (confirmed
+via questions): **(1) menu bar with File→Open, (2) all four cameras, (3)
+compressed images from the bag.** The requested layout:
+
+```
+Row 1  [ port/left RGB ] [ fwd RGB ] [ stbd/right RGB ] [ aft RGB ]   ← H.265 decode
+Row 2  [ port seg      ] [ fwd seg ] [ stbd seg       ] [ aft seg ]   ← CompressedImage / Image
+Row 3  [ recorded costmap (bag) ]            [ regenerated costmap (tuned) ]
+       ◄──────────────── scrubber ────────────────►        Parameters dock ▸
+```
+
+### Ground truth (verified against real bags + deployed layer)
+
+- **Cameras** (from `bag_to_costmap_video.cpp` `kCameras`, deployed convention):
+  `oak_forward`, `oak_port`, `oak_starboard`, `oak_aft`. Display order
+  left→right is **port, forward, starboard, aft** (= left, fwd, right, aft).
+- **Bag source**: the `*_ffmpeg_seg` bags under `~/data/logs/bizzy_images/` are
+  **self-contained** — all 4 cameras' `image_raw/ffmpeg` (`FFMPEGPacket`, H.265),
+  `segmentation` (`Image`) **and** `segmentation/compressed` (`CompressedImage`)
+  **and** `segmentation/camera_info`, plus `/tf` + `/tf_static` **and** the
+  recorded `/bizzy/local_costmap/costmap` (`OccupancyGrid`). The main
+  `bizzyboat/` nav bags have **none** of the camera/costmap topics. So File→Open
+  targets one `*_ffmpeg_seg` bag; no second bag needed.
+- **Fusion**: the deployed `SeaSurfaceLayer` fuses one-or-more cameras
+  (`observation_sources`) into a **single** world-frame `OccupancyBuffer`. The
+  driver does the same by interleaving all cameras' segmentation frames
+  chronologically through one buffer (`accumulate_frame` re-centres + decays per
+  call). So the tuner keeps **one** buffer and replays a **merged, time-sorted**
+  segmentation stream across the 4 cameras — fusion is automatic.
+
+### Design
+
+- **`bag_loader`** generalises to the 4-camera set. `PreparedFrame` gains a
+  `cam` index; `LoadedBag` holds a per-camera `camera_models` vector, the merged
+  time-sorted segmentation `frames` (accumulation timeline), and two display-only
+  side timelines: per-camera `rgb_frames` and recorded `costmaps`. Seg-source
+  selection per camera: **prefer raw `Image`; fall back to `CompressedImage`**
+  when the raw topic is absent (size-trimmed bags) — never read both for one
+  camera (would double-count). Decoded via `cv_bridge::toCvCopy(..., "rgb8")`
+  for either type. TF/CameraInfo handling unchanged (skip frames with no pose).
+- **`resim_engine`** owns the `LoadedBag` by value (so the window can reload it).
+  Accumulation timeline is the merged seg stream; `accumulate()` selects the
+  per-frame camera model by `cam`. Adds display accessors: latest seg + latest
+  RGB per camera ≤ current stamp, and the latest recorded costmap ≤ current
+  stamp. `renderRecorded()` promotes the driver's `render_live()` (samples the
+  `OccupancyGrid` into the same boat-centred window as `renderGrid`, shared
+  palette) for the 1:1 comparison.
+- **`main_window`** owns the engine and gains a **menu bar**: *File → Open Bag…*
+  (`QFileDialog` → rebuild engine; tolerant of absent topics — missing RGB shows
+  a placeholder), *File → Quit*. Launching with no bag arg starts empty. The
+  pane grid becomes Rows 1–3 above; scrubber + table-driven param dock carry over
+  unchanged (the dock still tunes the *fused* result).
+- **H.265 RGB** (`image_raw/ffmpeg`, `FFMPEGPacket`) decoded with
+  `ffmpeg_encoder_decoder::Decoder` (one per camera, fed in order, flushed) into
+  `rgb_frames`. This is the heaviest, most isolable piece — Row 1 degrades to a
+  placeholder if decode is unavailable, so the rest stands alone.
+
+### New dependencies
+
+`nav_msgs` (recorded `OccupancyGrid`), `ffmpeg_image_transport_msgs`
+(`FFMPEGPacket`), `ffmpeg_encoder_decoder` (`Decoder`). All present on the Jazzy
+operator station (`ros-jazzy-ffmpeg-image-transport*` installed).
+
+### Open / verify items
+
+- **Compressed segmentation encoding (PNG vs JPEG).** `segmentation/compressed`
+  uses image_transport's `compressed` transport; if it is JPEG, lossy artefacts
+  corrupt the R-channel obstacle probability the #22 softmax reads
+  (`Δ=clamp(log(R/(255−R)))`). The tuner prefers the raw topic when present, so
+  this only bites compressed-only bags — surface it (status-bar note when falling
+  back to compressed), don't silently absorb. Verify the `format` field on a real
+  `*_ffmpeg_seg` bag.
+- **Fidelity caveat (unchanged)**: the re-sim matches the offline core exactly
+  and the live layer up to the boat-vs-camera window-centre offset.
+
+### Staging (atomic commits on `feature/issue-1`)
+
+1. plan.md (this). 2. menu bar + File→Open + engine-owns-bag refactor.
+3. CompressedImage seg support (prefer raw). 4. 4-camera loader + fused engine +
+Rows 1–2. 5. recorded-costmap load/render + Row 3. 6. H.265 RGB decode + Row 1.
+Tests + README + `.agents/README.md` grow alongside.
