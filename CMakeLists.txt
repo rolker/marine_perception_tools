@@ -14,6 +14,8 @@ find_package(ament_cmake REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(grid_map_core REQUIRED)
+find_package(ffmpeg_encoder_decoder REQUIRED)
+find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -39,6 +41,8 @@ set(CMAKE_AUTOMOC ON)
 set(CORE_DEPS
   builtin_interfaces
   cv_bridge
+  ffmpeg_encoder_decoder
+  ffmpeg_image_transport_msgs
   grid_map_core
   image_geometry
   nav_msgs

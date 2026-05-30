@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -30,9 +32,12 @@
 
 #include "builtin_interfaces/msg/time.hpp"
 #include "cv_bridge/cv_bridge.hpp"
+#include "ffmpeg_encoder_decoder/decoder.hpp"
+#include "ffmpeg_image_transport_msgs/msg/ffmpeg_packet.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "rclcpp/serialization.hpp"
 #include "rclcpp/serialized_message.hpp"
+#include "rclcpp/time.hpp"
 #include "rosbag2_cpp/reader.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
@@ -70,6 +75,72 @@ struct CamTopics
   std::string compressed;
   std::string info;
 };
+
+// Decode the H.265 camera RGB (display-only) into loaded.rgb_frames. One libav
+// decoder per camera (codec state is per-stream); packets are fed in bag order
+// and flushed at the end. This is the heaviest, most isolable piece: any failure
+// (decoder unavailable, corrupt stream) leaves a camera's rgb_frames empty and
+// the UI shows a "(no RGB)" placeholder — it never blocks the rest of the load.
+void decode_camera_rgb(
+  const std::string & bag_uri, int64_t start_ns, int64_t end_ns, LoadedBag & loaded)
+{
+  std::map<std::string, int> ffmpeg_to_cam;
+  for (int i = 0; i < kNumCameras; ++i) {
+    ffmpeg_to_cam[std::string("/bizzy/sensors/cameras/") + kCameraNames[i] +
+      "/image_raw/ffmpeg"] = i;
+  }
+
+  std::array<std::unique_ptr<ffmpeg_encoder_decoder::Decoder>, kNumCameras> decoders;
+  std::mutex rgb_mutex;  // decoded callbacks may fire off a worker thread
+
+  rosbag2_cpp::Reader reader;
+  reader.open(bag_uri);
+  while (reader.has_next()) {
+    auto bag_msg = reader.read_next();
+    if (bag_msg->recv_timestamp < start_ns) {continue;}
+    if (bag_msg->recv_timestamp > end_ns) {break;}
+    auto it = ffmpeg_to_cam.find(bag_msg->topic_name);
+    if (it == ffmpeg_to_cam.end()) {continue;}
+    const int cam = it->second;
+
+    auto pkt = deserialize<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(bag_msg);
+    if (!decoders[cam]) {
+      auto decoder = std::make_unique<ffmpeg_encoder_decoder::Decoder>();
+      auto callback = [&loaded, &rgb_mutex, cam](
+        const sensor_msgs::msg::Image::ConstSharedPtr & img, bool, const std::string &) {
+          cv::Mat bgr;
+          try {
+            bgr = cv_bridge::toCvCopy(img, "bgr8")->image;
+          } catch (const cv_bridge::Exception &) {
+            return;
+          }
+          RgbFrame rf;
+          rf.cam = cam;
+          rf.stamp_s = img->header.stamp.sec + img->header.stamp.nanosec * 1e-9;
+          rf.bgr = bgr;
+          std::lock_guard<std::mutex> lock(rgb_mutex);
+          loaded.rgb_frames.push_back(std::move(rf));
+        };
+      // The libav software decoder for the codec shares the codec's name
+      // ("hevc"/"h264"), so pass the packet encoding as both codec and decoder.
+      if (!decoder->initialize(pkt.encoding, callback, pkt.encoding)) {
+        continue;  // leave decoders[cam] null → this camera stays RGB-less
+      }
+      decoders[cam] = std::move(decoder);
+    }
+
+    const rclcpp::Time stamp(pkt.header.stamp.sec, pkt.header.stamp.nanosec, RCL_ROS_TIME);
+    decoders[cam]->decodePacket(
+      pkt.encoding, pkt.data.data(), pkt.data.size(), pkt.pts, pkt.header.frame_id, stamp);
+  }
+
+  for (int i = 0; i < kNumCameras; ++i) {
+    if (decoders[i]) {decoders[i]->flush();}
+  }
+  std::stable_sort(
+    loaded.rgb_frames.begin(), loaded.rgb_frames.end(),
+    [](const RgbFrame & a, const RgbFrame & b) {return a.stamp_s < b.stamp_s;});
+}
 
 }  // namespace
 
@@ -244,6 +315,9 @@ LoadedBag load_bag(const std::string & bag_uri, const BagLoadOptions & opts)
   std::stable_sort(
     loaded.costmaps.begin(), loaded.costmaps.end(),
     [](const RecordedCostmap & a, const RecordedCostmap & b) {return a.stamp_s < b.stamp_s;});
+
+  // Display-only RGB: decode the H.265 camera streams over the same window.
+  decode_camera_rgb(bag_uri, start_ns, end_ns, loaded);
 
   if (loaded.frames.empty()) {
     throw std::runtime_error(

@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <string>
 
 #include "bag_loader.hpp"
@@ -45,12 +46,18 @@ int main(int argc, char ** argv)
   if (!has_bag && argc >= 2 && std::string(argv[1]) == "--help") {
     std::fprintf(stderr,
       "usage: %s [bag_uri] [--start-s S] [--end-s S] [--window-m 120] [--res 0.25]\n"
-      "          [--max-range 150] [--min-grazing-deg 0]\n"
-      "Replays the oak_forward segmentation and tunes the segmentation->costmap\n"
-      "marking interactively. With no bag_uri the window opens empty — use\n"
-      "File -> Open Bag…. --start-s/--end-s window the replay (end<0 == to end).\n",
+      "          [--max-range 150] [--min-grazing-deg 0] [--probe]\n"
+      "Replays all four OAK cameras' segmentation and tunes the segmentation->\n"
+      "costmap marking interactively. With no bag_uri the window opens empty — use\n"
+      "File -> Open Bag…. --start-s/--end-s window the replay (end<0 == to end).\n"
+      "--probe loads the bag, prints frame/rgb/costmap counts, and exits (headless).\n",
       argv[0]);
     return 0;
+  }
+
+  bool probe = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--probe") {probe = true;}
   }
 
   marine_perception_tools::BagLoadOptions opts;
@@ -68,6 +75,34 @@ int main(int argc, char ** argv)
   if (!(min_grazing >= 0.0 && min_grazing < 90.0)) {
     std::fprintf(stderr, "error: --min-grazing-deg must be in [0, 90)\n");
     return 1;
+  }
+
+  // Headless probe: load the bag, report counts, exit — for verifying the loader
+  // (incl. H.265 decode) against a real bag without a display. Run with
+  // QT_QPA_PLATFORM=offscreen so QApplication needs no X server.
+  if (probe) {
+    if (!has_bag) {
+      std::fprintf(stderr, "error: --probe requires a bag_uri\n");
+      return 1;
+    }
+    try {
+      const auto bag = marine_perception_tools::load_bag(argv[1], opts);
+      std::fprintf(stderr,
+        "probe: %zu seg frames, %zu rgb frames, %zu recorded costmaps, compressed_seg=%d\n",
+        bag.frames.size(), bag.rgb_frames.size(), bag.costmaps.size(),
+        static_cast<int>(bag.used_compressed_segmentation));
+      if (!bag.rgb_frames.empty()) {
+        const cv::Mat & m = bag.rgb_frames.front().bgr;
+        const cv::Scalar mean = cv::mean(m);
+        std::fprintf(stderr,
+          "  first rgb: cam %d, %dx%d, BGR mean (%.1f, %.1f, %.1f)\n",
+          bag.rgb_frames.front().cam, m.cols, m.rows, mean[0], mean[1], mean[2]);
+      }
+      return 0;
+    } catch (const std::exception & e) {
+      std::fprintf(stderr, "probe error: %s\n", e.what());
+      return 1;
+    }
   }
 
   marine_perception_tools::MainWindow window(opts, window_m, res, max_range, min_grazing);
