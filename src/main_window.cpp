@@ -56,16 +56,30 @@ MainWindow::MainWindow(
 {
   setWindowTitle("sea_surface_tuner");
 
-  seg_label_ = new QLabel(this);
-  seg_label_->setAlignment(Qt::AlignCenter);
-  seg_label_->setMinimumSize(320, 240);
-  grid_label_ = new QLabel(this);
-  grid_label_->setAlignment(Qt::AlignCenter);
-  grid_label_->setMinimumSize(panel_px_, panel_px_);
+  auto make_label = [this](int w, int h) {
+      auto * l = new QLabel(this);
+      l->setAlignment(Qt::AlignCenter);
+      l->setMinimumSize(w, h);
+      return l;
+    };
+  const int tile_w = cam_tile_h_ * 4 / 3;  // 4:3 camera/seg tiles
 
-  auto * images = new QHBoxLayout;
-  images->addWidget(seg_label_, 1);
-  images->addWidget(grid_label_, 1);
+  // Row 1: camera RGB.  Row 2: segmentation.  Both port|fwd|stbd|aft.
+  auto * rgb_row = new QHBoxLayout;
+  auto * seg_row = new QHBoxLayout;
+  for (int i = 0; i < kNumCameras; ++i) {
+    rgb_labels_[i] = make_label(tile_w, cam_tile_h_);
+    seg_labels_[i] = make_label(tile_w, cam_tile_h_);
+    rgb_row->addWidget(rgb_labels_[i], 1);
+    seg_row->addWidget(seg_labels_[i], 1);
+  }
+
+  // Row 3: recorded costmap (bag) | regenerated costmap (tuned).
+  recorded_label_ = make_label(panel_px_, panel_px_);
+  grid_label_ = make_label(panel_px_, panel_px_);
+  auto * cm_row = new QHBoxLayout;
+  cm_row->addWidget(recorded_label_, 1);
+  cm_row->addWidget(grid_label_, 1);
 
   scrubber_ = new QSlider(Qt::Horizontal, this);
   scrubber_->setRange(0, 0);
@@ -74,7 +88,9 @@ MainWindow::MainWindow(
 
   auto * central = new QWidget(this);
   auto * layout = new QVBoxLayout(central);
-  layout->addLayout(images, 1);
+  layout->addLayout(rgb_row);
+  layout->addLayout(seg_row);
+  layout->addLayout(cm_row, 1);
   layout->addWidget(scrubber_);
   setCentralWidget(central);
 
@@ -111,7 +127,7 @@ void MainWindow::openBag(const QString & bag_uri)
   statusBar()->showMessage("Loading " + bag_uri + " …");
   std::unique_ptr<ReSimEngine> engine;
   try {
-    LoadedBag bag = load_forward_camera(bag_uri.toStdString(), load_opts_);
+    LoadedBag bag = load_bag(bag_uri.toStdString(), load_opts_);
     engine = std::make_unique<ReSimEngine>(
       std::move(bag), window_m_, res_, max_range_,
       sea_surface_segmentation::OccupancyParams{}, min_grazing_deg_);
@@ -251,18 +267,45 @@ void MainWindow::onParamEdited()
 void MainWindow::refreshViews()
 {
   if (!haveEngine()) {
-    seg_label_->setPixmap(QPixmap());
+    for (int i = 0; i < kNumCameras; ++i) {
+      rgb_labels_[i]->setPixmap(QPixmap());
+      rgb_labels_[i]->setText(kCameraLabels[i]);
+      seg_labels_[i]->setPixmap(QPixmap());
+      seg_labels_[i]->setText("—");
+    }
+    recorded_label_->setPixmap(QPixmap());
+    recorded_label_->setText("recorded costmap");
     grid_label_->setPixmap(QPixmap());
-    seg_label_->setText("No bag loaded");
     grid_label_->setText("File → Open Bag…");
     statusBar()->showMessage("No bag loaded — File → Open Bag…");
     return;
   }
 
-  const QImage seg = cvMatToQImage(engine_->currentMask(), /*bgr=*/false);
-  seg_label_->setPixmap(
-    QPixmap::fromImage(seg).scaledToHeight(panel_px_, Qt::SmoothTransformation));
+  // Rows 1–2: per-camera RGB + segmentation (latest at/before the current frame).
+  for (int i = 0; i < kNumCameras; ++i) {
+    const cv::Mat rgb = engine_->latestRgb(i);
+    if (rgb.empty()) {
+      rgb_labels_[i]->setPixmap(QPixmap());
+      rgb_labels_[i]->setText(QString(kCameraLabels[i]) + " (no RGB)");
+    } else {
+      rgb_labels_[i]->setPixmap(
+        QPixmap::fromImage(cvMatToQImage(rgb, /*bgr=*/true))
+        .scaledToHeight(cam_tile_h_, Qt::SmoothTransformation));
+    }
+    const cv::Mat seg = engine_->latestMask(i);
+    if (seg.empty()) {
+      seg_labels_[i]->setPixmap(QPixmap());
+      seg_labels_[i]->setText(QString(kCameraLabels[i]) + " (no seg)");
+    } else {
+      seg_labels_[i]->setPixmap(
+        QPixmap::fromImage(cvMatToQImage(seg, /*bgr=*/false))
+        .scaledToHeight(cam_tile_h_, Qt::SmoothTransformation));
+    }
+  }
 
+  // Row 3 right: regenerated (tuned) costmap. Left (recorded) is wired in the
+  // recorded-costmap commit; until then it stays a placeholder.
+  recorded_label_->setText("recorded costmap");
   const QImage grid = cvMatToQImage(engine_->renderGrid(panel_px_), /*bgr=*/true);
   grid_label_->setPixmap(QPixmap::fromImage(grid));
 

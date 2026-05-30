@@ -76,8 +76,16 @@ public:
   const sea_surface_segmentation::OccupancyParams & occupancyParams() const {return occ_;}
   const sea_surface_segmentation::AccumulateParams & accumulateParams() const {return acc_;}
 
-  const cv::Mat & currentMask() const {return bag_.frames[current_].mask_rgb8;}
+  // Latest segmentation mask for `cam` (index into kCameraNames) at or before the
+  // current frame, or an empty Mat if that camera has no frame yet — drives the
+  // per-camera segmentation panes. `latestRgb` is the same for the display RGB.
+  cv::Mat latestMask(int cam) const;
+  cv::Mat latestRgb(int cam) const;
   double currentStamp() const {return bag_.frames[current_].stamp_s;}
+
+  // The recorded costmap sample at or before the current frame's stamp (an empty
+  // RecordedCostmap — resolution <= 0 — if none yet). Display-only comparison.
+  RecordedCostmap currentRecordedCostmap() const;
 
   // Boat-centred, world-aligned (N-up) BGR render of the occupancy buffer at the
   // current frame's boat position (panel_px square). Reproduces the offline

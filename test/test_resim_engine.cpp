@@ -75,10 +75,12 @@ cv::Matx33d down_look_rotation()
 mpt::LoadedBag make_bag(int n_frames)
 {
   mpt::LoadedBag bag;
-  bag.camera_model.fromCameraInfo(make_camera_info());
+  bag.camera_models.resize(1);  // single synthetic camera (index 0)
+  bag.camera_models[0].fromCameraInfo(make_camera_info());
   const cv::Mat mask = make_mask();
   for (int i = 0; i < n_frames; ++i) {
     mpt::PreparedFrame f;
+    f.cam = 0;
     f.stamp_s = 0.5 * i;
     f.mask_rgb8 = mask;
     f.camera_origin = cv::Vec3d(0.0, 0.0, 2.0);

@@ -14,11 +14,14 @@
 
 #include "bag_loader.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -59,49 +62,57 @@ tf2::TimePoint to_tf_time(const builtin_interfaces::msg::Time & t)
     std::chrono::seconds(t.sec) + std::chrono::nanoseconds(t.nanosec));
 }
 
+// Per-camera topic names derived from the camera namespace name.
+struct CamTopics
+{
+  std::string seg;
+  std::string compressed;
+  std::string info;
+};
+
 }  // namespace
 
-LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions & opts)
+LoadedBag load_bag(const std::string & bag_uri, const BagLoadOptions & opts)
 {
-  const std::string seg_topic =
-    "/bizzy/sensors/cameras/" + opts.camera + "/segmentation";
-  const std::string compressed_topic = seg_topic + "/compressed";
-  const std::string info_topic = seg_topic + "/camera_info";
+  std::array<CamTopics, kNumCameras> topics;
+  for (int i = 0; i < kNumCameras; ++i) {
+    const std::string base = std::string("/bizzy/sensors/cameras/") + kCameraNames[i];
+    topics[i].seg = base + "/segmentation";
+    topics[i].compressed = topics[i].seg + "/compressed";
+    topics[i].info = topics[i].seg + "/camera_info";
+  }
 
-  // ---- Pass 1: TF cache (whole bag) + the camera model. ----
   tf2::BufferCore tf_buffer(tf2::durationFromSec(7200.0));
   LoadedBag loaded;
-  std::string optical_frame;  // the camera's optical frame id
-  bool have_model = false;
+  loaded.camera_models.resize(kNumCameras);
+  std::array<std::string, kNumCameras> optical_frame;
+  std::array<bool, kNumCameras> have_model{};
 
-  // Seg-source selection: prefer the raw `Image` topic; fall back to the
-  // `.../compressed` `CompressedImage` topic when the raw one was not recorded
-  // (size-trimmed bags). Reading both would double-count every frame.
-  std::string seg_source_topic;
-  bool seg_compressed = false;
+  // Seg-source selection per camera: prefer raw `Image`, else `CompressedImage`
+  // (size-trimmed bags). An empty entry means the camera isn't in this bag.
+  std::array<std::string, kNumCameras> seg_source;
+  std::array<bool, kNumCameras> seg_compressed{};
+
+  // ---- Pass 1: topic discovery + TF cache (whole bag) + per-camera models. ----
   {
     rosbag2_cpp::Reader reader;
     reader.open(bag_uri);
-    bool have_raw = false;
-    bool have_cmp = false;
+
+    std::set<std::string> present;
     for (const auto & t : reader.get_all_topics_and_types()) {
-      if (t.name == seg_topic) {
-        have_raw = true;
-      } else if (t.name == compressed_topic) {
-        have_cmp = true;
+      present.insert(t.name);
+    }
+    for (int i = 0; i < kNumCameras; ++i) {
+      if (present.count(topics[i].seg) != 0) {
+        seg_source[i] = topics[i].seg;
+        seg_compressed[i] = false;
+      } else if (present.count(topics[i].compressed) != 0) {
+        seg_source[i] = topics[i].compressed;
+        seg_compressed[i] = true;
+        loaded.used_compressed_segmentation = true;
       }
     }
-    if (have_raw) {
-      seg_source_topic = seg_topic;
-      seg_compressed = false;
-    } else if (have_cmp) {
-      seg_source_topic = compressed_topic;
-      seg_compressed = true;
-    } else {
-      throw std::runtime_error(
-        "bag has neither '" + seg_topic + "' nor '" + compressed_topic +
-        "' — no segmentation for camera " + opts.camera);
-    }
+
     while (reader.has_next()) {
       auto bag_msg = reader.read_next();
       const std::string & topic = bag_msg->topic_name;
@@ -111,23 +122,35 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
         for (const auto & tr : tfm.transforms) {
           tf_buffer.setTransform(tr, "bag", is_static);
         }
-      } else if (topic == info_topic) {
-        auto info = deserialize<sensor_msgs::msg::CameraInfo>(bag_msg);
-        loaded.camera_model.fromCameraInfo(info);
-        optical_frame = info.header.frame_id;
-        have_model = true;
+        continue;
+      }
+      for (int i = 0; i < kNumCameras; ++i) {
+        if (topic == topics[i].info) {
+          auto info = deserialize<sensor_msgs::msg::CameraInfo>(bag_msg);
+          loaded.camera_models[i].fromCameraInfo(info);
+          optical_frame[i] = info.header.frame_id;
+          have_model[i] = true;
+          break;
+        }
       }
     }
   }
 
-  if (!have_model) {
-    throw std::runtime_error(
-      "bag has no '" + info_topic + "' — cannot resolve the " + opts.camera +
-      " camera model");
+  // Dispatch table for pass 2: chosen seg-source topic → camera index. Only
+  // cameras that have both a model and a segmentation source contribute.
+  std::map<std::string, int> seg_topic_to_cam;
+  for (int i = 0; i < kNumCameras; ++i) {
+    if (have_model[i] && !seg_source[i].empty()) {
+      seg_topic_to_cam[seg_source[i]] = i;
+    }
   }
-  loaded.used_compressed_segmentation = seg_compressed;
+  if (seg_topic_to_cam.empty()) {
+    throw std::runtime_error(
+      "bag has no usable camera (segmentation + camera_info) among "
+      "oak_{port,forward,starboard,aft}");
+  }
 
-  // ---- Pass 2: replay segmentation, resolve pose, build PreparedFrames. ----
+  // ---- Pass 2: replay every camera's segmentation into one merged timeline. ----
   rosbag2_cpp::Reader reader;
   reader.open(bag_uri);
   const int64_t bag_start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -146,17 +169,19 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
     auto bag_msg = reader.read_next();
     if (bag_msg->recv_timestamp < start_ns) {continue;}
     if (bag_msg->recv_timestamp > end_ns) {break;}
-    if (bag_msg->topic_name != seg_source_topic) {continue;}
 
-    // Decode the mask from whichever source was selected (raw Image or
-    // CompressedImage). The camera model is already pinned to this camera by
-    // topic name; the TF lookup uses `optical_frame` (the camera_info frame_id),
-    // not the image's own frame_id, so a republished/differing image frame_id
-    // won't silently drop every frame.
+    auto cam_it = seg_topic_to_cam.find(bag_msg->topic_name);
+    if (cam_it == seg_topic_to_cam.end()) {continue;}
+    const int cam = cam_it->second;
+
+    // Decode the mask from whichever source was selected for this camera (raw
+    // Image or CompressedImage). The TF lookup uses the camera_info frame_id
+    // (`optical_frame[cam]`), not the image's own frame_id, so a republished /
+    // differing image frame_id won't silently drop every frame.
     cv::Mat mask;
     builtin_interfaces::msg::Time stamp;
     try {
-      if (seg_compressed) {
+      if (seg_compressed[cam]) {
         auto cmp = deserialize<sensor_msgs::msg::CompressedImage>(bag_msg);
         mask = cv_bridge::toCvCopy(cmp, "rgb8")->image;
         stamp = cmp.header.stamp;
@@ -171,13 +196,16 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
 
     const auto tf_time = to_tf_time(stamp);
     try {
-      const auto cam_tf = tf_buffer.lookupTransform(opts.world_frame, optical_frame, tf_time);
-      const auto boat_tf = tf_buffer.lookupTransform(opts.world_frame, opts.boat_frame, tf_time);
+      const auto cam_tf =
+        tf_buffer.lookupTransform(opts.world_frame, optical_frame[cam], tf_time);
+      const auto boat_tf =
+        tf_buffer.lookupTransform(opts.world_frame, opts.boat_frame, tf_time);
 
       const auto & ct = cam_tf.transform.translation;
       const auto & cq = cam_tf.transform.rotation;
 
       PreparedFrame frame;
+      frame.cam = cam;
       frame.stamp_s = stamp.sec + stamp.nanosec * 1e-9;
       frame.mask_rgb8 = mask;
       frame.camera_origin = cv::Vec3d(ct.x, ct.y, ct.z);
@@ -192,9 +220,15 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
     }
   }
 
+  // Interleave the cameras chronologically: accumulate_frame decays on a
+  // monotonic stamp, so the merged stream must be ascending in time.
+  std::stable_sort(
+    loaded.frames.begin(), loaded.frames.end(),
+    [](const PreparedFrame & a, const PreparedFrame & b) {return a.stamp_s < b.stamp_s;});
+
   if (loaded.frames.empty()) {
     throw std::runtime_error(
-      "no usable " + opts.camera + " frames in [" + std::to_string(opts.start_s) + ", " +
+      "no usable segmentation frames in [" + std::to_string(opts.start_s) + ", " +
       std::to_string(opts.end_s) + "]s (" + std::to_string(tf_skipped) +
       " skipped for missing TF)");
   }

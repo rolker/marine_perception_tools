@@ -18,6 +18,7 @@
 #include <QMainWindow>
 #include <QString>
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <string>
@@ -85,10 +86,13 @@ private:
   double min_grazing_deg_;
 
   std::unique_ptr<ReSimEngine> engine_;
-  QLabel * seg_label_ = nullptr;
-  QLabel * grid_label_ = nullptr;
+  std::array<QLabel *, kNumCameras> rgb_labels_{};   // Row 1: camera RGB (H.265)
+  std::array<QLabel *, kNumCameras> seg_labels_{};   // Row 2: segmentation masks
+  QLabel * recorded_label_ = nullptr;                // Row 3 left: recorded costmap
+  QLabel * grid_label_ = nullptr;                    // Row 3 right: regenerated costmap
   QSlider * scrubber_ = nullptr;
-  int panel_px_ = 480;
+  int panel_px_ = 360;        // costmap panel side (square)
+  int cam_tile_h_ = 165;      // camera/seg tile height (4:3)
   std::vector<Knob> knobs_;
 };
 

@@ -65,9 +65,47 @@ ReSimEngine::ReSimEngine(
 void ReSimEngine::accumulate(std::size_t i)
 {
   const PreparedFrame & f = bag_.frames[i];
+  // Every camera's frames feed one shared buffer (the frame carries its own
+  // camera model), so the four streams fuse exactly as the deployed layer does.
   sea_surface_segmentation::accumulate_frame(
-    buffer_, f.mask_rgb8, bag_.camera_model, f.camera_origin, f.rotation_cam_to_target,
-    f.boat_x, f.boat_y, f.stamp_s, acc_);
+    buffer_, f.mask_rgb8, bag_.camera_models[f.cam], f.camera_origin,
+    f.rotation_cam_to_target, f.boat_x, f.boat_y, f.stamp_s, acc_);
+}
+
+cv::Mat ReSimEngine::latestMask(int cam) const
+{
+  if (bag_.frames.empty()) {return cv::Mat();}
+  for (std::size_t i = current_ + 1; i-- > 0; ) {
+    if (bag_.frames[i].cam == cam) {return bag_.frames[i].mask_rgb8;}
+  }
+  return cv::Mat();
+}
+
+cv::Mat ReSimEngine::latestRgb(int cam) const
+{
+  // rgb_frames are time-sorted; return the last one for this camera at or before
+  // the current frame's stamp. Empty until the H.265 stream is decoded.
+  if (bag_.rgb_frames.empty()) {return cv::Mat();}
+  const double t = currentStamp();
+  cv::Mat best;
+  for (const auto & r : bag_.rgb_frames) {
+    if (r.cam != cam) {continue;}
+    if (r.stamp_s > t) {break;}  // sorted — nothing later qualifies
+    best = r.bgr;
+  }
+  return best;
+}
+
+RecordedCostmap ReSimEngine::currentRecordedCostmap() const
+{
+  RecordedCostmap best;  // resolution 0 == none
+  if (bag_.costmaps.empty()) {return best;}
+  const double t = currentStamp();
+  for (const auto & c : bag_.costmaps) {
+    if (c.stamp_s > t) {break;}  // sorted
+    best = c;
+  }
+  return best;
 }
 
 void ReSimEngine::seekTo(std::size_t k)
