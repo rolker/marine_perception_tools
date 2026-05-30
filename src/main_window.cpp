@@ -122,6 +122,11 @@ void MainWindow::openBag(const QString & bag_uri)
   }
   engine_ = std::move(engine);
   syncToEngine();
+  if (engine_->usedCompressedSegmentation()) {
+    statusBar()->showMessage(
+      "Note: using compressed segmentation (raw topic absent) — if JPEG, the "
+      "obstacle-probability channel is lossy; tuned values may not transfer.", 12000);
+  }
 }
 
 void MainWindow::buildParamDock()

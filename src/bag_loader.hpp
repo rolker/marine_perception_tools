@@ -46,6 +46,13 @@ struct LoadedBag
 {
   image_geometry::PinholeCameraModel camera_model;
   std::vector<PreparedFrame> frames;  // ordered by bag time
+
+  // True when the segmentation was read from the lossy-capable `.../compressed`
+  // topic because the raw `Image` topic was absent (size-trimmed bags). The UI
+  // surfaces this: a JPEG-compressed mask corrupts the R-channel obstacle
+  // probability the #22 softmax reads, so tuned values from such a bag are
+  // suspect. Raw is preferred whenever present.
+  bool used_compressed_segmentation = false;
 };
 
 // What/where to read. Defaults match the BizzyBoat recording convention.

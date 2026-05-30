@@ -55,6 +55,10 @@ public:
   std::size_t frameCount() const {return bag_.frames.size();}
   std::size_t currentIndex() const {return current_;}
 
+  // True when the segmentation came from the lossy-capable `.../compressed`
+  // topic (raw Image absent) — the window surfaces the fidelity caveat.
+  bool usedCompressedSegmentation() const {return bag_.used_compressed_segmentation;}
+
   // Move the simulation to frame k (clamped to a valid index). A forward move
   // accumulates the intervening frames incrementally; a rewind clears and
   // replays [0, k] (evidence can't be un-accumulated).

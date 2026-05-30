@@ -25,11 +25,13 @@
 
 #include <opencv2/imgproc.hpp>
 
+#include "builtin_interfaces/msg/time.hpp"
 #include "cv_bridge/cv_bridge.hpp"
 #include "rclcpp/serialization.hpp"
 #include "rclcpp/serialized_message.hpp"
 #include "rosbag2_cpp/reader.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
+#include "sensor_msgs/msg/compressed_image.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "tf2/buffer_core.h"
 #include "tf2/time.h"
@@ -63,6 +65,7 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
 {
   const std::string seg_topic =
     "/bizzy/sensors/cameras/" + opts.camera + "/segmentation";
+  const std::string compressed_topic = seg_topic + "/compressed";
   const std::string info_topic = seg_topic + "/camera_info";
 
   // ---- Pass 1: TF cache (whole bag) + the camera model. ----
@@ -70,9 +73,35 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
   LoadedBag loaded;
   std::string optical_frame;  // the camera's optical frame id
   bool have_model = false;
+
+  // Seg-source selection: prefer the raw `Image` topic; fall back to the
+  // `.../compressed` `CompressedImage` topic when the raw one was not recorded
+  // (size-trimmed bags). Reading both would double-count every frame.
+  std::string seg_source_topic;
+  bool seg_compressed = false;
   {
     rosbag2_cpp::Reader reader;
     reader.open(bag_uri);
+    bool have_raw = false;
+    bool have_cmp = false;
+    for (const auto & t : reader.get_all_topics_and_types()) {
+      if (t.name == seg_topic) {
+        have_raw = true;
+      } else if (t.name == compressed_topic) {
+        have_cmp = true;
+      }
+    }
+    if (have_raw) {
+      seg_source_topic = seg_topic;
+      seg_compressed = false;
+    } else if (have_cmp) {
+      seg_source_topic = compressed_topic;
+      seg_compressed = true;
+    } else {
+      throw std::runtime_error(
+        "bag has neither '" + seg_topic + "' nor '" + compressed_topic +
+        "' — no segmentation for camera " + opts.camera);
+    }
     while (reader.has_next()) {
       auto bag_msg = reader.read_next();
       const std::string & topic = bag_msg->topic_name;
@@ -96,6 +125,7 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
       "bag has no '" + info_topic + "' — cannot resolve the " + opts.camera +
       " camera model");
   }
+  loaded.used_compressed_segmentation = seg_compressed;
 
   // ---- Pass 2: replay segmentation, resolve pose, build PreparedFrames. ----
   rosbag2_cpp::Reader reader;
@@ -116,22 +146,30 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
     auto bag_msg = reader.read_next();
     if (bag_msg->recv_timestamp < start_ns) {continue;}
     if (bag_msg->recv_timestamp > end_ns) {break;}
-    if (bag_msg->topic_name != seg_topic) {continue;}
+    if (bag_msg->topic_name != seg_source_topic) {continue;}
 
-    // The camera model is already pinned to the forward camera by topic name; the
-    // TF lookup uses `optical_frame` (the camera_info frame_id). We don't filter on
-    // the image's own frame_id — a republished/differing image frame_id would
-    // otherwise silently drop every frame.
-    auto img_msg = deserialize<sensor_msgs::msg::Image>(bag_msg);
-
+    // Decode the mask from whichever source was selected (raw Image or
+    // CompressedImage). The camera model is already pinned to this camera by
+    // topic name; the TF lookup uses `optical_frame` (the camera_info frame_id),
+    // not the image's own frame_id, so a republished/differing image frame_id
+    // won't silently drop every frame.
     cv::Mat mask;
+    builtin_interfaces::msg::Time stamp;
     try {
-      mask = cv_bridge::toCvCopy(img_msg, "rgb8")->image;
+      if (seg_compressed) {
+        auto cmp = deserialize<sensor_msgs::msg::CompressedImage>(bag_msg);
+        mask = cv_bridge::toCvCopy(cmp, "rgb8")->image;
+        stamp = cmp.header.stamp;
+      } else {
+        auto img_msg = deserialize<sensor_msgs::msg::Image>(bag_msg);
+        mask = cv_bridge::toCvCopy(img_msg, "rgb8")->image;
+        stamp = img_msg.header.stamp;
+      }
     } catch (const cv_bridge::Exception &) {
       continue;
     }
 
-    const auto tf_time = to_tf_time(img_msg.header.stamp);
+    const auto tf_time = to_tf_time(stamp);
     try {
       const auto cam_tf = tf_buffer.lookupTransform(opts.world_frame, optical_frame, tf_time);
       const auto boat_tf = tf_buffer.lookupTransform(opts.world_frame, opts.boat_frame, tf_time);
@@ -140,7 +178,7 @@ LoadedBag load_forward_camera(const std::string & bag_uri, const BagLoadOptions 
       const auto & cq = cam_tf.transform.rotation;
 
       PreparedFrame frame;
-      frame.stamp_s = img_msg.header.stamp.sec + img_msg.header.stamp.nanosec * 1e-9;
+      frame.stamp_s = stamp.sec + stamp.nanosec * 1e-9;
       frame.mask_rgb8 = mask;
       frame.camera_origin = cv::Vec3d(ct.x, ct.y, ct.z);
       frame.rotation_cam_to_target =
