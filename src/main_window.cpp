@@ -27,6 +27,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPixmap>
+#include <QPushButton>
 #include <QSlider>
 #include <QStatusBar>
 #include <QString>
@@ -250,12 +251,9 @@ void MainWindow::buildParamDock()
         [this, field] {
           return engine_ ? engine_->occupancyParams().*field : OccupancyParams{}.*field;
         },
-        [this, field](double v, std::string & why) {
-          if (!engine_) {why = "no bag loaded"; return false;}
-          auto p = engine_->occupancyParams();
-          p.*field = v;
-          return engine_->setOccupancyParams(p, why);
-        }, nullptr});
+        [field](double v, OccupancyParams & occ, AccumulateParams &) {
+          occ.*field = v;  // stage into the occupancy struct Apply will submit
+        }, nullptr, false});
   }
 
   // AccumulateParams knobs (engine-bounds-checked; window geometry is not here).
@@ -270,12 +268,9 @@ void MainWindow::buildParamDock()
         [this, field] {
           return engine_ ? engine_->accumulateParams().*field : AccumulateParams{}.*field;
         },
-        [this, field](double v, std::string & why) {
-          if (!engine_) {why = "no bag loaded"; return false;}
-          auto p = engine_->accumulateParams();
-          p.*field = v;
-          return engine_->setAccumulateParams(p, why);
-        }, nullptr});
+        [field](double v, OccupancyParams &, AccumulateParams & acc) {
+          acc.*field = v;  // stage into the accumulate struct Apply will submit
+        }, nullptr, false});
   }
 
   auto * panel = new QWidget;
@@ -285,16 +280,37 @@ void MainWindow::buildParamDock()
     box->setRange(-1000.0, 1000.0);  // clear_floor/free_threshold can be negative
     box->setDecimals(3);
     box->setSingleStep(0.1);
-    box->setValue(knob.get());
+    box->setValue(knob.read());
+    // Editing marks the knob dirty (no re-sim — batched until Apply).
     connect(box, qOverload<double>(&QDoubleSpinBox::valueChanged),
       this, &MainWindow::onParamEdited);
     form->addRow(QString::fromStdString(knob.label), box);
     knob.box = box;
   }
 
+  // Apply commits the dirty batch in one re-sim; Reset reverts to applied values.
+  apply_btn_ = new QPushButton("Apply", panel);
+  reset_btn_ = new QPushButton("Reset", panel);
+  apply_btn_->setEnabled(false);
+  reset_btn_->setEnabled(false);
+  connect(apply_btn_, &QPushButton::clicked, this, &MainWindow::onApplyParams);
+  connect(reset_btn_, &QPushButton::clicked, this, &MainWindow::onResetParams);
+  auto * btn_row = new QHBoxLayout;
+  btn_row->addWidget(apply_btn_);
+  btn_row->addWidget(reset_btn_);
+  form->addRow(btn_row);
+
   auto * dock = new QDockWidget("Parameters", this);
   dock->setWidget(panel);
   addDockWidget(Qt::RightDockWidgetArea, dock);
+}
+
+void MainWindow::setKnobDirty(Knob & knob, bool dirty)
+{
+  if (knob.box == nullptr) {return;}
+  knob.dirty = dirty;
+  // Distinct background for an edited-but-unapplied value (R2 dirty cue).
+  knob.box->setStyleSheet(dirty ? "background: #fff3b0;" : QString());
 }
 
 void MainWindow::syncToEngine()
@@ -306,14 +322,19 @@ void MainWindow::syncToEngine()
   // playhead. Only its enabled state tracks whether a bag is open.
   scrubber_->setEnabled(session_ != nullptr);
 
-  // Reseed each spinbox from the (new) engine's params without re-triggering edits.
+  // Reseed each spinbox from the (new) engine's applied params without
+  // re-triggering edits, and clear any dirty cue — a fresh engine / window load
+  // is a clean baseline.
   for (auto & knob : knobs_) {
     if (knob.box == nullptr) {continue;}
     knob.box->blockSignals(true);
-    knob.box->setValue(knob.get());
+    knob.box->setValue(knob.read());
     knob.box->blockSignals(false);
     knob.box->setEnabled(have);
+    setKnobDirty(knob, false);
   }
+  if (apply_btn_ != nullptr) {apply_btn_->setEnabled(false);}
+  if (reset_btn_ != nullptr) {reset_btn_->setEnabled(false);}
 
   refreshViews();
 }
@@ -363,21 +384,63 @@ void MainWindow::onSeekReleased()
 
 void MainWindow::onParamEdited()
 {
+  // Editing does NOT re-simulate (too expensive per keystroke — D4 profiling).
+  // Mark the knob dirty and arm Apply/Reset; the re-sim happens once on Apply.
   auto * box = qobject_cast<QDoubleSpinBox *>(sender());
   if (box == nullptr) {return;}
   for (auto & knob : knobs_) {
     if (knob.box != box) {continue;}
-    std::string why;
-    if (knob.apply(box->value(), why)) {
-      refreshViews();
-    } else {
-      statusBar()->showMessage(QString::fromStdString(knob.label + ": " + why), 5000);
-      box->blockSignals(true);   // revert without re-triggering this slot
-      box->setValue(knob.get());
-      box->blockSignals(false);
-    }
+    setKnobDirty(knob, box->value() != knob.read());  // clean if edited back
+    break;
+  }
+  bool any_dirty = false;
+  for (const auto & k : knobs_) {
+    any_dirty = any_dirty || k.dirty;
+  }
+  apply_btn_->setEnabled(any_dirty && haveEngine());
+  reset_btn_->setEnabled(any_dirty);
+}
+
+void MainWindow::onApplyParams()
+{
+  if (!haveEngine()) {return;}
+  // Build both staged structs from the applied baseline + every box's current
+  // value, then submit as one batch — validate-both-before-apply, single re-sim.
+  auto occ = engine_->occupancyParams();
+  auto acc = engine_->accumulateParams();
+  for (const auto & knob : knobs_) {
+    if (knob.box == nullptr) {continue;}
+    knob.stage(knob.box->value(), occ, acc);
+  }
+  std::string why;
+  if (!engine_->setParams(occ, acc, why)) {
+    // Rejected: leave engine + boxes untouched so the user can fix the offender.
+    statusBar()->showMessage(QString("Apply rejected: ") + QString::fromStdString(why),
+      6000);
     return;
   }
+  // Applied: every box is now the baseline — clear dirty cues, disable buttons.
+  for (auto & knob : knobs_) {
+    setKnobDirty(knob, false);
+  }
+  apply_btn_->setEnabled(false);
+  reset_btn_->setEnabled(false);
+  refreshViews();
+}
+
+void MainWindow::onResetParams()
+{
+  // Revert each box to the applied value and clear its dirty cue. No re-sim — the
+  // engine's params never changed (edits were staged in the boxes only).
+  for (auto & knob : knobs_) {
+    if (knob.box == nullptr) {continue;}
+    knob.box->blockSignals(true);
+    knob.box->setValue(knob.read());
+    knob.box->blockSignals(false);
+    setKnobDirty(knob, false);
+  }
+  apply_btn_->setEnabled(false);
+  reset_btn_->setEnabled(false);
 }
 
 void MainWindow::refreshViews()

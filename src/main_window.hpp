@@ -30,6 +30,7 @@
 
 class QDoubleSpinBox;
 class QLabel;
+class QPushButton;
 class QSlider;
 
 namespace marine_perception_tools
@@ -61,23 +62,37 @@ public:
 private slots:
   void onSeek(int decisec);          // live during drag: in-window seek only
   void onSeekReleased();             // commit: reload the window if out of span
-  void onParamEdited();
+  void onParamEdited();              // mark a knob dirty (no re-sim — batched)
+  void onApplyParams();              // validate+apply the dirty batch, one re-sim
+  void onResetParams();              // revert dirty boxes to the applied values
   void onOpen();
 
 private:
   // One row of the data-driven param dock. Milestone B (after
   // unh_marine_perception#22-P1) swaps the knob set by editing the table that
   // builds these — not the widget code.
+  //
+  // Editing a box does NOT re-simulate (a full warm-up replay is too expensive
+  // per keystroke — see Milestone D4 profiling). Instead an edit marks the knob
+  // dirty (distinct box colour); pressing Apply validates the whole batch and
+  // re-sims once. `read` pulls the applied value from the engine (for display /
+  // Reset); `stage` writes the box's value into a staged params struct that Apply
+  // hands to ReSimEngine::setParams.
   struct Knob
   {
     std::string label;
-    std::function<double()> get;                       // current value
-    std::function<bool(double, std::string &)> apply;  // false + why on reject
+    std::function<double()> read;  // applied value from the engine (or default)
+    std::function<void(
+        double v,
+        sea_surface_segmentation::OccupancyParams & occ,
+        sea_surface_segmentation::AccumulateParams & acc)> stage;  // box -> staged
     QDoubleSpinBox * box = nullptr;
+    bool dirty = false;
   };
 
   void buildMenu();
   void buildParamDock();
+  void setKnobDirty(Knob & knob, bool dirty);  // toggle the dirty-colour cue
   void syncToEngine();  // scrubber range + knob spinboxes + views for current engine
   void refreshViews();
   bool haveEngine() const {return engine_ != nullptr;}
@@ -113,6 +128,8 @@ private:
   QLabel * recorded_label_ = nullptr;                // Row 3 left: recorded costmap
   QLabel * grid_label_ = nullptr;                    // Row 3 right: regenerated costmap
   QSlider * scrubber_ = nullptr;
+  QPushButton * apply_btn_ = nullptr;   // commit the dirty knob batch (one re-sim)
+  QPushButton * reset_btn_ = nullptr;   // revert dirty knobs to applied values
   int panel_px_ = 360;        // costmap panel side (square)
   int cam_tile_h_ = 165;      // camera/seg tile height (4:3)
   std::vector<Knob> knobs_;

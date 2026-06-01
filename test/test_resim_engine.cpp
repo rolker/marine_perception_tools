@@ -271,6 +271,75 @@ TEST(ReSimEngine, RejectsInvalidAccumulateParamsWithoutStateChange)
   EXPECT_DOUBLE_EQ(engine.accumulateParams().max_range, 80.0);
 }
 
+// Batched setParams (D5 Apply): a valid pair applies both structs and the result
+// matches an engine constructed with those params from the start (one re-sim, no
+// residue) — and matches applying them via the two single-knob setters.
+TEST(ReSimEngine, BatchSetParamsEqualsFreshConstruction)
+{
+  const auto bag = make_bag(4);
+  sea_surface_segmentation::OccupancyParams occ;
+  occ.decay_half_life_s = 7.0;
+  occ.lethal_threshold = 1.5;
+  sea_surface_segmentation::AccumulateParams acc;
+  acc.max_range = 60.0;
+  acc.min_grazing_angle_deg = 3.0;
+  acc.obstacle_prob_min = 0.4;
+  acc.max_evidence_step = 0.7;
+  // res/half_extent/plane_z are construction-fixed; leave the engine's geometry.
+
+  mpt::ReSimEngine fresh(bag, kWindowM, kRes, kMaxRange, occ);
+  {
+    std::string why;
+    auto a = fresh.accumulateParams();
+    a.max_range = acc.max_range; a.min_grazing_angle_deg = acc.min_grazing_angle_deg;
+    a.obstacle_prob_min = acc.obstacle_prob_min; a.max_evidence_step = acc.max_evidence_step;
+    ASSERT_TRUE(fresh.setAccumulateParams(a, why)) << why;
+  }
+  fresh.seekTo(3);
+
+  mpt::ReSimEngine batched(bag, kWindowM, kRes, kMaxRange);  // defaults
+  batched.seekTo(3);
+  std::string why;
+  ASSERT_TRUE(batched.setParams(occ, acc, why)) << why;
+
+  EXPECT_DOUBLE_EQ(batched.occupancyParams().decay_half_life_s, 7.0);
+  EXPECT_DOUBLE_EQ(batched.accumulateParams().max_range, 60.0);
+  EXPECT_TRUE(grids_equal(sample_grid(fresh), sample_grid(batched)));
+}
+
+// setParams validates BOTH before applying EITHER: if either struct is invalid,
+// the engine is left completely unchanged (no half-applied batch, no re-sim).
+TEST(ReSimEngine, BatchSetParamsRejectsLeaveStateUnchanged)
+{
+  const auto bag = make_bag(3);
+  mpt::ReSimEngine engine(bag, kWindowM, kRes, kMaxRange);
+  engine.seekTo(2);
+  const auto before = sample_grid(engine);
+  const double occ0 = engine.occupancyParams().decay_half_life_s;
+  const double acc0 = engine.accumulateParams().max_range;
+  std::string why;
+
+  // Bad occupancy (clamp <= 0), good accumulate → whole batch rejected.
+  sea_surface_segmentation::OccupancyParams bad_occ = engine.occupancyParams();
+  bad_occ.obstacle_clamp = -1.0;
+  sea_surface_segmentation::AccumulateParams ok_acc = engine.accumulateParams();
+  ok_acc.max_range = 50.0;
+  EXPECT_FALSE(engine.setParams(bad_occ, ok_acc, why));
+  EXPECT_FALSE(why.empty());
+
+  // Good occupancy, bad accumulate (range <= 0) → whole batch rejected.
+  sea_surface_segmentation::OccupancyParams ok_occ = engine.occupancyParams();
+  ok_occ.decay_half_life_s = 12.0;
+  sea_surface_segmentation::AccumulateParams bad_acc = engine.accumulateParams();
+  bad_acc.max_range = -5.0;
+  EXPECT_FALSE(engine.setParams(ok_occ, bad_acc, why));
+
+  // Neither rejection moved the engine: params and rendered grid are unchanged.
+  EXPECT_DOUBLE_EQ(engine.occupancyParams().decay_half_life_s, occ0);
+  EXPECT_DOUBLE_EQ(engine.accumulateParams().max_range, acc0);
+  EXPECT_TRUE(grids_equal(before, sample_grid(engine)));
+}
+
 // All four (here two) cameras feed one shared buffer, and the per-camera latest
 // lookup returns each camera's own mask — the multi-camera fusion + lookup is the
 // logic added for the 4-camera tuner, so it gets its own coverage.

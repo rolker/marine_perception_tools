@@ -220,23 +220,14 @@ void ReSimEngine::clearCheckpoints()
   last_checkpoint_stamp_s_ = 0.0;
 }
 
-bool ReSimEngine::setOccupancyParams(
-  const sea_surface_segmentation::OccupancyParams & p, std::string & why)
+namespace
 {
-  if (!sea_surface_segmentation::OccupancyBuffer::validate(p, why)) {
-    return false;
-  }
-  occ_ = p;
-  buffer_.setParams(p);
-  resimToCurrent();  // increments + decay change → re-accumulate the window
-  return true;
-}
-
-bool ReSimEngine::setAccumulateParams(
+// AccumulateParams has no library validator; guard the tunable fields here
+// (mirrors the offline tool's --arg checks + the per-pixel-log-odds gate range).
+// Window geometry (res/half_extent/plane_z) is construction-fixed and not checked.
+bool validate_accumulate(
   const sea_surface_segmentation::AccumulateParams & p, std::string & why)
 {
-  // AccumulateParams has no library validator; guard the tunable fields here
-  // (mirrors the offline tool's --arg checks + the per-pixel-log-odds gate range).
   if (!(std::isfinite(p.max_range) && p.max_range > 0.0)) {
     why = "max_range must be finite and > 0";
     return false;
@@ -257,12 +248,56 @@ bool ReSimEngine::setAccumulateParams(
     why = "max_evidence_step must be finite and > 0";
     return false;
   }
+  return true;
+}
+}  // namespace
+
+bool ReSimEngine::setOccupancyParams(
+  const sea_surface_segmentation::OccupancyParams & p, std::string & why)
+{
+  if (!sea_surface_segmentation::OccupancyBuffer::validate(p, why)) {
+    return false;
+  }
+  occ_ = p;
+  buffer_.setParams(p);
+  resimToCurrent();  // increments + decay change → re-accumulate the window
+  return true;
+}
+
+bool ReSimEngine::setAccumulateParams(
+  const sea_surface_segmentation::AccumulateParams & p, std::string & why)
+{
+  if (!validate_accumulate(p, why)) {
+    return false;
+  }
   // Window geometry is construction-fixed — preserve it regardless of `p`.
   acc_.max_range = p.max_range;
   acc_.min_grazing_angle_deg = p.min_grazing_angle_deg;
   acc_.obstacle_prob_min = p.obstacle_prob_min;
   acc_.max_evidence_step = p.max_evidence_step;
   resimToCurrent();
+  return true;
+}
+
+bool ReSimEngine::setParams(
+  const sea_surface_segmentation::OccupancyParams & occ,
+  const sea_surface_segmentation::AccumulateParams & acc, std::string & why)
+{
+  // Validate BOTH before applying EITHER, so a rejected batch leaves the engine
+  // untouched (no half-applied params, no wasted re-sim).
+  if (!sea_surface_segmentation::OccupancyBuffer::validate(occ, why)) {
+    return false;
+  }
+  if (!validate_accumulate(acc, why)) {
+    return false;
+  }
+  occ_ = occ;
+  buffer_.setParams(occ);
+  acc_.max_range = acc.max_range;
+  acc_.min_grazing_angle_deg = acc.min_grazing_angle_deg;
+  acc_.obstacle_prob_min = acc.obstacle_prob_min;
+  acc_.max_evidence_step = acc.max_evidence_step;
+  resimToCurrent();  // single warm-up replay for the whole batch
   return true;
 }
 

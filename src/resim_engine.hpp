@@ -92,6 +92,14 @@ public:
   bool setAccumulateParams(
     const sea_surface_segmentation::AccumulateParams & p, std::string & why);
 
+  // Apply BOTH param structs in one batch: validate both first (no state change
+  // if either is rejected — sets `why` to the first failure), then apply both and
+  // re-simulate ONCE. The Apply button (UI) uses this so a batch of edits across
+  // the occupancy and accumulate knobs pays a single warm-up replay, not two.
+  bool setParams(
+    const sea_surface_segmentation::OccupancyParams & occ,
+    const sea_surface_segmentation::AccumulateParams & acc, std::string & why);
+
   const sea_surface_segmentation::OccupancyParams & occupancyParams() const {return occ_;}
   const sea_surface_segmentation::AccumulateParams & accumulateParams() const {return acc_;}
 
