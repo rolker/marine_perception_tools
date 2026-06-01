@@ -432,3 +432,81 @@ explicit `[start,end]`).
   `BagSession` stateful loader) update in the same PR.
 - **Capture decisions**: integration = 3× half-life, margin 10 s, retention
   120 s, far-jump = drop+reload — all recorded here with their rationale.
+
+### Review resolutions (sub-agent review, 2026-05-31)
+
+A fresh-context design review surfaced two blockers and several honesty/UX gaps.
+Resolutions below are binding on the implementation.
+
+- **[R1] Determinism — the costmap is a pure function of `(t, params, bag)`.**
+  The engine replays **exactly `[t − integration, t]`** and nothing else. The
+  retained frames (R3) are an **I/O cache only — never fed to the engine as
+  warm-up.** This resolves the plan's internal contradiction: the earlier
+  "engine replays frame 0..current of whatever LoadedBag it holds" is **wrong**
+  for the retention case (it would make the costmap at a fixed `t` depend on
+  scroll history). The engine is handed (or views) only the guaranteed
+  `[t − integration, t]` slice; trimming/extension of the I/O cache must not
+  change which frames are accumulated for a given `t`. Add an engine-level test:
+  the rendered grid at a fixed `t` is identical whether the span was reached by
+  fresh load, forward extend, or trim-and-reload.
+- **[R2] Re-sim cost — an Apply button; no re-sim on each edit (Roland,
+  2026-05-31).** Editing a knob does **not** re-simulate. Edited-but-unapplied
+  spinboxes render in a distinct colour (dirty cue); pressing **Apply** validates
+  the batch and triggers one re-sim. This is the key change from the current
+  `onParamEdited`→immediate-`resimToCurrent` path: it lets several changes batch
+  and pays the ~90 s warm-up replay once, not per keystroke. (`Reset` reverts
+  dirty boxes to the applied values.) Rejected values (validator/bounds) flag the
+  offending box and abort the whole Apply, leaving engine state unchanged.
+- **[R3] Retention saves I/O, not compute.** Because re-sim now fires only on
+  Apply/scrub (not per edit), retention's role is purely to avoid re-reading the
+  bag when a nearby window is revisited. State this plainly — do not claim
+  "sweeping stays instant" in the compute sense.
+- **[R4] TF cache vs. bag length.** `tf2::BufferCore` evicts transforms older
+  than its cache window *relative to the newest inserted stamp*; the current
+  fixed `durationFromSec(7200.0)` (2 h) would make start-of-bag lookups fail on a
+  >2 h recording after the full `open()` scan. **Fix:** size the cache to the bag
+  duration (from metadata) at `open()`, with a generous pad, and document the
+  resulting memory cost. `/tf_static` must be present in whatever buffer performs
+  lookups for a window (re-inject if a per-window buffer is ever used).
+- **[R5] Windowed ≠ full-history costmap — state the SPATIAL caveat, not just
+  decay.** Beyond the ~12% temporal decay residual at 3× half-life, cells the
+  boat observed **before** `t − integration` were marked in the real/full-history
+  run and read unobserved in the windowed run — so near the window edge and for
+  revisited areas a cell can flip lethal↔unknown. The operator must not mistake
+  this edge artifact for a parameter effect. Surface a persistent status/label:
+  `windowed: warm-up <N>s (not full history)`. Documented honestly in README.
+- **[R6] H.265 GOP gap recurs per reload.** Seeking a window start mid-GOP gives
+  "(no RGB) until next keyframe" on **every** reload, not just at startup.
+  Acknowledge as expected; optionally snap the RGB-decode start back to the
+  preceding keyframe using a keyframe index built during `open()` (nice-to-have,
+  not required for first cut). The projected segmentation/costmap are unaffected.
+- **[R7] Window gating in stamp-time.** The warm-up guarantee is a header-stamp
+  property, but the current loader gates reads by `recv_timestamp`. `loadWindow`
+  must gate by header stamp (or pad the recv window by max observed latency) so
+  `[t − integration, t]` actually contains `integration` seconds of stamp-time
+  warm-up.
+- **[R8] Reload on slider release, not drag.** A `QSlider` `valueChanged` fires
+  continuously during a drag; a synchronous multi-second `loadWindow` per value
+  would freeze the UI. Out-of-span reloads commit on `sliderReleased` (or a
+  settle debounce); in-span moves still update live on `valueChanged`. This
+  reshapes the current `onSeek`/`valueChanged` wiring.
+- **[R9] Boundary cases (explicit + tested).** (a) `t < integration + margin` →
+  `lo` clamps to bag start; warm-up is *shorter* than `integration` — degraded
+  fidelity, surfaced by the R5 label. (b) `decay_half_life_s` raised so
+  `integration` exceeds the bag → span clamps to whole bag (windowing degrades to
+  full-bag load; acceptable, but note the memory implication). (c) `retention_s`
+  smaller than the guaranteed window → effective floor IS the guaranteed-window
+  length (never trim inside it); test asserts this floor. (d) far jump → drop +
+  reload, with a status note ("re-warming from t−<N>s") so the post-jump transient
+  isn't misread (R5/R11 consistency).
+
+### Revised staging (Milestone D, atomic commits)
+
+D1. plan.md (this update). D2. `BagSession` split: `open()` (one scan, bag-length
+TF cache, time bounds, seg-source) + `loadWindow(start,end)` reusing cached TF,
+header-stamp gated; `load_bag` becomes the wrapper. D3. pure span-policy helper +
+its unit tests (R9 boundaries) and the engine determinism test (R1). D4.
+time-based whole-bag scrubber + buffer manager in `MainWindow` (in-span live,
+out-of-span reload on release, far-jump drop+reload, status notes). D5. Apply/Reset
+param workflow with dirty-colour cue (R2), replacing immediate re-sim. D6. README
++ `.agents/README.md` (windowed File→Open, new knobs, fidelity caveat).
