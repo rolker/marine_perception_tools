@@ -49,9 +49,15 @@ class MainWindow : public QMainWindow
   Q_OBJECT
 
 public:
+  // window_m/res/max_range/min_grazing_deg size the OccupancyBuffer + projection
+  // (construction-fixed). integration_halflives/margin_s/retention_s tune the
+  // windowed-buffer policy (Milestone D4): window = integration_halflives *
+  // decay_half_life_s of warm-up, +/- margin_s of reload-free scrub slack, with
+  // retention_s of extra already-read frames kept beyond the guaranteed window.
   MainWindow(
     BagLoadOptions load_opts, double window_m, double res, double max_range,
-    double min_grazing_deg, QWidget * parent = nullptr);
+    double min_grazing_deg, double integration_halflives = 1.0,
+    double margin_s = 10.0, double retention_s = 120.0, QWidget * parent = nullptr);
 
   // Open a bag: build a BagSession (one full scan), set the whole-bag time
   // scrubber range, and load the initial window around t=0. On failure the

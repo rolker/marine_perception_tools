@@ -48,13 +48,17 @@ namespace marine_perception_tools
 
 MainWindow::MainWindow(
   BagLoadOptions load_opts, double window_m, double res, double max_range,
-  double min_grazing_deg, QWidget * parent)
+  double min_grazing_deg, double integration_halflives, double margin_s,
+  double retention_s, QWidget * parent)
 : QMainWindow(parent),
   load_opts_(std::move(load_opts)),
   window_m_(window_m),
   res_(res),
   max_range_(max_range),
-  min_grazing_deg_(min_grazing_deg)
+  min_grazing_deg_(min_grazing_deg),
+  integration_halflives_(integration_halflives),
+  margin_s_(margin_s),
+  retention_s_(retention_s)
 {
   setWindowTitle("sea_surface_tuner");
 

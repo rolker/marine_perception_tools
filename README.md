@@ -25,8 +25,8 @@ Motivated by deployment
 ### Status — interactive 4-camera tuner
 
 All four OAK cameras are fused and replayed beside the recorded and re-simulated
-costmaps, with a menu bar, frame scrubber, and live parameter dock. Editing a
-knob re-simulates the loaded window and refreshes the regenerated costmap.
+costmaps, with a menu bar, whole-bag time scrubber, and a parameter dock with an
+Apply/Reset workflow.
 
 ```bash
 # Open empty, then File → Open Bag…
@@ -34,8 +34,9 @@ ros2 run marine_perception_tools sea_surface_tuner
 
 # …or open a *_ffmpeg_seg bag on startup
 ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
-    [--start-s S] [--end-s S] [--window-m 120] [--res 0.25] \
-    [--max-range 150] [--min-grazing-deg 0] [--probe]
+    [--window-m 120] [--res 0.25] [--max-range 150] [--min-grazing-deg 0] \
+    [--integration-halflives 1] [--margin-s 10] [--retention-s 120] \
+    [--start-s S] [--end-s S] [--probe]
 ```
 
 - **Menu bar** — *File → Open Bag…* (open a rosbag2 directory at runtime;
@@ -53,20 +54,45 @@ ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
   notes the fallback (a JPEG-compressed mask corrupts the obstacle-probability
   channel). Camera/boat pose resolved from TF (`bizzy/map_tide` → optical /
   `base_link`).
-- **Scrubber**: seek through the loaded window (forward seeks accumulate
-  incrementally; rewinds re-simulate from the window start).
-- **Parameter dock** — the live-tunable `sea_surface_segmentation` knobs
+- **Windowed File → Open.** Opening a bag scans it once (TF cache, camera
+  models, time bounds) but buffers only a *window* of frames around the scrub
+  point — never the whole recording (a long 4-camera bag would exhaust memory).
+  The window is `integration-halflives × decay_half_life_s` of accumulation
+  warm-up behind the playhead, plus `margin-s` of reload-free scrub slack on each
+  side; up to `retention-s` of already-read frames beyond it are kept so nearby
+  re-visits avoid a re-read.
+- **Scrubber** spans the whole bag in time. Seeks *inside* the loaded window are
+  instant — backward seeks restore a cached buffer checkpoint and replay only the
+  short tail (forward seeks accumulate incrementally). A seek *outside* the
+  window loads a fresh window around the target; this is deferred to slider
+  release (a drag doesn't trigger a multi-second reload mid-motion) and shows a
+  "Warming up…" status while it loads.
+- **Fidelity caveat (windowed ≠ full history).** Because the regenerated costmap
+  is warmed only over the window (not the whole bag), cells the boat observed
+  *before* the window started read as unobserved — so near the window edge / for
+  revisited areas the regenerated costmap can differ from the recorded one for
+  reasons that aren't a parameter effect. The status bar shows the warm-up
+  actually behind the current frame (`windowed: warm-up N s …`); near the bag
+  start it is shorter than the full integration.
+- **Parameter dock** — the tunable `sea_surface_segmentation` knobs
   ([unh_marine_perception#22](https://github.com/rolker/unh_marine_perception/issues/22)):
   - occupancy: `decay_half_life_s`, `lethal_threshold`, `obstacle_clamp`,
     `clear_floor`, `free_threshold`
   - accumulation: `max_range`, `min_grazing_angle_deg`, `obstacle_prob_min`,
     `max_evidence_step`
 
-  Invalid values are rejected (status bar) and reverted. Window geometry
-  (`--window-m`/`--res`) is CLI-only (it sizes the buffer at construction).
-- **`--probe`** loads the bag, prints seg/RGB/costmap counts (and the first RGB
-  frame's size + channel means), and exits — a headless check of the loader,
-  incl. H.265 decode, against a real bag. Run under `QT_QPA_PLATFORM=offscreen`.
+  Editing a knob does **not** re-simulate immediately — a full warm-up replay is
+  too expensive per keystroke. An edited-but-unapplied knob is highlighted;
+  **Apply** validates the whole batch and re-simulates once (an invalid value is
+  rejected to the status bar and the batch is left unapplied), and **Reset**
+  reverts edits to the applied values. Window geometry (`--window-m`/`--res`) is
+  CLI-only (it sizes the buffer at construction).
+- **`--probe`** loads the `[--start-s, --end-s]` range, prints seg/RGB/costmap
+  counts (and the first RGB frame's size + channel means), and exits — a headless
+  check of the loader, incl. H.265 decode, against a real bag. Run under
+  `QT_QPA_PLATFORM=offscreen`, and **always with a `--start-s/--end-s` clamp**
+  (`--probe` does a one-shot load, not the windowed read, so an unclamped probe
+  buffers the whole bag).
 
 The `*_ffmpeg_seg` bags under `~/data/logs/bizzy_images/` are self-contained
 (all four cameras' RGB + segmentation + camera_info, `/tf`, and the recorded

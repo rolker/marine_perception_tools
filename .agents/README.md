@@ -22,21 +22,23 @@ apply.
 
 | Package | Language | Description |
 |---------|----------|-------------|
-| `marine_perception_tools` | C++ (Qt5) | Builds `sea_surface_tuner` — a 4-camera bag-replay + costmap re-tuning viewer (menu/File→Open, fused costmap, raw+compressed segmentation, H.265 RGB decode, recorded-vs-regenerated compare) ([#1](https://github.com/rolker/marine_perception_tools/issues/1)). |
+| `marine_perception_tools` | C++ (Qt5) | Builds `sea_surface_tuner` — a 4-camera bag-replay + costmap re-tuning viewer (menu/File→Open with windowed buffering, fused costmap, raw+compressed segmentation, H.265 RGB decode, recorded-vs-regenerated compare, Apply/Reset param dock) ([#1](https://github.com/rolker/marine_perception_tools/issues/1)). |
 
 ## Repository Layout
 
 ```
 marine_perception_tools/
 ├── src/
-│   ├── bag_loader.{hpp,cpp}    # multi-pass bag read → 4-camera merged PreparedFrames + RGB (H.265) + recorded costmap (TF, per-camera models, raw/compressed seg)
-│   ├── resim_engine.{hpp,cpp}  # OccupancyBuffer wrapper: fuse all cameras, re-sim, render regenerated + recorded costmaps
+│   ├── bag_loader.{hpp,cpp}    # BagSession: one full scan (TF cache, models, bounds) + loadWindow(start,end) windowed reads; load_bag() one-shot wrapper. 4-camera merged PreparedFrames + RGB (H.265) + recorded costmap
+│   ├── buffer_policy.hpp       # pure plan_buffer(): given scrub time t, decide engine replay span + I/O-cache extent + reload action (no Qt/ROS)
+│   ├── resim_engine.{hpp,cpp}  # OccupancyBuffer wrapper: fuse all cameras, re-sim, render; frame-indexed checkpoint store for cheap backward seek; batched setParams
 │   ├── cv_qt.hpp               # cv::Mat (rgb8/BGR) → QImage helper
-│   ├── main_window.{hpp,cpp}   # MainWindow: menu/File→Open, 4+4+2 pane grid, scrubber, data-driven param dock
+│   ├── main_window.{hpp,cpp}   # MainWindow: menu/File→Open, 4+4+2 pane grid, whole-bag time scrubber, buffer manager (BagSession+plan_buffer), Apply/Reset param dock
 │   └── main.cpp                # CLI parse (+ --probe headless) → window → openBag
 ├── test/
-│   └── test_resim_engine.cpp   # GTest: determinism, re-sim equivalence, clear, bounds-reject, multi-camera fusion + per-camera latest lookup
-├── CMakeLists.txt              # ament_cmake; tuner_core library + Qt exe + gtest
+│   ├── test_resim_engine.cpp   # GTest: determinism, re-sim equivalence, clear, bounds-reject, multi-camera fusion, checkpoint rewind==fresh-replay, batched setParams
+│   └── test_buffer_policy.cpp  # GTest: pure span-policy boundaries (fresh/extend/far-jump/retention-trim/clamps)
+├── CMakeLists.txt              # ament_cmake; tuner_core library + Qt exe + 2 gtests
 ├── package.xml
 ├── .github/workflows/ci.yml
 └── .pre-commit-config.yaml
@@ -77,3 +79,18 @@ source ../../../.agent/scripts/setup.bash && colcon test --packages-select marin
 - **`res`/`half_extent` are construction-time geometry** — they size the
   `OccupancyBuffer` and are CLI-only, not live dock knobs (changing them needs a
   new engine). The live dock holds only `setParams`-able / projection knobs.
+- **Windowed File→Open, not whole-bag.** `MainWindow` keeps one `BagSession`
+  (the single scan) and loads only a window around the scrub point via
+  `plan_buffer` → `loadWindow`; an unbounded whole-bag load OOMs on long
+  4-camera bags. The engine accumulates exactly `[t−integration, t]`, and the
+  costmap at a given frame is a pure function of `(frame, params, window-start)`.
+  Re-sim cost is `frames × n²` cells (`n = 2·half_extent/res`): a full window
+  replay is ~tens of seconds, so **never re-sim per scrub step or per keystroke.**
+  The `ReSimEngine` checkpoint store makes *backward* seeks cheap (restore nearest
+  snapshot + replay the short tail — bit-identical to a fresh replay because an
+  `OccupancyBuffer` copy captures the decay clock); a parameter change clears the
+  checkpoints, so the dock batches edits behind **Apply** (one re-sim) rather than
+  re-simulating on every `valueChanged`.
+- **`--probe` does the one-shot `load_bag`, not the windowed read** — so a
+  probe with no `--start-s/--end-s` clamp buffers the entire bag and can OOM.
+  Always clamp manual probes.

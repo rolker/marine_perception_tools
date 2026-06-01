@@ -46,11 +46,17 @@ int main(int argc, char ** argv)
   if (!has_bag && argc >= 2 && std::string(argv[1]) == "--help") {
     std::fprintf(stderr,
       "usage: %s [bag_uri] [--start-s S] [--end-s S] [--window-m 120] [--res 0.25]\n"
-      "          [--max-range 150] [--min-grazing-deg 0] [--probe]\n"
+      "          [--max-range 150] [--min-grazing-deg 0]\n"
+      "          [--integration-halflives 1] [--margin-s 10] [--retention-s 120]\n"
+      "          [--probe]\n"
       "Replays all four OAK cameras' segmentation and tunes the segmentation->\n"
       "costmap marking interactively. With no bag_uri the window opens empty — use\n"
-      "File -> Open Bag…. --start-s/--end-s window the replay (end<0 == to end).\n"
-      "--probe loads the bag, prints frame/rgb/costmap counts, and exits (headless).\n",
+      "File -> Open Bag…. File->Open buffers a window around the scrub point rather\n"
+      "than the whole bag: integration-halflives x decay_half_life_s of warm-up,\n"
+      "+/- margin-s of reload-free scrub slack, keeping retention-s of extra\n"
+      "already-read frames. --start-s/--end-s optionally clamp the session to a\n"
+      "sub-range (end<0 == to end). --probe loads [start,end], prints frame/rgb/\n"
+      "costmap counts, and exits (headless).\n",
       argv[0]);
     return 0;
   }
@@ -67,6 +73,11 @@ int main(int argc, char ** argv)
   const double res = arg_double(argc, argv, "--res", 0.25);
   const double max_range = arg_double(argc, argv, "--max-range", 150.0);
   const double min_grazing = arg_double(argc, argv, "--min-grazing-deg", 0.0);
+  // Windowed-buffer policy knobs (Milestone D4): window = halflives x
+  // decay_half_life_s of warm-up, +/- margin of scrub slack, + retention extra.
+  const double integ_hl = arg_double(argc, argv, "--integration-halflives", 1.0);
+  const double margin_s = arg_double(argc, argv, "--margin-s", 10.0);
+  const double retention_s = arg_double(argc, argv, "--retention-s", 120.0);
 
   if (!(window_m > 0.0) || !(res > 0.0) || !(max_range > 0.0)) {
     std::fprintf(stderr, "error: --window-m, --res, and --max-range must be > 0\n");
@@ -74,6 +85,11 @@ int main(int argc, char ** argv)
   }
   if (!(min_grazing >= 0.0 && min_grazing < 90.0)) {
     std::fprintf(stderr, "error: --min-grazing-deg must be in [0, 90)\n");
+    return 1;
+  }
+  if (!(integ_hl > 0.0) || !(margin_s >= 0.0) || !(retention_s >= 0.0)) {
+    std::fprintf(stderr,
+      "error: --integration-halflives must be > 0; --margin-s/--retention-s >= 0\n");
     return 1;
   }
 
@@ -106,7 +122,8 @@ int main(int argc, char ** argv)
     }
   }
 
-  marine_perception_tools::MainWindow window(opts, window_m, res, max_range, min_grazing);
+  marine_perception_tools::MainWindow window(
+    opts, window_m, res, max_range, min_grazing, integ_hl, margin_s, retention_s);
   window.resize(1280, 720);
   window.show();
   if (has_bag) {
