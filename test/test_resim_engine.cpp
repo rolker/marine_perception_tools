@@ -300,6 +300,84 @@ TEST(ReSimEngine, LatestMaskEmptyForAbsentCamera)
   EXPECT_TRUE(e.latestMask(3).empty());  // aft camera not present in this bag
 }
 
+// Build a bag holding exactly the frames whose stamp lies in [lo, hi] — the
+// engine's view of one buffered span. Frame i has stamp 0.5*i (see make_bag).
+mpt::LoadedBag slice_bag(int n_frames, double lo, double hi)
+{
+  const auto full = make_bag(n_frames);
+  mpt::LoadedBag out;
+  out.camera_models = full.camera_models;
+  for (const auto & f : full.frames) {
+    if (f.stamp_s >= lo && f.stamp_s <= hi) {
+      out.frames.push_back(f);
+    }
+  }
+  return out;
+}
+
+// Sample the buffer at an absolute stamp `t` over a bag that contains AT LEAST
+// the replay span [t-integration, t]. Seeks to the frame at/just before `t`.
+std::vector<double> grid_at(mpt::ReSimEngine & e, double t)
+{
+  // Seek to the last frame whose stamp <= t (frames are stamp-sorted).
+  std::size_t target = 0;
+  for (std::size_t i = 0; i < e.frameCount(); ++i) {
+    e.seekTo(i);
+    if (e.currentStamp() <= t + 1e-9) {
+      target = i;
+    } else {
+      break;
+    }
+  }
+  e.seekTo(target);
+  return sample_grid(e);
+}
+
+// R1 (determinism): the costmap at a fixed view time `t` must not depend on
+// retained frames the buffer happens to hold BEYOND `t`. The retention cache
+// (D-series) keeps future frames in memory to avoid re-reads; this test proves
+// those un-replayed future frames never leak into the rendering at `t`.
+//
+// Three bags share the same replay span start (replay_lo = 9) but differ in how
+// far past `t` they extend — modelling fresh-load, forward-extend (future frames
+// retained ahead of t), and trim-and-reload provenances. Each `grid_at` seeks to
+// the frame at/just before t=15, so all three accumulate exactly [9..15]; the
+// rendered grids must match. (The complementary property — that the engine's
+// START frame is load-bearing, so the manager must hand it [replay_lo, t] — is a
+// D4 buffer-manager concern: with this fixed-boat synthetic geometry obstacle
+// cells saturate at obstacle_clamp regardless of warm-up length, so the spatial
+// start-dependence of R5 can only be exercised at the D4 integration level with a
+// moving-boat bag, not here.)
+TEST(ReSimEngine, CostmapAtFixedTimeIgnoresRetainedFutureFrames)
+{
+  // 40 frames at 0.5s spacing → stamps [0, 19.5]. t=15, integration 6s → replay
+  // span [9, 15].
+  const int n = 40;
+  const double t = 15.0;
+  const double integration = 6.0;
+  const double replay_lo = t - integration;  // 9.0
+
+  // Provenance A — fresh load: bag is exactly the replay span [9, 15].
+  auto bag_fresh = slice_bag(n, replay_lo, t);
+  // Provenance B — forward extend: a wider cache [9, 17] with retained future
+  // frames ahead of t. They must not be accumulated when viewing t.
+  auto bag_extend = slice_bag(n, replay_lo, 17.0);
+  // Provenance C — trim-and-reload: a different upper extent [9, 15.5].
+  auto bag_trim = slice_bag(n, replay_lo, 15.5);
+
+  mpt::ReSimEngine a(bag_fresh, kWindowM, kRes, kMaxRange);
+  mpt::ReSimEngine b(bag_extend, kWindowM, kRes, kMaxRange);
+  mpt::ReSimEngine c(bag_trim, kWindowM, kRes, kMaxRange);
+
+  const auto ga = grid_at(a, t);
+  const auto gb = grid_at(b, t);
+  const auto gc = grid_at(c, t);
+
+  EXPECT_GT(finite_count(ga), 0u) << "replay span observed nothing — vacuous";
+  EXPECT_TRUE(grids_equal(ga, gb)) << "retained future frames leaked into t";
+  EXPECT_TRUE(grids_equal(ga, gc)) << "trim provenance changed the costmap at t";
+}
+
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

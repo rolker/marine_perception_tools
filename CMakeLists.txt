@@ -78,6 +78,11 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_resim_engine
     image_geometry sea_surface_segmentation sensor_msgs)
 
+  # Pure span-policy logic (buffer_policy.hpp) — header-only, no bag/Qt/ROS, so
+  # the test needs only the source include dir.
+  ament_add_gtest(test_buffer_policy test/test_buffer_policy.cpp)
+  target_include_directories(test_buffer_policy PRIVATE src)
+
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()
