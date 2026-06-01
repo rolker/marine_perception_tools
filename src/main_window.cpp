@@ -66,6 +66,13 @@ MainWindow::MainWindow(
 {
   setWindowTitle("sea_surface_tuner");
 
+  // Seed the applied-params source of truth: occ defaults, and the accumulate
+  // knobs whose initial values come from the CLI (max_range / min_grazing) — the
+  // rest keep AccumulateParams' struct defaults. Every (re)load carries these so
+  // tuning survives a window reload.
+  applied_acc_.max_range = max_range_;
+  applied_acc_.min_grazing_angle_deg = min_grazing_deg_;
+
   // Each row is a QWidget (so a vertical QSplitter can resize it) holding a
   // horizontal layout. Labels expand to fill (the splitter, not a fixed tile
   // size, governs their height) — minimums keep them usable when shrunk.
@@ -305,24 +312,43 @@ void MainWindow::launchStage(
   const BufferState state = buffer_state_;
   const double window_m = window_m_, res = res_, max_range = max_range_;
   const double min_grazing = min_grazing_deg_;
-  const sea_surface_segmentation::OccupancyParams occ =
-    engine_ ? engine_->occupancyParams() : sea_surface_segmentation::OccupancyParams{};
+  // Carry the APPLIED params into the load so a reload preserves tuning (the
+  // engine ctor only takes occ + geometry; acc's obstacle_prob_min /
+  // max_evidence_step would otherwise reset to struct defaults on every reload).
+  const sea_surface_segmentation::OccupancyParams occ = applied_occ_;
+  const sea_surface_segmentation::AccumulateParams acc = applied_acc_;
   load_watcher_.setFuture(QtConcurrent::run(
-      [session, params, state, t_s, window_m, res, max_range, min_grazing, occ, id,
-      preloaded] {
+      [session, params, state, t_s, window_m, res, max_range, min_grazing, occ, acc,
+      id, preloaded] {
         return loadWindowJob(
-        session, params, state, t_s, window_m, res, max_range, min_grazing, occ, id,
-        preloaded);
+        session, params, state, t_s, window_m, res, max_range, min_grazing, occ, acc,
+        id, preloaded);
     }));
 }
 
 MainWindow::LoadResult MainWindow::loadWindowJob(
   std::shared_ptr<BagSession> session, BufferParams params, BufferState state,
   double t_s, double window_m, double res, double max_range, double min_grazing_deg,
-  sea_surface_segmentation::OccupancyParams occ, std::uint64_t request_id,
+  sea_surface_segmentation::OccupancyParams occ,
+  sea_surface_segmentation::AccumulateParams acc, std::uint64_t request_id,
   std::shared_ptr<LoadedBag> preloaded)
 {
-  // Worker thread: NO Qt / GUI access.
+  // Worker thread: NO Qt / GUI access. Build the engine with `occ`, then apply
+  // the full tunable `acc` — all four dock-tunable accumulate fields (max_range,
+  // min_grazing_angle_deg, obstacle_prob_min, max_evidence_step). The ctor's
+  // max_range/min_grazing args are only the initial values; `acc` is the live
+  // source of truth, so a reload preserves every tuned accumulate knob. (res /
+  // half_extent / plane_z stay construction-fixed — setAccumulateParams ignores
+  // them.)
+  auto apply_acc = [&](ReSimEngine & e) {
+      auto a = e.accumulateParams();
+      a.max_range = acc.max_range;
+      a.min_grazing_angle_deg = acc.min_grazing_angle_deg;
+      a.obstacle_prob_min = acc.obstacle_prob_min;
+      a.max_evidence_step = acc.max_evidence_step;
+      std::string why;
+      e.setAccumulateParams(a, why);  // validated upstream; ignore on the worker
+    };
   LoadResult r;
   r.target_s = t_s;
   r.request_id = request_id;
@@ -333,6 +359,7 @@ MainWindow::LoadResult MainWindow::loadWindowJob(
     if (!preloaded) {
       // Stage A: read the window (the slow I/O + H.265 decode) and build a
       // display-only engine — index set for the image views, NO warm-up replay.
+      // acc is NOT applied here (it would force a replay); stage B applies it.
       auto bag = std::make_shared<LoadedBag>(
         session->loadWindow(plan.cache_lo, plan.cache_hi));
       auto engine = std::make_shared<ReSimEngine>(
@@ -343,9 +370,10 @@ MainWindow::LoadResult MainWindow::loadWindowJob(
       r.warmed = false;
     } else {
       // Stage B: build a fresh engine from the SAME bag (cv::Mat is refcounted —
-      // copies frame headers, not pixels) and warm it to the target.
+      // copies frame headers, not pixels), apply the full params, and warm it.
       auto engine = std::make_shared<ReSimEngine>(
         *preloaded, window_m, res, max_range, occ, min_grazing_deg);
+      apply_acc(*engine);
       engine->seekToStamp(session->startTime() + t_s);
       r.bag = preloaded;
       r.engine = std::move(engine);
@@ -379,6 +407,7 @@ void MainWindow::onLoadFinished()
   }
 
   engine_ = r.engine;
+  current_bag_ = r.bag;  // reused by stage B and by Apply's warm
   buffer_state_.has_cache = true;
   buffer_state_.cache_lo = r.cache_lo;
   buffer_state_.cache_hi = r.cache_hi;
@@ -565,29 +594,48 @@ void MainWindow::onParamEdited()
 
 void MainWindow::onApplyParams()
 {
-  if (!haveEngine()) {return;}
-  // Build both staged structs from the applied baseline + every box's current
-  // value, then submit as one batch — validate-both-before-apply, single re-sim.
-  auto occ = engine_->occupancyParams();
-  auto acc = engine_->accumulateParams();
+  if (!haveEngine() || !current_bag_) {return;}
+  // A window load/warm is already running on the watcher; replacing its future
+  // would orphan it. Ask the user to let it settle (rare — Apply is a deliberate
+  // click and the in-flight load finishes in a few seconds).
+  if (load_in_flight_) {
+    statusBar()->showMessage("Busy loading — try Apply again in a moment.", 3000);
+    return;
+  }
+  // Build both staged structs from the applied baseline + every box's value.
+  auto occ = applied_occ_;
+  auto acc = applied_acc_;
   for (const auto & knob : knobs_) {
     if (knob.box == nullptr) {continue;}
     knob.stage(knob.box->value(), occ, acc);
   }
+  // Validate synchronously so a typo is rejected instantly — no worker, boxes
+  // left dirty so the user can fix the offender.
   std::string why;
-  if (!engine_->setParams(occ, acc, why)) {
-    // Rejected: leave engine + boxes untouched so the user can fix the offender.
+  if (!ReSimEngine::validateParams(occ, acc, why)) {
     statusBar()->showMessage(QString("Apply rejected: ") + QString::fromStdString(why),
       6000);
     return;
   }
-  // Applied: every box is now the baseline — clear dirty cues, disable buttons.
+
+  // Accepted: this is the new source of truth. Warm a fresh engine from the
+  // current window's bag in the background (the ~tens-of-seconds replay) so the
+  // GUI stays responsive — same path as a window load's stage B.
+  applied_occ_ = occ;
+  applied_acc_ = acc;
   for (auto & knob : knobs_) {
     setKnobDirty(knob, false);
   }
   apply_btn_->setEnabled(false);
   reset_btn_->setEnabled(false);
-  refreshViews();
+
+  const double t_s = engine_ ? engine_->currentStamp() - session_->startTime() : 0.0;
+  grid_label_->setPixmap(QPixmap());
+  grid_label_->setText("applying…");
+  statusBar()->showMessage("Applying parameters — recomputing costmap …");
+  load_in_flight_ = true;
+  chase_target_s_ = -1.0;
+  launchStage(t_s, ++request_id_, current_bag_);  // stage B warm from the same bag
 }
 
 void MainWindow::onResetParams()

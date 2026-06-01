@@ -162,7 +162,8 @@ private:
   static LoadResult loadWindowJob(
     std::shared_ptr<BagSession> session, BufferParams params, BufferState state,
     double t_s, double window_m, double res, double max_range, double min_grazing_deg,
-    sea_surface_segmentation::OccupancyParams occ, std::uint64_t request_id,
+    sea_surface_segmentation::OccupancyParams occ,
+    sea_surface_segmentation::AccumulateParams acc, std::uint64_t request_id,
     std::shared_ptr<LoadedBag> preloaded);
 
   BagLoadOptions load_opts_;
@@ -178,6 +179,12 @@ private:
   BufferState buffer_state_;             // current I/O cache extent (bag-relative s)
   double pending_seek_s_ = -1.0;         // out-of-span target deferred to release
   std::shared_ptr<ReSimEngine> engine_;
+  std::shared_ptr<LoadedBag> current_bag_;  // loaded window; reused by Apply's warm
+  // Applied tunable params — the source of truth carried into every (re)load so a
+  // window reload preserves tuning (the engine ctor only takes occ + the geometry
+  // args, so acc's obstacle_prob_min/max_evidence_step would otherwise reset).
+  sea_surface_segmentation::OccupancyParams applied_occ_;
+  sea_surface_segmentation::AccumulateParams applied_acc_;
 
   // Async window-load state. One load in flight at a time; `load_in_flight_`
   // guards it, `chase_target_s_` (>= 0) holds a target requested while busy that
