@@ -115,3 +115,17 @@ source ../../../.agent/scripts/setup.bash && colcon test --packages-select marin
   only when engine state changes (seek/load/apply); `rescaleViews()` just
   `QPixmap::scaled` the cache and runs on resize/splitter drag. Keep engine/render
   calls out of `rescaleViews()`.
+- **Costmap render spans the buffer window, not `panel_px·res`** — `renderGrid`/
+  `renderRecorded` map panel pixels over `[−half_extent, +half_extent]`
+  (`mpp = 2·half_extent/panel_px`), so the panel always covers the buffer window
+  regardless of `panel_px` or `--res`/`--window-m`. (An earlier version stepped by
+  `acc_.res`, which only matched the window by the coincidence
+  `panel_px(480)·res(0.25)=120m` at defaults.)
+- **The BufferPlan Extend optimization is NOT wired to the loader yet.**
+  `plan_buffer` computes `action`/`read_lo`/`read_hi` for an incremental extend
+  (and `test_buffer_policy` asserts it), but `loadWindowJob` always
+  `loadWindow(cache_lo, cache_hi)` — a full re-read of the guaranteed window. It's
+  correct (superset), just not minimal I/O, and `loadWindow` still linearly skips
+  to the window rather than `Reader::seek`. The remaining perf work is: splice an
+  extension onto a retained buffer + seek. Don't read the passing extend tests as
+  proof the loader does incremental reads.

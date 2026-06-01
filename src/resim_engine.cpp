@@ -380,10 +380,14 @@ cv::Mat ReSimEngine::renderGrid(int panel_px) const
   const double bx = bag_.frames[current_].boat_x;
   const double by = bag_.frames[current_].boat_y;
   cv::Mat panel(panel_px, panel_px, CV_8UC3);
+  // Panel spans the full buffer window [−half_extent, +half_extent] regardless of
+  // panel_px or res — so changing --window-m/--res can't make the panel sample
+  // the wrong extent (or query outside the buffer). mpp = metres per panel pixel.
+  const double mpp = 2.0 * acc_.half_extent / panel_px;
   for (int v = 0; v < panel_px; ++v) {
     for (int u = 0; u < panel_px; ++u) {
-      const double wx = bx + (u - panel_px / 2) * acc_.res;
-      const double wy = by - (v - panel_px / 2) * acc_.res;  // image y down → world y up
+      const double wx = bx + (u - panel_px / 2) * mpp;
+      const double wy = by - (v - panel_px / 2) * mpp;  // image y down → world y up
       panel.at<cv::Vec3b>(v, u) =
         colour_logodds(buffer_.logOdds(grid_map::Position(wx, wy)), occ_.lethal_threshold);
     }
@@ -406,10 +410,13 @@ cv::Mat ReSimEngine::renderRecorded(int panel_px) const
     draw_boat_marker(panel, bag_.frames[current_].boat_yaw);  // marker even with no costmap
     return panel;
   }
+  // Same buffer-window span as renderGrid (mpp = metres per panel pixel), so the
+  // recorded and regenerated panels overlay 1:1 regardless of panel_px / res.
+  const double mpp = 2.0 * acc_.half_extent / panel_px;
   for (int v = 0; v < panel_px; ++v) {
     for (int u = 0; u < panel_px; ++u) {
-      const double wx = bx + (u - panel_px / 2) * acc_.res;
-      const double wy = by - (v - panel_px / 2) * acc_.res;  // image y down → world y up
+      const double wx = bx + (u - panel_px / 2) * mpp;
+      const double wy = by - (v - panel_px / 2) * mpp;  // image y down → world y up
       const int gx = static_cast<int>(std::floor((wx - c.origin_x) / c.resolution));
       const int gy = static_cast<int>(std::floor((wy - c.origin_y) / c.resolution));
       int cost = -1;  // outside the recorded window reads as unknown

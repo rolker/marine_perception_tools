@@ -234,13 +234,16 @@ TEST(ReSimEngine, RejectsInvalidOccupancyParamsWithoutStateChange)
   mpt::ReSimEngine engine(bag, kWindowM, kRes, kMaxRange);
   engine.seekTo(2);
   const auto before = sample_grid(engine);
+  const double clamp_before = engine.occupancyParams().obstacle_clamp;
 
   sea_surface_segmentation::OccupancyParams bad;
   bad.obstacle_clamp = -1.0;  // must be finite and > 0
   std::string why;
   EXPECT_FALSE(engine.setOccupancyParams(bad, why));
   EXPECT_FALSE(why.empty());
-  EXPECT_DOUBLE_EQ(engine.occupancyParams().obstacle_clamp, 5.0);  // unchanged default
+  // Unchanged — capture the pre-call value rather than a hard-coded default, so
+  // the test tracks the "no state change on reject" behavior, not the default.
+  EXPECT_DOUBLE_EQ(engine.occupancyParams().obstacle_clamp, clamp_before);
   EXPECT_TRUE(grids_equal(before, sample_grid(engine)));
 }
 

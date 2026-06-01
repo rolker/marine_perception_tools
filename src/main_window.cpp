@@ -201,8 +201,25 @@ void MainWindow::openBag(const QString & bag_uri)
     statusBar()->showMessage(QString("Open failed: ") + e.what(), 8000);
     return;
   }
+  // Wait out any in-flight background load before swapping the session: setFuture
+  // on the watcher mid-flight would orphan the running job, and its result could
+  // otherwise install against the new session. Bump request_id_ and clear the
+  // chase target FIRST so that if waitForFinished lets onLoadFinished run for the
+  // old result, it fails the supersession check and re-launches nothing.
+  ++request_id_;
+  chase_target_s_ = -1.0;
+  if (load_watcher_.future().isRunning()) {
+    load_watcher_.waitForFinished();
+  }
+  load_in_flight_ = false;
+
   session_ = std::move(session);
-  buffer_state_ = BufferState{};  // no cache yet — the first ensureCovers loads
+  current_bag_.reset();           // prior window belongs to the old session
+  applied_occ_ = sea_surface_segmentation::OccupancyParams{};  // reset tuning
+  applied_acc_ = sea_surface_segmentation::AccumulateParams{};
+  applied_acc_.max_range = max_range_;
+  applied_acc_.min_grazing_angle_deg = min_grazing_deg_;
+  buffer_state_ = BufferState{};  // no cache yet — the first requestCoverage loads
   engine_.reset();
 
   // Whole-bag time scrubber, in deciseconds (0.1 s steps) over [0, duration].
@@ -230,10 +247,10 @@ void MainWindow::openBag(const QString & bag_uri)
 double MainWindow::integrationSeconds() const
 {
   // Warm-up tracks the decay half-life so changing the knob grows/shrinks the
-  // window. Fall back to the OccupancyParams default when no engine exists yet.
-  const double half_life = engine_ ? engine_->occupancyParams().decay_half_life_s :
-    sea_surface_segmentation::OccupancyParams{}.decay_half_life_s;
-  return integration_halflives_ * half_life;
+  // window. Derive from applied_occ_ — the source of truth — NOT the live engine:
+  // during an Apply the engine still holds the OLD half-life until the warmed
+  // engine installs, so reading it here would size the window from stale values.
+  return integration_halflives_ * applied_occ_.decay_half_life_s;
 }
 
 BufferParams MainWindow::bufferParams() const
@@ -357,6 +374,14 @@ MainWindow::LoadResult MainWindow::loadWindowJob(
   const BufferPlan plan = plan_buffer(t_s, params, state);
   r.cache_lo = plan.cache_lo;
   r.cache_hi = plan.cache_hi;
+  // NOTE: we always read the FULL guaranteed window [cache_lo, cache_hi] here and
+  // ignore plan.action / plan.read_lo / plan.read_hi. The span policy computes an
+  // incremental "Extend reads only the new slice" plan (and the unit tests assert
+  // it), but the loader does not yet splice an extension onto a retained buffer —
+  // a full re-read is always correct (a superset of what's needed), just not the
+  // minimal I/O. Implementing incremental extend (+ rosbag2 Reader::seek to the
+  // window start instead of a linear skip) is the remaining optimization; the
+  // policy/tests are ready for it. See .agents/README.md.
   try {
     if (!preloaded) {
       // Stage A: read the window (the slow I/O + H.265 decode) and build a
@@ -665,9 +690,9 @@ void MainWindow::onApplyParams()
     return;
   }
 
-  // Accepted: this is the new source of truth. Warm a fresh engine from the
-  // current window's bag in the background (the ~tens-of-seconds replay) so the
-  // GUI stays responsive — same path as a window load's stage B.
+  // Accepted: this is the new source of truth. Commit it BEFORE sizing the
+  // window — integrationSeconds() now reads applied_occ_, so a changed
+  // decay_half_life_s immediately changes the required warm-up window.
   applied_occ_ = occ;
   applied_acc_ = acc;
   for (auto & knob : knobs_) {
@@ -679,10 +704,25 @@ void MainWindow::onApplyParams()
   const double t_s = engine_ ? engine_->currentStamp() - session_->startTime() : 0.0;
   grid_label_->setPixmap(QPixmap());
   grid_label_->setText("applying…");
-  statusBar()->showMessage("Applying parameters — recomputing costmap …");
   load_in_flight_ = true;
   chase_target_s_ = -1.0;
-  launchStage(t_s, ++request_id_, current_bag_);  // stage B warm from the same bag
+
+  // If the new params still fit the loaded window, warm from the same bag (fast —
+  // no re-read). But a LARGER half-life widens the required warm-up window
+  // (integrationSeconds grew), which may now reach below current_bag_'s start —
+  // reusing it would under-warm. In that case reload the (wider) window from the
+  // session so the half-life↔integration coupling actually holds.
+  const BufferPlan plan = plan_buffer(t_s, bufferParams(), buffer_state_);
+  const bool fits = current_bag_ &&
+    plan.cache_lo >= buffer_state_.cache_lo - 1e-6 &&
+    plan.cache_hi <= buffer_state_.cache_hi + 1e-6;
+  if (fits) {
+    statusBar()->showMessage("Applying parameters — recomputing costmap …");
+    launchStage(t_s, ++request_id_, current_bag_);  // warm from the same bag
+  } else {
+    statusBar()->showMessage("Applying parameters — reloading wider window …");
+    launchStage(t_s, ++request_id_, /*preloaded=*/nullptr);  // wider window: reload
+  }
 }
 
 void MainWindow::onResetParams()
