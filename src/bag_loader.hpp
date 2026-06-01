@@ -59,6 +59,7 @@ struct PreparedFrame
   cv::Matx33d rotation_cam_to_target;  // camera-optical → world rotation
   double boat_x = 0.0;                 // boat (base_link) world XY — buffer window centre
   double boat_y = 0.0;
+  double boat_yaw = 0.0;               // boat heading in the world frame (rad, ENU/CCW from +x)
 };
 
 // A decoded display image (camera RGB) at a bag stamp. Display-only — never

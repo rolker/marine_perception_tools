@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -332,6 +333,12 @@ LoadedBag BagSession::loadWindow(double start_s, double end_s) const
         sea_surface_segmentation::rotation_matrix_from_quaternion(cq.x, cq.y, cq.z, cq.w);
       frame.boat_x = boat_tf.transform.translation.x;
       frame.boat_y = boat_tf.transform.translation.y;
+      // Heading (world-frame yaw) from the boat quaternion, for the costmap
+      // boat marker. Standard ENU yaw: atan2(2(wz+xy), 1-2(yy+zz)).
+      const auto & bq = boat_tf.transform.rotation;
+      frame.boat_yaw = std::atan2(
+        2.0 * (bq.w * bq.z + bq.x * bq.y),
+        1.0 - 2.0 * (bq.y * bq.y + bq.z * bq.z));
       loaded.frames.push_back(std::move(frame));
     } catch (const tf2::TransformException &) {
       ++tf_skipped;  // pose unavailable at this stamp — skip, don't fabricate geometry

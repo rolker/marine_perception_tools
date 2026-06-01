@@ -15,10 +15,13 @@
 #include "resim_engine.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#include <opencv2/imgproc.hpp>
 
 #include "sea_surface_segmentation/occupancy_accumulator.hpp"
 
@@ -54,6 +57,30 @@ cv::Vec3b colour_cost(int v)
     return {30, static_cast<uchar>(120 + 100 * f), static_cast<uchar>(200 * f)};
   }
   return {70, 40, 20};  // free — dark blue
+}
+
+// Draw a boat marker (heading arrow) at the panel centre on a boat-centred,
+// north-up costmap render. `yaw` is the world-frame heading (rad, CCW from +x);
+// the panel maps world +x → +u (right) and world +y → −v (up), so the screen
+// direction is (cos yaw, −sin yaw). White with a thin black outline so it reads
+// on any palette cell underneath.
+void draw_boat_marker(cv::Mat & panel, double yaw)
+{
+  const cv::Point2d c(panel.cols / 2.0, panel.rows / 2.0);
+  const double len = std::max(8.0, panel.rows * 0.06);  // arrow length ~6% of panel
+  const cv::Point2d dir(std::cos(yaw), -std::sin(yaw));  // heading in screen coords
+  const cv::Point2d perp(-dir.y, dir.x);
+  const cv::Point2d tip = c + dir * len;
+  const cv::Point2d tail = c - dir * (len * 0.6);
+  // Triangle: tip + two tail corners, so it reads as a pointer not just a line.
+  const std::array<cv::Point, 3> tri{
+    cv::Point(tip),
+    cv::Point(tail + perp * (len * 0.45)),
+    cv::Point(tail - perp * (len * 0.45))};
+  const cv::Point * pts = tri.data();
+  int npts = 3;
+  cv::fillConvexPoly(panel, pts, npts, cv::Scalar(255, 255, 255), cv::LINE_AA);
+  cv::polylines(panel, &pts, &npts, 1, true, cv::Scalar(0, 0, 0), 1, cv::LINE_AA);
 }
 
 }  // namespace
@@ -314,6 +341,7 @@ cv::Mat ReSimEngine::renderGrid(int panel_px) const
         colour_logodds(buffer_.logOdds(grid_map::Position(wx, wy)), occ_.lethal_threshold);
     }
   }
+  draw_boat_marker(panel, bag_.frames[current_].boat_yaw);
   return panel;
 }
 
@@ -327,7 +355,10 @@ cv::Mat ReSimEngine::renderRecorded(int panel_px) const
   const double bx = bag_.frames[current_].boat_x;
   const double by = bag_.frames[current_].boat_y;
   cv::Mat panel(panel_px, panel_px, CV_8UC3, cv::Scalar(110, 110, 110));
-  if (c.resolution <= 0.0) {return panel;}  // no recorded costmap yet
+  if (c.resolution <= 0.0) {
+    draw_boat_marker(panel, bag_.frames[current_].boat_yaw);  // marker even with no costmap
+    return panel;
+  }
   for (int v = 0; v < panel_px; ++v) {
     for (int u = 0; u < panel_px; ++u) {
       const double wx = bx + (u - panel_px / 2) * acc_.res;
@@ -341,6 +372,7 @@ cv::Mat ReSimEngine::renderRecorded(int panel_px) const
       panel.at<cv::Vec3b>(v, u) = colour_cost(cost);
     }
   }
+  draw_boat_marker(panel, bag_.frames[current_].boat_yaw);
   return panel;
 }
 
