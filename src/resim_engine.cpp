@@ -83,6 +83,7 @@ ReSimEngine::ReSimEngine(
   // Populate the buffer for the first frame so the engine is immediately
   // renderable. accumulate() moves the window to the frame's boat position.
   accumulate(0);
+  maybeCheckpoint(0);  // anchor at frame 0 so any rewind has a base to restore
 }
 
 void ReSimEngine::accumulate(std::size_t i)
@@ -137,16 +138,30 @@ void ReSimEngine::seekTo(std::size_t k)
   k = std::min(k, bag_.frames.size() - 1);
   if (k == current_) {return;}
   if (k > current_) {
+    // Forward: accumulate the intervening frames incrementally, snapshotting as
+    // we pass so a later rewind to this span is cheap.
     for (std::size_t i = current_ + 1; i <= k; ++i) {
       accumulate(i);
-    }                                                                   // incremental
+      maybeCheckpoint(i);
+    }
   } else {
-    // rewind — full replay. clear() also re-seeds the decay clock, which is what
-    // makes the replay's decay sequence identical to a forward run (relied on by
-    // the IncrementalEqualsReplay test).
-    buffer_.clear();
-    for (std::size_t i = 0; i <= k; ++i) {
-      accumulate(i);
+    // Rewind: restore the nearest checkpoint at or before k, then replay only the
+    // frames after it. A checkpoint copy carries the full decay state, so the
+    // restored-then-replayed buffer is identical to a clear()+replay([0,k]) (the
+    // determinism the IncrementalEqualsReplay / checkpoint tests assert). Without
+    // a usable checkpoint (e.g. none below k) fall back to clear()+replay from 0.
+    auto it = checkpoints_.upper_bound(k);  // first entry with index > k
+    if (it == checkpoints_.begin()) {
+      buffer_.clear();
+      for (std::size_t i = 0; i <= k; ++i) {
+        accumulate(i);
+      }
+    } else {
+      --it;                       // greatest index <= k
+      buffer_ = it->second;       // restore snapshot (frames [0, it->first] applied)
+      for (std::size_t i = it->first + 1; i <= k; ++i) {
+        accumulate(i);
+      }
     }
   }
   current_ = k;
@@ -154,10 +169,41 @@ void ReSimEngine::seekTo(std::size_t k)
 
 void ReSimEngine::resimToCurrent()
 {
+  // A parameter change alters the buffer contents at every frame, so every
+  // existing snapshot is stale: drop them and rebuild from scratch, re-anchoring
+  // checkpoints along the replay so subsequent scrubs under the new params are
+  // cheap again.
+  clearCheckpoints();
   buffer_.clear();
   for (std::size_t i = 0; i <= current_; ++i) {
     accumulate(i);
+    maybeCheckpoint(i);
   }
+}
+
+void ReSimEngine::maybeCheckpoint(std::size_t i)
+{
+  // Snapshot the buffer state (frames [0, i] applied) when at least
+  // kSnapshotIntervalS of bag time has elapsed since the last snapshot — or
+  // always for the very first one. Keying by frame index lets a rewind restore
+  // the nearest <= target; spacing by stamp bounds the count to ~window/interval.
+  if (checkpoints_.count(i) != 0) {
+    return;  // already snapshotted here (re-visited frame) — nothing to do
+  }
+  const double stamp = bag_.frames[i].stamp_s;
+  if (have_checkpoint_ && (stamp - last_checkpoint_stamp_s_) < kSnapshotIntervalS) {
+    return;  // too soon since the last snapshot
+  }
+  checkpoints_.emplace(i, buffer_);  // copy current buffer state
+  last_checkpoint_stamp_s_ = stamp;
+  have_checkpoint_ = true;
+}
+
+void ReSimEngine::clearCheckpoints()
+{
+  checkpoints_.clear();
+  have_checkpoint_ = false;
+  last_checkpoint_stamp_s_ = 0.0;
 }
 
 bool ReSimEngine::setOccupancyParams(

@@ -291,6 +291,73 @@ TEST(ReSimEngine, FusesMultipleCamerasAndTracksLatestMask)
     << "latestMask returned the same mask for two different cameras";
 }
 
+// Checkpoint store (D4): a rewind restores the nearest snapshot and replays the
+// tail, which must be bit-identical to a fresh clear()+replay([0,k]). make_bag
+// frames are 0.5s apart, so a 12-frame bag spans 5.5s — several snapshots at the
+// 1s interval, exercising restore-from-a-mid-window-checkpoint (not just frame 0).
+TEST(ReSimEngine, RewindViaCheckpointEqualsFreshReplay)
+{
+  const int n = 12;
+  const auto bag = make_bag(n);
+
+  // Engine A: seek to the end (laying down checkpoints), then rewind to k=5 via
+  // the checkpoint path.
+  mpt::ReSimEngine viacheckpoint(bag, kWindowM, kRes, kMaxRange);
+  viacheckpoint.seekTo(n - 1);
+  viacheckpoint.seekTo(5);
+
+  // Engine B: a fresh engine advanced straight to k=5 (forward-only, no rewind).
+  mpt::ReSimEngine fresh(bag, kWindowM, kRes, kMaxRange);
+  fresh.seekTo(5);
+
+  EXPECT_EQ(viacheckpoint.currentIndex(), 5u);
+  EXPECT_TRUE(grids_equal(sample_grid(viacheckpoint), sample_grid(fresh)))
+    << "checkpoint restore + tail replay diverged from a fresh forward replay";
+}
+
+// Rewinding to several different targets in sequence (each restoring a different
+// nearest checkpoint, including frame 0) must each match a fresh replay — guards
+// the upper_bound/begin() branch selection.
+TEST(ReSimEngine, RepeatedRewindsAllMatchFreshReplay)
+{
+  const int n = 12;
+  const auto bag = make_bag(n);
+  mpt::ReSimEngine e(bag, kWindowM, kRes, kMaxRange);
+  e.seekTo(n - 1);  // lay down checkpoints across the window
+
+  for (std::size_t k : {0u, 3u, 7u, 1u, 10u, 5u}) {
+    e.seekTo(k);
+    mpt::ReSimEngine fresh(bag, kWindowM, kRes, kMaxRange);
+    fresh.seekTo(k);
+    EXPECT_EQ(e.currentIndex(), k);
+    EXPECT_TRUE(grids_equal(sample_grid(e), sample_grid(fresh)))
+      << "rewind to k=" << k << " diverged from fresh replay";
+  }
+}
+
+// After a parameter change (which invalidates all checkpoints and rebuilds them),
+// a subsequent rewind must still match a fresh engine constructed with the new
+// param — i.e. the stale snapshots were not reused.
+TEST(ReSimEngine, RewindAfterParamChangeUsesRebuiltCheckpoints)
+{
+  const int n = 12;
+  const auto bag = make_bag(n);
+  sea_surface_segmentation::OccupancyParams changed;
+  changed.decay_half_life_s = 5.0;  // differs from default 30
+
+  mpt::ReSimEngine e(bag, kWindowM, kRes, kMaxRange);  // default decay
+  e.seekTo(n - 1);                                     // checkpoints under default
+  std::string why;
+  ASSERT_TRUE(e.setOccupancyParams(changed, why)) << why;  // invalidates them
+  e.seekTo(4);                                         // rewind under new param
+
+  mpt::ReSimEngine fresh(bag, kWindowM, kRes, kMaxRange, changed);
+  fresh.seekTo(4);
+
+  EXPECT_TRUE(grids_equal(sample_grid(e), sample_grid(fresh)))
+    << "rewind after param change reused stale (old-param) checkpoints";
+}
+
 // An empty LoadedBag must fail loudly at construction, not read past frames[0].
 // The bag loaders already throw on an empty window, but a direct/alternate
 // construction (or a future windowed loader handing back zero frames) would

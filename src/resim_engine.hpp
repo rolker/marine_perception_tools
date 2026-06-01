@@ -16,6 +16,7 @@
 #define RESIM_ENGINE_HPP_
 
 #include <cstddef>
+#include <map>
 #include <string>
 #include <utility>
 
@@ -60,8 +61,13 @@ public:
   bool usedCompressedSegmentation() const {return bag_.used_compressed_segmentation;}
 
   // Move the simulation to frame k (clamped to a valid index). A forward move
-  // accumulates the intervening frames incrementally; a rewind clears and
-  // replays [0, k] (evidence can't be un-accumulated).
+  // accumulates the intervening frames incrementally; a rewind restores the
+  // nearest checkpoint at or before k and replays only the few frames from there
+  // (evidence can't be un-accumulated, so a rewind without a checkpoint would
+  // replay [0, k] — the checkpoint store bounds that to one snapshot interval).
+  // Checkpoints are dropped as the window is replayed forward, so re-visiting a
+  // span already seen is cheap. A parameter change invalidates them (the buffer
+  // contents change), forcing one full replay.
   void seekTo(std::size_t k);
 
   // Live-tunable knobs. On rejection, return false and set `why`, leaving engine
@@ -104,13 +110,33 @@ public:
 private:
   static grid_map::Position grid_position(double wx, double wy) {return {wx, wy};}
   void accumulate(std::size_t i);
-  void resimToCurrent();  // clear + replay [0, current_]
+  void resimToCurrent();  // clear + replay [0, current_]; invalidates checkpoints
+
+  // Checkpoint store: the OccupancyBuffer is copyable and a copy captures the
+  // full decay state (last_decay_s_, seeded_), so restoring a snapshot and
+  // replaying forward is bit-identical to replaying [0, k] from scratch (the R1
+  // determinism guarantee). Snapshots are keyed by the frame index they were
+  // taken AFTER (i.e. the buffer state with frames [0, idx] accumulated), spaced
+  // at least kSnapshotIntervalS of bag time apart so the count is bounded by the
+  // window length. A parameter change clears them (clearCheckpoints()).
+  void maybeCheckpoint(std::size_t i);  // snapshot after accumulating frame i, if due
+  void clearCheckpoints();
+
+  // ~1 s of bag time between snapshots. Trades memory (≈0.9 MB per 480^2-cell
+  // snapshot) for back-scrub latency (replay <= one interval). Tunable later.
+  static constexpr double kSnapshotIntervalS = 1.0;
 
   LoadedBag bag_;
   sea_surface_segmentation::AccumulateParams acc_;  // res/half_extent fixed; rest tunable
   sea_surface_segmentation::OccupancyParams occ_;
   sea_surface_segmentation::OccupancyBuffer buffer_;
   std::size_t current_ = 0;
+
+  // frame index -> buffer snapshot after accumulating [0, index]. current_ is
+  // always representable from the nearest entry <= current_ plus a short replay.
+  std::map<std::size_t, sea_surface_segmentation::OccupancyBuffer> checkpoints_;
+  double last_checkpoint_stamp_s_ = 0.0;  // stamp of the most recent snapshot
+  bool have_checkpoint_ = false;          // false until the first snapshot
 };
 
 }  // namespace marine_perception_tools
