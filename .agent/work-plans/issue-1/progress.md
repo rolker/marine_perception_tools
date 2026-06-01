@@ -64,3 +64,23 @@ issue: 1
 - (Copilot R0) "ctor throws → needs `<stdexcept>`" — the ctor doesn't throw; `BagSession`/`load_bag` throw in `bag_loader.cpp`, which already includes `<stdexcept>` (line 26). Premise never implemented; builds clean.
 - (Copilot R0) Scrubber range underflow when `frameCount()==0` — guarded: `setRange(0, have ? frameCount()-1 : 0)` yields 0 with no engine, and `load_bag` guarantees ≥1 frame when an engine exists, so `frameCount()-1 ≥ 0`. The `-1` path is unreachable.
 - (Copilot R0) `arg_double` uses `atof` (silent 0.0 on bad input) — real but deferred: `main.cpp` CLI parsing is reworked in D4 (new `--integration-halflives`/`--margin-s`/`--retention-s`); harden the parse there rather than as a standalone fix.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-06-01 13:05 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+
+**PR**: #2 at `01cb273` (head `54e418c` is docs-only; latest code reviewed is `01cb273`)
+**Sources**: 1 (Copilot R3 @ `01cb273`, the run-feedback review) + prior Integrated Review @ `7c21e85` + CI rollup. No local pre-push review at this head.
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test ✓ 4m33s)
+
+### Findings
+- [ ] (major, Copilot R3) half-life↔integration coupling broken on Apply: `integrationSeconds()` reads `engine_->occupancyParams()` not `applied_occ_`, and `onApplyParams` reuses `current_bag_` even when `decay_half_life_s` changed — a larger half-life needs a wider warm-up window but Apply re-warms the old (too-short) one → under-warmed costmap. Fix: derive integration from `applied_occ_`; on Apply, reload when the new required window exceeds the loaded span — `src/main_window.cpp:236,686`.
+- [ ] (major, Copilot R3) render extent tied to `acc_.res`, not the buffer window: `renderGrid`/`renderRecorded` map pixel→world via `(u−panel_px/2)*acc_.res`, so a `panel_px` panel covers `panel_px·res` m — correct only by the coincidence panel_px(480)·res(0.25)=120m=2·half_extent at defaults. Non-default `--res`/`--window-m` mis-sample (can query outside the buffer). Fix: map over `[−half_extent,+half_extent]` (step `2·half_extent/panel_px`) — `src/resim_engine.cpp:390,421`.
+- [ ] (major, Copilot R3) `openBag` doesn't guard an in-flight background load: swaps session_/resets engine_ and starts a new load while a prior QtConcurrent job may still run on the same watcher (setFuture mid-flight orphans it; a stale result could install against the new session). Fix: cancel/wait for the in-flight load before swapping (mirror ~MainWindow waitForFinished) and/or guard install by session identity — `src/main_window.cpp:206`.
+- [ ] (minor, Copilot R3) BufferPlan Extend optimization unimplemented: `loadWindowJob` always `loadWindow(cache_lo,cache_hi)`, ignoring `plan.action`/`read_lo`/`read_hi` — the "extend reads only the new slice" path (16 assertions in test_buffer_policy) never runs; every reload full-reads from bag start (no Reader::seek). Not a correctness bug. Fix: implement incremental extend, OR document the policy-vs-loader gap so the tests don't imply a shipped optimization (document now, implement later) — `src/main_window.cpp:367`.
+- [ ] (nit, Copilot R3) `RejectsInvalidOccupancyParamsWithoutStateChange` asserts hard-coded `obstacle_clamp == 5.0` (brittle to upstream default changes); the grids_equal(before,after) assertion already covers "no state change". Capture the pre-call value instead — `test/test_resim_engine.cpp:244`. Bundle with the half-life fix.
+
+### False positives
+- (none) — Copilot R3's findings are all valid or minor-valid; the test-brittleness item is real (kept as a nit), not dismissed.
