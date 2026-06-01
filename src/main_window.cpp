@@ -28,7 +28,10 @@
 #include <QMenuBar>
 #include <QPixmap>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QSizePolicy>
 #include <QSlider>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QString>
 #include <QVBoxLayout>
@@ -62,30 +65,52 @@ MainWindow::MainWindow(
 {
   setWindowTitle("sea_surface_tuner");
 
-  auto make_label = [this](int w, int h) {
+  // Each row is a QWidget (so a vertical QSplitter can resize it) holding a
+  // horizontal layout. Labels expand to fill (the splitter, not a fixed tile
+  // size, governs their height) — minimums keep them usable when shrunk.
+  auto make_row = [](std::array<QLabel *, kNumCameras> & labels,
+    const std::function<QLabel *()> & mk) {
+      auto * w = new QWidget;
+      auto * h = new QHBoxLayout(w);
+      h->setContentsMargins(0, 0, 0, 0);
+      for (int i = 0; i < kNumCameras; ++i) {
+        labels[i] = mk();
+        h->addWidget(labels[i], 1);
+      }
+      return w;
+    };
+  auto expanding_label = [this] {
       auto * l = new QLabel(this);
       l->setAlignment(Qt::AlignCenter);
-      l->setMinimumSize(w, h);
+      l->setMinimumSize(120, 90);
+      l->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
       return l;
     };
-  const int tile_w = cam_tile_h_ * 4 / 3;  // 4:3 camera/seg tiles
 
   // Row 1: camera RGB.  Row 2: segmentation.  Both port|fwd|stbd|aft.
-  auto * rgb_row = new QHBoxLayout;
-  auto * seg_row = new QHBoxLayout;
-  for (int i = 0; i < kNumCameras; ++i) {
-    rgb_labels_[i] = make_label(tile_w, cam_tile_h_);
-    seg_labels_[i] = make_label(tile_w, cam_tile_h_);
-    rgb_row->addWidget(rgb_labels_[i], 1);
-    seg_row->addWidget(seg_labels_[i], 1);
-  }
+  auto * rgb_row = make_row(rgb_labels_, expanding_label);
+  auto * seg_row = make_row(seg_labels_, expanding_label);
 
   // Row 3: recorded costmap (bag) | regenerated costmap (tuned).
-  recorded_label_ = make_label(panel_px_, panel_px_);
-  grid_label_ = make_label(panel_px_, panel_px_);
-  auto * cm_row = new QHBoxLayout;
+  recorded_label_ = expanding_label();
+  grid_label_ = expanding_label();
+  auto * cm_widget = new QWidget;
+  auto * cm_row = new QHBoxLayout(cm_widget);
+  cm_row->setContentsMargins(0, 0, 0, 0);
   cm_row->addWidget(recorded_label_, 1);
   cm_row->addWidget(grid_label_, 1);
+
+  // Vertical splitter so the operator chooses how much height each row gets.
+  // Initial stretch favours the costmap row (the thing being tuned); all rows
+  // stay non-collapsible so none can be dragged fully shut by accident.
+  auto * rows = new QSplitter(Qt::Vertical, this);
+  rows->addWidget(rgb_row);
+  rows->addWidget(seg_row);
+  rows->addWidget(cm_widget);
+  rows->setChildrenCollapsible(false);
+  rows->setStretchFactor(0, 2);
+  rows->setStretchFactor(1, 2);
+  rows->setStretchFactor(2, 3);
 
   // Whole-bag time scrubber in deciseconds (0.1 s steps); range set on open.
   // valueChanged fires continuously during a drag — handled live only when the
@@ -100,9 +125,7 @@ MainWindow::MainWindow(
 
   auto * central = new QWidget(this);
   auto * layout = new QVBoxLayout(central);
-  layout->addLayout(rgb_row);
-  layout->addLayout(seg_row);
-  layout->addLayout(cm_row, 1);
+  layout->addWidget(rows, 1);       // splitter fills the window
   layout->addWidget(scrubber_);
   setCentralWidget(central);
 
@@ -464,6 +487,15 @@ void MainWindow::refreshViews()
     return;
   }
 
+  // Scale a source image into a label at its current size, keeping aspect — so
+  // the panes track the splitter (no fixed tile height). KeepAspectRatio leaves
+  // letterbox margins, which is correct for the 4:3 camera tiles.
+  auto fit = [](QLabel * lbl, const QImage & img) {
+      lbl->setPixmap(
+        QPixmap::fromImage(img).scaled(
+          lbl->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    };
+
   // Rows 1–2: per-camera RGB + segmentation (latest at/before the current frame).
   for (int i = 0; i < kNumCameras; ++i) {
     const cv::Mat rgb = engine_->latestRgb(i);
@@ -471,26 +503,24 @@ void MainWindow::refreshViews()
       rgb_labels_[i]->setPixmap(QPixmap());
       rgb_labels_[i]->setText(QString(kCameraLabels[i]) + " (no RGB)");
     } else {
-      rgb_labels_[i]->setPixmap(
-        QPixmap::fromImage(cvMatToQImage(rgb, /*bgr=*/true))
-        .scaledToHeight(cam_tile_h_, Qt::SmoothTransformation));
+      fit(rgb_labels_[i], cvMatToQImage(rgb, /*bgr=*/true));
     }
     const cv::Mat seg = engine_->latestMask(i);
     if (seg.empty()) {
       seg_labels_[i]->setPixmap(QPixmap());
       seg_labels_[i]->setText(QString(kCameraLabels[i]) + " (no seg)");
     } else {
-      seg_labels_[i]->setPixmap(
-        QPixmap::fromImage(cvMatToQImage(seg, /*bgr=*/false))
-        .scaledToHeight(cam_tile_h_, Qt::SmoothTransformation));
+      fit(seg_labels_[i], cvMatToQImage(seg, /*bgr=*/false));
     }
   }
 
   // Row 3: recorded costmap (bag) | regenerated (tuned) costmap, same window.
-  const QImage recorded = cvMatToQImage(engine_->renderRecorded(panel_px_), /*bgr=*/true);
-  recorded_label_->setPixmap(QPixmap::fromImage(recorded));
-  const QImage grid = cvMatToQImage(engine_->renderGrid(panel_px_), /*bgr=*/true);
-  grid_label_->setPixmap(QPixmap::fromImage(grid));
+  // Render the boat-centred square at each pane's shorter side so it fills the
+  // pane without distortion as the splitter resizes it.
+  const int rec_px = std::max(64, std::min(recorded_label_->width(), recorded_label_->height()));
+  const int grid_px = std::max(64, std::min(grid_label_->width(), grid_label_->height()));
+  fit(recorded_label_, cvMatToQImage(engine_->renderRecorded(rec_px), /*bgr=*/true));
+  fit(grid_label_, cvMatToQImage(engine_->renderGrid(grid_px), /*bgr=*/true));
 
   // Bag-relative time (raw header stamps are epoch seconds — not meaningful to a
   // user; Copilot 1.4 / R7). The warm-up actually behind the current frame is
@@ -504,6 +534,14 @@ void MainWindow::refreshViews()
     QString("t=%1 s   windowed: warm-up %2 s (regenerated costmap is not full history)")
     .arg(t_rel, 0, 'f', 1)
     .arg(warmup, 0, 'f', 0));
+}
+
+void MainWindow::resizeEvent(QResizeEvent * event)
+{
+  QMainWindow::resizeEvent(event);
+  // Re-scale the panes to the new label sizes. Only when an engine is loaded —
+  // refreshViews paints the empty-state text otherwise, which needs no resize.
+  if (haveEngine()) {refreshViews();}
 }
 
 }  // namespace marine_perception_tools

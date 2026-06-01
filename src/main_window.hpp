@@ -136,9 +136,12 @@ private:
   QSlider * scrubber_ = nullptr;
   QPushButton * apply_btn_ = nullptr;   // commit the dirty knob batch (one re-sim)
   QPushButton * reset_btn_ = nullptr;   // revert dirty knobs to applied values
-  int panel_px_ = 360;        // costmap panel side (square)
-  int cam_tile_h_ = 165;      // camera/seg tile height (4:3)
   std::vector<Knob> knobs_;
+
+protected:
+  // Re-fit the panes when the window / splitter resizes (pixmaps are scaled to
+  // the labels' current size in refreshViews).
+  void resizeEvent(QResizeEvent * event) override;
 };
 
 }  // namespace marine_perception_tools
