@@ -120,7 +120,10 @@ private:
   //    the chased target, and onLoadFinished re-launches for it if the finished
   //    window doesn't cover it (single-flight + chase-latest supersession).
   void requestCoverage(double t_s);
-  void startLoad(double t_s);        // kick a background load for t_s
+  void startLoad(double t_s);        // kick a background load (stage A) for t_s
+  // Launch one worker stage: preloaded == nullptr → stage A (load + display-only
+  // engine); preloaded set → stage B (warm a fresh engine from that bag).
+  void launchStage(double t_s, std::uint64_t id, std::shared_ptr<LoadedBag> preloaded);
   bool engineCovers(double t_s) const;  // does the loaded engine's window cover t_s?
   // Integration warm-up in seconds, derived from the current decay half-life
   // (integration = integration_halflives_ * decay_half_life_s). Recomputed each
@@ -129,25 +132,38 @@ private:
   // Build BufferParams from the current knobs + the open session's bounds.
   BufferParams bufferParams() const;
 
-  // The product of one background window load, moved back to the GUI thread.
-  // shared_ptr so it survives the QFuture copy; engine null + error set on
-  // failure. `target_s`/`cache_*` echo the request so onLoadFinished can install
-  // the buffer_state_ and detect supersession.
+  // The product of one background load stage, moved back to the GUI thread
+  // (shared_ptr survives the QFuture copy; engine null + error set on failure).
+  // A window load runs in TWO stages so the camera/segmentation/recorded views
+  // appear before the slow regenerated costmap (run feedback):
+  //   * stage A (warmed=false): loadWindow + build a display-only engine
+  //     (seekToStampDisplayOnly — no warm-up replay). `bag` carries the loaded
+  //     window so stage B can reuse it without re-reading.
+  //   * stage B (warmed=true): build a fresh engine from the SAME `bag` and warm
+  //     it to the target (seekToStamp). cv::Mat is refcounted, so building from
+  //     the shared bag copies frame headers, not pixels.
+  // `target_s`/`cache_*` echo the request so onLoadFinished installs buffer_state_
+  // and detects supersession by request_id.
   struct LoadResult
   {
     std::shared_ptr<ReSimEngine> engine;
+    std::shared_ptr<LoadedBag> bag;  // stage A's loaded window, reused by stage B
     double target_s = 0.0;
     double cache_lo = 0.0;
     double cache_hi = 0.0;
-    std::string error;  // empty on success
+    bool warmed = false;  // false: stage A (display-only); true: stage B (warmed)
+    std::string error;    // empty on success
     std::uint64_t request_id = 0;
   };
-  // Run on a worker thread (no Qt calls): load the window + build & warm the
-  // engine. Static so it can't accidentally touch GUI state.
+  // Run on a worker thread (no Qt calls). Stage A (preloaded == nullptr): load
+  // the window via the session, build a display-only engine. Stage B (preloaded
+  // set): build a fresh engine from that bag and warm it to the target. Static so
+  // it can't accidentally touch GUI state.
   static LoadResult loadWindowJob(
     std::shared_ptr<BagSession> session, BufferParams params, BufferState state,
     double t_s, double window_m, double res, double max_range, double min_grazing_deg,
-    sea_surface_segmentation::OccupancyParams occ, std::uint64_t request_id);
+    sea_surface_segmentation::OccupancyParams occ, std::uint64_t request_id,
+    std::shared_ptr<LoadedBag> preloaded);
 
   BagLoadOptions load_opts_;
   double window_m_;

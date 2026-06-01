@@ -76,6 +76,17 @@ public:
   // stamp-sorted, so this is a binary search + seekTo.
   void seekToStamp(double stamp_s);
 
+  // Set the current frame for `stamp_s` WITHOUT running the warm-up replay — the
+  // camera RGB / segmentation / recorded-costmap views index `current_` only and
+  // don't need the accumulated buffer, so this paints them instantly while the
+  // (slow) regenerated costmap is still warming on a worker. Marks the engine
+  // displayOnly(): renderGrid is not meaningful until a real seek warms it.
+  void seekToStampDisplayOnly(double stamp_s);
+
+  // True between a seekToStampDisplayOnly() and the next warming seek — the
+  // regenerated costmap is stale; the UI shows a "computing…" placeholder.
+  bool displayOnly() const {return display_only_;}
+
   // The stamp range this engine's loaded window covers (absolute header-stamp
   // seconds). A target stamp inside [firstStamp, lastStamp] can be rendered by an
   // in-window seek (cheap via the checkpoint store); outside, the window manager
@@ -97,6 +108,13 @@ public:
   // re-simulate ONCE. The Apply button (UI) uses this so a batch of edits across
   // the occupancy and accumulate knobs pays a single warm-up replay, not two.
   bool setParams(
+    const sea_surface_segmentation::OccupancyParams & occ,
+    const sea_surface_segmentation::AccumulateParams & acc, std::string & why);
+
+  // Validate a param batch WITHOUT applying it (same checks as setParams). The UI
+  // calls this on the GUI thread so an invalid Apply is rejected instantly,
+  // before spawning the background warm-up.
+  static bool validateParams(
     const sea_surface_segmentation::OccupancyParams & occ,
     const sea_surface_segmentation::AccumulateParams & acc, std::string & why);
 
@@ -158,6 +176,9 @@ private:
   std::map<std::size_t, sea_surface_segmentation::OccupancyBuffer> checkpoints_;
   double last_checkpoint_stamp_s_ = 0.0;  // stamp of the most recent snapshot
   bool have_checkpoint_ = false;          // false until the first snapshot
+  // True after seekToStampDisplayOnly: current_ moved for the image views but the
+  // buffer was NOT replayed, so renderGrid is stale. Cleared by any real seek.
+  bool display_only_ = false;
 };
 
 }  // namespace marine_perception_tools

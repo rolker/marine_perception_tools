@@ -17,9 +17,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <opencv2/imgproc.hpp>
 
@@ -163,7 +165,24 @@ void ReSimEngine::seekTo(std::size_t k)
 {
   if (bag_.frames.empty()) {return;}
   k = std::min(k, bag_.frames.size() - 1);
-  if (k == current_) {return;}
+  // After a display-only seek the buffer is stale even at the same index, so a
+  // warming seek to current_ must NOT early-return — force a full replay to k.
+  if (k == current_ && !display_only_) {return;}
+  if (display_only_) {
+    // Buffer doesn't reflect current_; rebuild from scratch to k (the checkpoint
+    // forward/rewind shortcuts assume buffer↔current_ consistency, which a
+    // display-only jump broke).
+    display_only_ = false;
+    current_ = 0;
+    clearCheckpoints();
+    buffer_.clear();
+    for (std::size_t i = 0; i <= k; ++i) {
+      accumulate(i);
+      maybeCheckpoint(i);
+    }
+    current_ = k;
+    return;
+  }
   if (k > current_) {
     // Forward: accumulate the intervening frames incrementally, snapshotting as
     // we pass so a later rewind to this span is cheap.
@@ -194,18 +213,38 @@ void ReSimEngine::seekTo(std::size_t k)
   current_ = k;
 }
 
+namespace
+{
+// Largest frame index whose stamp <= stamp_s (frames are stamp-sorted); clamps
+// to 0 if the target is before the first frame.
+std::size_t frame_index_for_stamp(
+  const std::vector<PreparedFrame> & frames, double stamp_s)
+{
+  auto it = std::upper_bound(
+    frames.begin(), frames.end(), stamp_s,
+    [](double s, const PreparedFrame & f) {return s < f.stamp_s;});
+  return (it == frames.begin()) ? 0 :
+         static_cast<std::size_t>((it - frames.begin()) - 1);
+}
+}  // namespace
+
 void ReSimEngine::seekToStamp(double stamp_s)
 {
   if (bag_.frames.empty()) {return;}
-  // Largest frame index whose stamp <= stamp_s (frames are stamp-sorted). If the
-  // target is before the first frame, clamp to frame 0.
-  const auto begin = bag_.frames.begin();
-  const auto end = bag_.frames.end();
-  auto it = std::upper_bound(
-    begin, end, stamp_s,
-    [](double s, const PreparedFrame & f) {return s < f.stamp_s;});
-  std::size_t k = (it == begin) ? 0 : static_cast<std::size_t>((it - begin) - 1);
-  seekTo(k);
+  seekTo(frame_index_for_stamp(bag_.frames, stamp_s));
+}
+
+void ReSimEngine::seekToStampDisplayOnly(double stamp_s)
+{
+  if (bag_.frames.empty()) {return;}
+  // Move the frame index for the image/seg/recorded views ONLY — no accumulate,
+  // no replay. The buffer (and thus renderGrid) is now stale: flag it so the UI
+  // shows a "computing…" placeholder until a warming seek runs. This engine is
+  // display-only (stage A); the warmed regenerated costmap comes from a separate
+  // engine built in stage B, so the broken buffer↔current_ invariant is fine —
+  // renderGrid is never trusted while display_only_ is set.
+  current_ = frame_index_for_stamp(bag_.frames, stamp_s);
+  display_only_ = true;
 }
 
 void ReSimEngine::resimToCurrent()
@@ -278,6 +317,14 @@ bool validate_accumulate(
   return true;
 }
 }  // namespace
+
+bool ReSimEngine::validateParams(
+  const sea_surface_segmentation::OccupancyParams & occ,
+  const sea_surface_segmentation::AccumulateParams & acc, std::string & why)
+{
+  return sea_surface_segmentation::OccupancyBuffer::validate(occ, why) &&
+         validate_accumulate(acc, why);
+}
 
 bool ReSimEngine::setOccupancyParams(
   const sea_surface_segmentation::OccupancyParams & p, std::string & why)

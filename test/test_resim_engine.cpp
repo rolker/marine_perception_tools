@@ -427,6 +427,31 @@ TEST(ReSimEngine, RewindAfterParamChangeUsesRebuiltCheckpoints)
     << "rewind after param change reused stale (old-param) checkpoints";
 }
 
+// seekToStampDisplayOnly moves the frame index for the image views WITHOUT
+// warming the buffer; a subsequent warming seek to that frame must still produce
+// the correct costmap (the stale buffer↔current_ state is rebuilt from scratch),
+// identical to a fresh engine seeked straight there. Guards the display_only_
+// branch in seekTo.
+TEST(ReSimEngine, WarmingSeekAfterDisplayOnlyMatchesFresh)
+{
+  const int n = 12;
+  const auto bag = make_bag(n);
+  const double target_stamp = bag.frames[7].stamp_s;
+
+  mpt::ReSimEngine e(bag, kWindowM, kRes, kMaxRange);
+  e.seekToStamp(bag.frames[3].stamp_s);   // warm somewhere
+  e.seekToStampDisplayOnly(target_stamp);  // jump index only — buffer now stale
+  EXPECT_EQ(e.currentIndex(), 7u);
+  e.seekToStamp(target_stamp);             // warming seek to the same frame
+  EXPECT_EQ(e.currentIndex(), 7u);
+
+  mpt::ReSimEngine fresh(bag, kWindowM, kRes, kMaxRange);
+  fresh.seekToStamp(target_stamp);
+
+  EXPECT_TRUE(grids_equal(sample_grid(e), sample_grid(fresh)))
+    << "warming seek after a display-only jump diverged from a fresh seek";
+}
+
 // An empty LoadedBag must fail loudly at construction, not read past frames[0].
 // The bag loaders already throw on an empty window, but a direct/alternate
 // construction (or a future windowed loader handing back zero frames) would

@@ -283,40 +283,46 @@ void MainWindow::startLoad(double t_s)
     seg_labels_[i]->setText("…");
   }
   recorded_label_->setPixmap(QPixmap());
-  recorded_label_->setText("recorded costmap");
+  recorded_label_->setText("loading…");
   grid_label_->setPixmap(QPixmap());
-  grid_label_->setText("warming up…");
+  grid_label_->setText("loading…");
   statusBar()->showMessage(
-    QString("Warming up %1 s window around t=%2 s …")
+    QString("Loading %1 s window around t=%2 s …")
     .arg(plan.cache_hi - plan.cache_lo, 0, 'f', 0).arg(t_s, 0, 'f', 1));
 
-  const sea_surface_segmentation::OccupancyParams occ =
-    engine_ ? engine_->occupancyParams() : sea_surface_segmentation::OccupancyParams{};
-  const std::uint64_t id = ++request_id_;
-  // Run the load + warm-up on the thread pool; onLoadFinished installs the
-  // result on the GUI thread. session_ is shared so it survives a File->Open.
-  // Captured by value so nothing on the GUI thread is touched off-thread. (A
-  // lambda, not a 10-arg run() overload — Qt5's QtConcurrent::run can't deduce
+  // Stage A: load the window + build a display-only engine (no preloaded bag).
+  launchStage(t_s, ++request_id_, /*preloaded=*/nullptr);
+}
+
+void MainWindow::launchStage(
+  double t_s, std::uint64_t id, std::shared_ptr<LoadedBag> preloaded)
+{
+  // Capture by value so nothing on the GUI thread is touched off-thread. (A
+  // lambda, not a many-arg run() overload — Qt5's QtConcurrent::run can't deduce
   // that many bound args through a function pointer.)
   auto session = session_;
   const BufferParams params = bufferParams();
   const BufferState state = buffer_state_;
   const double window_m = window_m_, res = res_, max_range = max_range_;
   const double min_grazing = min_grazing_deg_;
+  const sea_surface_segmentation::OccupancyParams occ =
+    engine_ ? engine_->occupancyParams() : sea_surface_segmentation::OccupancyParams{};
   load_watcher_.setFuture(QtConcurrent::run(
-      [session, params, state, t_s, window_m, res, max_range, min_grazing, occ, id] {
+      [session, params, state, t_s, window_m, res, max_range, min_grazing, occ, id,
+      preloaded] {
         return loadWindowJob(
-        session, params, state, t_s, window_m, res, max_range, min_grazing, occ, id);
+        session, params, state, t_s, window_m, res, max_range, min_grazing, occ, id,
+        preloaded);
     }));
 }
 
 MainWindow::LoadResult MainWindow::loadWindowJob(
   std::shared_ptr<BagSession> session, BufferParams params, BufferState state,
   double t_s, double window_m, double res, double max_range, double min_grazing_deg,
-  sea_surface_segmentation::OccupancyParams occ, std::uint64_t request_id)
+  sea_surface_segmentation::OccupancyParams occ, std::uint64_t request_id,
+  std::shared_ptr<LoadedBag> preloaded)
 {
-  // Worker thread: NO Qt / GUI access. Load the window, build the engine, warm it
-  // to t_s — all the slow work — and return it for the GUI thread to install.
+  // Worker thread: NO Qt / GUI access.
   LoadResult r;
   r.target_s = t_s;
   r.request_id = request_id;
@@ -324,11 +330,27 @@ MainWindow::LoadResult MainWindow::loadWindowJob(
   r.cache_lo = plan.cache_lo;
   r.cache_hi = plan.cache_hi;
   try {
-    LoadedBag bag = session->loadWindow(plan.cache_lo, plan.cache_hi);
-    auto engine = std::make_shared<ReSimEngine>(
-      std::move(bag), window_m, res, max_range, occ, min_grazing_deg);
-    engine->seekToStamp(session->startTime() + t_s);
-    r.engine = std::move(engine);
+    if (!preloaded) {
+      // Stage A: read the window (the slow I/O + H.265 decode) and build a
+      // display-only engine — index set for the image views, NO warm-up replay.
+      auto bag = std::make_shared<LoadedBag>(
+        session->loadWindow(plan.cache_lo, plan.cache_hi));
+      auto engine = std::make_shared<ReSimEngine>(
+        *bag, window_m, res, max_range, occ, min_grazing_deg);
+      engine->seekToStampDisplayOnly(session->startTime() + t_s);
+      r.bag = std::move(bag);
+      r.engine = std::move(engine);
+      r.warmed = false;
+    } else {
+      // Stage B: build a fresh engine from the SAME bag (cv::Mat is refcounted —
+      // copies frame headers, not pixels) and warm it to the target.
+      auto engine = std::make_shared<ReSimEngine>(
+        *preloaded, window_m, res, max_range, occ, min_grazing_deg);
+      engine->seekToStamp(session->startTime() + t_s);
+      r.bag = preloaded;
+      r.engine = std::move(engine);
+      r.warmed = true;
+    }
   } catch (const std::exception & e) {
     r.error = e.what();
   }
@@ -360,14 +382,22 @@ void MainWindow::onLoadFinished()
   buffer_state_.has_cache = true;
   buffer_state_.cache_lo = r.cache_lo;
   buffer_state_.cache_hi = r.cache_hi;
-  syncToEngine();
+  syncToEngine();  // paints all panes; regenerated shows "computing…" while stageA
 
-  // A target requested mid-load: if this window covers it, just seek; else load
-  // again for it (chase-latest).
+  // A target requested mid-load supersedes — restart from stage A for it.
   if (chase_target_s_ >= 0.0) {
     const double t = chase_target_s_;
     chase_target_s_ = -1.0;
     requestCoverage(t);
+    return;
+  }
+
+  // Stage A just delivered images + recorded costmap. Chain stage B to warm the
+  // regenerated costmap from the same bag, without blocking the GUI.
+  if (!r.warmed) {
+    load_in_flight_ = true;
+    statusBar()->showMessage("Computing regenerated costmap …");
+    launchStage(r.target_s, r.request_id, r.bag);
   }
 }
 
@@ -621,11 +651,19 @@ void MainWindow::refreshViews()
 
   // Row 3: recorded costmap (bag) | regenerated (tuned) costmap, same window.
   // Render the boat-centred square at each pane's shorter side so it fills the
-  // pane without distortion as the splitter resizes it.
+  // pane without distortion as the splitter resizes it. The recorded costmap is
+  // available immediately (stage A); the regenerated one needs the warm-up replay
+  // (stage B), so show "computing…" while the engine is display-only.
   const int rec_px = std::max(64, std::min(recorded_label_->width(), recorded_label_->height()));
-  const int grid_px = std::max(64, std::min(grid_label_->width(), grid_label_->height()));
   fit(recorded_label_, cvMatToQImage(engine_->renderRecorded(rec_px), /*bgr=*/true));
-  fit(grid_label_, cvMatToQImage(engine_->renderGrid(grid_px), /*bgr=*/true));
+  if (engine_->displayOnly()) {
+    grid_label_->setPixmap(QPixmap());
+    grid_label_->setText("computing costmap…");
+  } else {
+    const int grid_px =
+      std::max(64, std::min(grid_label_->width(), grid_label_->height()));
+    fit(grid_label_, cvMatToQImage(engine_->renderGrid(grid_px), /*bgr=*/true));
+  }
 
   // Bag-relative time (raw header stamps are epoch seconds — not meaningful to a
   // user; Copilot 1.4 / R7). The warm-up actually behind the current frame is
