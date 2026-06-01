@@ -510,3 +510,134 @@ time-based whole-bag scrubber + buffer manager in `MainWindow` (in-span live,
 out-of-span reload on release, far-jump drop+reload, status notes). D5. Apply/Reset
 param workflow with dirty-colour cue (R2), replacing immediate re-sim. D6. README
 + `.agents/README.md` (windowed File→Open, new knobs, fidelity caveat).
+
+## Milestone D4 — re-sim cost profiling + checkpoint-cache design (2026-05-31/06-01)
+
+**D2 and D3 are committed and green** (ff50bb1, 73e0843; 78 tests pass). D4 wiring
+was NOT started — profiling first exposed a performance wall that reshapes the
+D4/D5 design. This section records the findings and the agreed path so work can
+resume cleanly.
+
+### The performance wall (measured, not estimated)
+
+Timed a full re-sim (rewind→clear→replay the whole window) via a temp block in
+`main.cpp`'s `--probe` path (reverted; tree clean). Hardware: salmon.
+
+| window | frames | full re-sim | per-frame |
+|---|---|---|---|
+| 90 s (3× half-life) | 1798 | **66 s** | 36.7 ms |
+| 30 s (1× half-life) | 598 | **20.7 s** | 34.6 ms |
+| 30 s, max_range 60 | 598 | 30.7 s | 51.3 ms |
+| 30 s, max_range 30 | 598 | 7.7 s | 12.8 ms |
+
+**Cost structure:** `project_observations_inverse`
+(`sea_surface_segmentation/segments_projection.hpp`) iterates an `n × n` cell
+window, `n = 2·half_extent/res = 120/0.25 = 480` → ~230 k cells/frame, each doing
+a matrix mult + `project3dToPixel` + `vector::push_back`. Total cost ≈
+`frames × n²`. Render is cheap (36 ms).
+
+**Two findings that killed the first two proposed levers:**
+1. **Capping iteration by `max_range` does NOT help** — `max_range 60` was
+   *slower* than `150` (51 vs 35 ms/frame). The per-cell range check is a
+   `continue` that still visits every cell; it doesn't bound the loop. Only the
+   extreme `max_range 30` helped, and only incidentally. So the original D4 lever
+   "cap iteration by max_range" (and editing the shared deployed
+   `unh_marine_perception` header for it) is OFF the table — measured, not worth
+   the risk.
+2. **The dominant knob is cell count `n²`** (tuner-side: `res`/`half_extent`),
+   and **frame count** (integration length). Both are tuner-construction knobs —
+   no shared-header change.
+
+**Why this matters:** strict R1 (engine accumulates *exactly* the sliding
+`[t − integration, t]`) means **every scrub step** is a full re-sim, because
+log-odds accumulation is not invertible (can't cheaply drop the oldest frame) and
+the engine only accumulates forward from its frame 0. At 20–66 s per step that is
+unusable. R1's strict form is incompatible with interactive scrubbing at this
+cost — this must be reconciled (below).
+
+### Decision: checkpoint-cache of buffer state (Roland, 2026-06-01)
+
+Rather than relax R1 or shorten the window punitively, **cache the accumulated
+buffer state along the window** so scrubbing reuses prior work:
+
+- The `OccupancyBuffer` state is copyable: one `grid_map::GridMap` (a 480×480
+  `log_odds` Eigen matrix) + two decay scalars (`last_decay_s_`, `seeded_`).
+  ≈0.9 MB per snapshot at 480² floats.
+- As the engine accumulates **forward**, drop a snapshot every ~1 s of bag time.
+- **Forward scrub** → incremental accumulate (already cheap), snapshotting as it
+  passes.
+- **Backward scrub / re-visit** → restore the nearest snapshot ≤ target, replay
+  only the few frames from there to the target (~one snapshot interval ≈
+  0.3–0.7 s, often instant if the exact point is cached).
+
+**This RECONCILES R1 rather than relaxing it.** With a **fixed window start**
+`W_lo` per load, the costmap at frame k is *always* `accumulate(W_lo … k)`; a
+snapshot is a bit-identical cache of that exact computation, so the rendered
+costmap at t is deterministic and provenance-independent *within a load* — what
+R1 wanted. The only thing dropped vs. strict per-frame *sliding* start is erased
+by decay: once t is ≥ `integration` past `W_lo`, pre-window evidence has decayed
+to the same ~12% floor whether or not it was in the window, so
+`accumulate(W_lo…t) ≈ accumulate(t−integration…t)` for every frame actually
+viewed. The fixed-start window *is* the sliding window, for viewed frames.
+
+**What the cache does NOT solve (inherent, accepted):**
+- Snapshots are **parameter-specific.** Pressing **Apply** (D5) invalidates all
+  snapshots → one full re-sim from `W_lo` (~20 s at 30 s integration). The D5
+  Apply-button model already accepts this as a deliberate, infrequent wait.
+- **Initial fill** of a freshly loaded/jumped-to window is one full re-sim (with
+  a "warming…" progress status; R8 already moved reload off the scrub drag).
+
+So the cost picture for D4/D5:
+- **Scrub (either direction): cheap** (the checkpoint cache — this decision).
+- **Initial load / far jump: one ~20 s fill**, progress-indicated, once per window.
+- **Apply: one ~20 s re-sim** per parameter batch (deliberate, infrequent).
+
+Integration default stays **1× half-life (~30 s)** — not a hard requirement now,
+but it keeps the initial-fill and Apply waits at ~20 s rather than ~66 s. It is a
+comfort knob, full 0.25 m / 120 m fidelity is retained.
+
+### Revised D4 implementation shape (to build on resume)
+
+1. **Engine checkpoint store** (FIRST — do before UI):
+   - Add `OccupancyBuffer` copy/snapshot access (it's already copyable; expose a
+     `snapshot()`/`restore(snapshot)` or copy the buffer wholesale).
+   - `ReSimEngine` holds a frame-indexed `std::map<size_t, Snapshot>` (or vector
+     of {frame_idx, buffer-copy}). Snapshot every ~1 s of bag time during forward
+     accumulation. `seekTo(k)`:
+       * k >= current and within window → incremental accumulate (as today), drop
+         snapshots as passed.
+       * k < current → restore nearest snapshot ≤ k, replay (k − snap) frames.
+   - Snapshot interval = constant (~1 s bag time); memory ≈ tens of MB for a 90 s
+     window. Document the memory↔back-scrub-latency tradeoff.
+   - **Tests:** restore-then-replay == fresh replay to the same k (bit-identical);
+     snapshot/restore round-trips the decay clock; forward-with-snapshots ==
+     forward-without (snapshots don't perturb accumulation). Extends
+     `test_resim_engine.cpp`.
+2. **`MainWindow` buffer manager** (after the engine store works):
+   - Time-based whole-bag scrubber (bounds from `BagSession::duration_s()`).
+   - Wire D3 `plan_buffer()` → `BagSession::loadWindow()`; fixed `W_lo` per load.
+   - In-span scrub = engine `seekTo` (cheap via cache); out-of-span = reload on
+     `sliderReleased` (R8); far jump = drop + reload (status note).
+   - "warming…" status during a fill; windowed-warm-up label (R5).
+3. **Then D5** (Apply/Reset + dirty-colour) and **D6** (docs).
+
+### RESUME HERE (2026-06-01)
+
+- **State:** D1–D3 committed on `feature/issue-1` (worktree
+  `layers/worktrees/issue-marine_perception_tools-1`, pkg in `ui_ws/src/marine_perception_tools`).
+  Tree clean. 78 tests pass. PR #2 (rolker/marine_perception_tools) open, base `jazzy`.
+- **Next action:** implement the **engine checkpoint store** (D4 step 1 above)
+  with its tests, commit, THEN the `MainWindow` buffer manager (step 2).
+- **Build/test:** `source /opt/ros/jazzy/setup.bash && source
+  /home/roland/project11/layers/main/sensors_ws/install/setup.bash` then
+  `cd .../ui_ws && colcon build --symlink-install --packages-select
+  marine_perception_tools && colcon test --packages-select marine_perception_tools`.
+  (`sea_surface_segmentation` is already built in `main/sensors_ws/install`.)
+- **DO NOT** run `--probe` without a `--start-s/--end-s` clamp: it buffers the
+  whole 17-min 4-camera bag and OOM-killed the machine (the very blowup D4 fixes).
+  Always clamp manual loads.
+- **Bag for manual checks:**
+  `~/data/logs/bizzy_images/bag_2026-05-29T15.56.42_ffmpeg_seg` (1021 s, 4 cams,
+  raw seg + H.265 RGB + recorded costmap + TF).
+- **Open design knob:** snapshot interval / memory budget — defaulting to ~1 s
+  bag-time (~tens of MB / 90 s window) unless revisited.
