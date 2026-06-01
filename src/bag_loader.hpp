@@ -166,6 +166,11 @@ public:
   double duration_s() const {return duration_s_;}
   double startTime() const {return static_cast<double>(bag_start_ns_) * 1e-9;}
 
+  // True when any camera's segmentation source is the lossy-capable
+  // `.../compressed` topic (raw Image absent). Determined at scan time, so the UI
+  // can surface the fidelity caveat on open without loading a window first.
+  bool usedCompressedSegmentation() const {return used_compressed_segmentation_;}
+
 private:
   std::string bag_uri_;
   BagLoadOptions opts_;

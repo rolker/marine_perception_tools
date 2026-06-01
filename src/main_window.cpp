@@ -16,6 +16,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QtConcurrent>
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
@@ -129,9 +130,25 @@ MainWindow::MainWindow(
   layout->addWidget(scrubber_);
   setCentralWidget(central);
 
+  // Background window loads deliver a LoadResult back on the GUI thread.
+  qRegisterMetaType<LoadResult>("LoadResult");
+  connect(&load_watcher_, &QFutureWatcher<LoadResult>::finished,
+    this, &MainWindow::onLoadFinished);
+
   buildMenu();
   buildParamDock();
   syncToEngine();  // empty state until a bag is opened
+}
+
+MainWindow::~MainWindow()
+{
+  // Block until an in-flight load finishes so its result can't be delivered to a
+  // destroyed window. The worker holds the BagSession via a shared_ptr, so it
+  // stays valid for the duration regardless of member teardown order.
+  disconnect(&load_watcher_, nullptr, this, nullptr);
+  if (load_watcher_.future().isRunning()) {
+    load_watcher_.waitForFinished();
+  }
 }
 
 void MainWindow::buildMenu()
@@ -180,15 +197,20 @@ void MainWindow::openBag(const QString & bag_uri)
   scrubber_->setValue(0);
   scrubber_->blockSignals(false);
 
-  // Load the initial window around t=0 (cold start: the window clamps to the bag
-  // start and warms forward — see the R5 caveat surfaced in refreshViews).
-  if (!ensureCovers(0.0)) {return;}  // ensureCovers reports its own failure
-  syncToEngine();
-  if (engine_ && engine_->usedCompressedSegmentation()) {
+  // Surface the compressed-segmentation caveat now (a scan-time property) — the
+  // window load below is async, so we can't read it off the engine here.
+  if (session_->usedCompressedSegmentation()) {
     statusBar()->showMessage(
       "Note: using compressed segmentation (raw topic absent) — if JPEG, the "
       "obstacle-probability channel is lossy; tuned values may not transfer.", 12000);
   }
+
+  // Reset the dock to the empty baseline, then kick the initial window load
+  // around t=0 in the background (cold start: the window clamps to the bag start
+  // and warms forward — see the R5 caveat surfaced in refreshViews). The engine
+  // installs via onLoadFinished; the GUI stays responsive meanwhile.
+  syncToEngine();
+  requestCoverage(0.0);
 }
 
 double MainWindow::integrationSeconds() const
@@ -211,48 +233,137 @@ BufferParams MainWindow::bufferParams() const
   return p;
 }
 
-bool MainWindow::ensureCovers(double t_s)
+bool MainWindow::engineCovers(double t_s) const
 {
-  if (!session_) {return false;}
+  if (!engine_ || !session_) {return false;}
+  const double lo = engine_->firstStamp() - session_->startTime();
+  const double hi = engine_->lastStamp() - session_->startTime();
+  return t_s >= lo - 1e-6 && t_s <= hi + 1e-6;
+}
 
-  // In-window fast path: the target is already covered by the loaded engine, so
-  // just seek (cheap via the checkpoint store) — no policy, no reload.
-  if (engine_ && t_s >= engine_->firstStamp() - session_->startTime() - 1e-6 &&
-    t_s <= engine_->lastStamp() - session_->startTime() + 1e-6)
-  {
+void MainWindow::requestCoverage(double t_s)
+{
+  if (!session_) {return;}
+
+  // In-window fast path: the loaded engine already covers t_s, so seek
+  // synchronously (cheap via the checkpoint store) — no reload, even if a
+  // background load happens to be in flight for somewhere else.
+  if (engineCovers(t_s)) {
     engine_->seekToStamp(session_->startTime() + t_s);
-    return true;
+    refreshViews();
+    return;
   }
 
+  // Out of window. If a load is already running, just chase the latest target —
+  // onLoadFinished re-launches for it. Otherwise start one now.
+  if (load_in_flight_) {
+    chase_target_s_ = t_s;
+    return;
+  }
+  startLoad(t_s);
+}
+
+void MainWindow::startLoad(double t_s)
+{
+  load_in_flight_ = true;
+  chase_target_s_ = -1.0;
   const BufferPlan plan = plan_buffer(t_s, bufferParams(), buffer_state_);
-  if (!plan.read) {
-    // Policy says the replay span is already cached but the engine doesn't cover
-    // it (e.g. just constructed) — shouldn't happen in practice; fall through to
-    // a load of the planned cache span to be safe.
-  }
 
+  // Grey the panes + status so a stale window isn't mistaken for the target
+  // while the load runs (run feedback: clear out-of-date displays).
+  for (int i = 0; i < kNumCameras; ++i) {
+    rgb_labels_[i]->setPixmap(QPixmap());
+    rgb_labels_[i]->setText(QString(kCameraLabels[i]) + " …");
+    seg_labels_[i]->setPixmap(QPixmap());
+    seg_labels_[i]->setText("…");
+  }
+  recorded_label_->setPixmap(QPixmap());
+  recorded_label_->setText("recorded costmap");
+  grid_label_->setPixmap(QPixmap());
+  grid_label_->setText("warming up…");
   statusBar()->showMessage(
     QString("Warming up %1 s window around t=%2 s …")
     .arg(plan.cache_hi - plan.cache_lo, 0, 'f', 0).arg(t_s, 0, 'f', 1));
-  QApplication::processEvents();  // paint the status before the blocking load
 
-  std::unique_ptr<ReSimEngine> engine;
+  const sea_surface_segmentation::OccupancyParams occ =
+    engine_ ? engine_->occupancyParams() : sea_surface_segmentation::OccupancyParams{};
+  const std::uint64_t id = ++request_id_;
+  // Run the load + warm-up on the thread pool; onLoadFinished installs the
+  // result on the GUI thread. session_ is shared so it survives a File->Open.
+  // Captured by value so nothing on the GUI thread is touched off-thread. (A
+  // lambda, not a 10-arg run() overload — Qt5's QtConcurrent::run can't deduce
+  // that many bound args through a function pointer.)
+  auto session = session_;
+  const BufferParams params = bufferParams();
+  const BufferState state = buffer_state_;
+  const double window_m = window_m_, res = res_, max_range = max_range_;
+  const double min_grazing = min_grazing_deg_;
+  load_watcher_.setFuture(QtConcurrent::run(
+      [session, params, state, t_s, window_m, res, max_range, min_grazing, occ, id] {
+        return loadWindowJob(
+        session, params, state, t_s, window_m, res, max_range, min_grazing, occ, id);
+    }));
+}
+
+MainWindow::LoadResult MainWindow::loadWindowJob(
+  std::shared_ptr<BagSession> session, BufferParams params, BufferState state,
+  double t_s, double window_m, double res, double max_range, double min_grazing_deg,
+  sea_surface_segmentation::OccupancyParams occ, std::uint64_t request_id)
+{
+  // Worker thread: NO Qt / GUI access. Load the window, build the engine, warm it
+  // to t_s — all the slow work — and return it for the GUI thread to install.
+  LoadResult r;
+  r.target_s = t_s;
+  r.request_id = request_id;
+  const BufferPlan plan = plan_buffer(t_s, params, state);
+  r.cache_lo = plan.cache_lo;
+  r.cache_hi = plan.cache_hi;
   try {
-    LoadedBag bag = session_->loadWindow(plan.cache_lo, plan.cache_hi);
-    engine = std::make_unique<ReSimEngine>(
-      std::move(bag), window_m_, res_, max_range_,
-      engine_ ? engine_->occupancyParams() : sea_surface_segmentation::OccupancyParams{},
-      min_grazing_deg_);
+    LoadedBag bag = session->loadWindow(plan.cache_lo, plan.cache_hi);
+    auto engine = std::make_shared<ReSimEngine>(
+      std::move(bag), window_m, res, max_range, occ, min_grazing_deg);
+    engine->seekToStamp(session->startTime() + t_s);
+    r.engine = std::move(engine);
   } catch (const std::exception & e) {
-    statusBar()->showMessage(QString("Window load failed: ") + e.what(), 8000);
-    return false;
+    r.error = e.what();
   }
-  engine_ = std::move(engine);
+  return r;
+}
+
+void MainWindow::onLoadFinished()
+{
+  load_in_flight_ = false;
+  const LoadResult r = load_watcher_.result();
+
+  // Superseded by a newer request: discard and serve the latest instead.
+  if (r.request_id != request_id_) {
+    if (chase_target_s_ >= 0.0) {
+      const double t = chase_target_s_;
+      chase_target_s_ = -1.0;
+      requestCoverage(t);
+    }
+    return;
+  }
+
+  if (!r.engine) {
+    statusBar()->showMessage(QString("Window load failed: ") +
+      QString::fromStdString(r.error), 8000);
+    return;
+  }
+
+  engine_ = r.engine;
   buffer_state_.has_cache = true;
-  buffer_state_.cache_lo = plan.cache_lo;
-  buffer_state_.cache_hi = plan.cache_hi;
-  engine_->seekToStamp(session_->startTime() + t_s);
-  return true;
+  buffer_state_.cache_lo = r.cache_lo;
+  buffer_state_.cache_hi = r.cache_hi;
+  syncToEngine();
+
+  // A target requested mid-load: if this window covers it, just seek; else load
+  // again for it (chase-latest).
+  if (chase_target_s_ >= 0.0) {
+    const double t = chase_target_s_;
+    chase_target_s_ = -1.0;
+    requestCoverage(t);
+  }
 }
 
 void MainWindow::buildParamDock()
@@ -372,19 +483,16 @@ void MainWindow::onSeek(int decisec)
   const double t_s = std::max(0, decisec) / 10.0;  // deciseconds -> bag-relative s
 
   // In-window: seek live (cheap via the checkpoint store) so dragging tracks the
-  // costmap. Out-of-window: defer the reload to release (R8) — stash the target
-  // and surface that a release will load it, but don't block mid-drag.
-  if (engine_) {
-    const double rel_lo = engine_->firstStamp() - session_->startTime();
-    const double rel_hi = engine_->lastStamp() - session_->startTime();
-    if (t_s >= rel_lo - 1e-6 && t_s <= rel_hi + 1e-6) {
-      engine_->seekToStamp(session_->startTime() + t_s);
-      pending_seek_s_ = -1.0;
-      refreshViews();
-      return;
-    }
+  // costmap. Out-of-window: defer the (now background) load to release — a drag
+  // sweeps through many out-of-window values, and starting a load for each would
+  // thrash; one load for the value you settle on is right.
+  if (engineCovers(t_s)) {
+    engine_->seekToStamp(session_->startTime() + t_s);
+    pending_seek_s_ = -1.0;
+    refreshViews();
+    return;
   }
-  pending_seek_s_ = t_s;  // outside the window — commit on release
+  pending_seek_s_ = t_s;  // outside the window — load on release
   statusBar()->showMessage(
     QString("Release to load t=%1 s …").arg(t_s, 0, 'f', 1));
 }
@@ -392,21 +500,13 @@ void MainWindow::onSeek(int decisec)
 void MainWindow::onSeekReleased()
 {
   if (!session_) {return;}
-  // Commit a deferred out-of-window target; if none pending (the drag stayed in
-  // window, or a keyboard/wheel step landed in window), there's nothing to do.
+  // Commit the settled target. requestCoverage seeks in-window synchronously or
+  // launches a background load (greying the panes) for an out-of-window target —
+  // the GUI stays responsive either way, and a further scrub supersedes.
   const double t_s = (pending_seek_s_ >= 0.0) ?
     pending_seek_s_ : scrubber_->value() / 10.0;
   pending_seek_s_ = -1.0;
-  if (engine_) {
-    const double rel_lo = engine_->firstStamp() - session_->startTime();
-    const double rel_hi = engine_->lastStamp() - session_->startTime();
-    if (t_s >= rel_lo - 1e-6 && t_s <= rel_hi + 1e-6) {
-      engine_->seekToStamp(session_->startTime() + t_s);
-      refreshViews();
-      return;
-    }
-  }
-  if (ensureCovers(t_s)) {refreshViews();}
+  requestCoverage(t_s);
 }
 
 void MainWindow::onParamEdited()

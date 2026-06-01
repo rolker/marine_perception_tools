@@ -15,10 +15,12 @@
 #ifndef MAIN_WINDOW_HPP_
 #define MAIN_WINDOW_HPP_
 
+#include <QFutureWatcher>
 #include <QMainWindow>
 #include <QString>
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -31,6 +33,7 @@
 class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
+class QResizeEvent;
 class QSlider;
 
 namespace marine_perception_tools
@@ -59,6 +62,10 @@ public:
     double min_grazing_deg, double integration_halflives = 1.0,
     double margin_s = 10.0, double retention_s = 120.0, QWidget * parent = nullptr);
 
+  // Wait for any in-flight background window load before teardown, so its
+  // completion can't fire onLoadFinished on a half-destructed window.
+  ~MainWindow() override;
+
   // Open a bag: build a BagSession (one full scan), set the whole-bag time
   // scrubber range, and load the initial window around t=0. On failure the
   // message goes to the status bar and the prior session/engine (if any) is left
@@ -71,6 +78,7 @@ private slots:
   void onParamEdited();              // mark a knob dirty (no re-sim — batched)
   void onApplyParams();              // validate+apply the dirty batch, one re-sim
   void onResetParams();              // revert dirty boxes to the applied values
+  void onLoadFinished();             // a background window load completed
   void onOpen();
 
 private:
@@ -103,18 +111,43 @@ private:
   void refreshViews();
   bool haveEngine() const {return engine_ != nullptr;}
 
-  // Buffer manager (Milestone D4). Ensure the engine covers bag-relative time
-  // `t_s`: consult the D3 span policy against the current cache; if a reload is
-  // needed, read the new window via the BagSession and rebuild the engine, then
-  // seek to `t_s`. Cheap (in-window seek) when the policy says NoReload. Returns
-  // false and leaves prior state intact on a load error (message to status bar).
-  bool ensureCovers(double t_s);
+  // Buffer manager (Milestone D4). Ensure bag-relative time `t_s` is shown:
+  //  - if the loaded engine already covers it, seek synchronously (cheap via the
+  //    checkpoint store);
+  //  - otherwise launch a BACKGROUND window load (D3 span policy → loadWindow →
+  //    new engine warmed to t_s) and grey the panes until it lands. The GUI stays
+  //    responsive; a newer requestCoverage while a load is in flight just updates
+  //    the chased target, and onLoadFinished re-launches for it if the finished
+  //    window doesn't cover it (single-flight + chase-latest supersession).
+  void requestCoverage(double t_s);
+  void startLoad(double t_s);        // kick a background load for t_s
+  bool engineCovers(double t_s) const;  // does the loaded engine's window cover t_s?
   // Integration warm-up in seconds, derived from the current decay half-life
   // (integration = integration_halflives_ * decay_half_life_s). Recomputed each
   // call so a half-life knob change grows/shrinks the window (R-series).
   double integrationSeconds() const;
   // Build BufferParams from the current knobs + the open session's bounds.
   BufferParams bufferParams() const;
+
+  // The product of one background window load, moved back to the GUI thread.
+  // shared_ptr so it survives the QFuture copy; engine null + error set on
+  // failure. `target_s`/`cache_*` echo the request so onLoadFinished can install
+  // the buffer_state_ and detect supersession.
+  struct LoadResult
+  {
+    std::shared_ptr<ReSimEngine> engine;
+    double target_s = 0.0;
+    double cache_lo = 0.0;
+    double cache_hi = 0.0;
+    std::string error;  // empty on success
+    std::uint64_t request_id = 0;
+  };
+  // Run on a worker thread (no Qt calls): load the window + build & warm the
+  // engine. Static so it can't accidentally touch GUI state.
+  static LoadResult loadWindowJob(
+    std::shared_ptr<BagSession> session, BufferParams params, BufferState state,
+    double t_s, double window_m, double res, double max_range, double min_grazing_deg,
+    sea_surface_segmentation::OccupancyParams occ, std::uint64_t request_id);
 
   BagLoadOptions load_opts_;
   double window_m_;
@@ -125,10 +158,19 @@ private:
   double margin_s_ = 10.0;              // reload-free scrub slack each side
   double retention_s_ = 120.0;          // extra cached span kept beyond guaranteed
 
-  std::unique_ptr<BagSession> session_;  // one full scan; serves windowed reloads
+  std::shared_ptr<BagSession> session_;  // one full scan; serves windowed reloads
   BufferState buffer_state_;             // current I/O cache extent (bag-relative s)
   double pending_seek_s_ = -1.0;         // out-of-span target deferred to release
-  std::unique_ptr<ReSimEngine> engine_;
+  std::shared_ptr<ReSimEngine> engine_;
+
+  // Async window-load state. One load in flight at a time; `load_in_flight_`
+  // guards it, `chase_target_s_` (>= 0) holds a target requested while busy that
+  // the in-flight result must be checked against, and `request_id_` supersedes
+  // stale finishes.
+  QFutureWatcher<LoadResult> load_watcher_;
+  bool load_in_flight_ = false;
+  double chase_target_s_ = -1.0;
+  std::uint64_t request_id_ = 0;
   std::array<QLabel *, kNumCameras> rgb_labels_{};   // Row 1: camera RGB (H.265)
   std::array<QLabel *, kNumCameras> seg_labels_{};   // Row 2: segmentation masks
   QLabel * recorded_label_ = nullptr;                // Row 3 left: recorded costmap

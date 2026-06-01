@@ -32,7 +32,9 @@ find_package(OpenCV REQUIRED)
 # toolkit through Qt${QT_VERSION_MAJOR} targets so the version number is not
 # hard-coded anywhere below the find_package line.
 set(QT_VERSION_MAJOR 5)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+# Concurrent: background window loads (QtConcurrent::run + QFutureWatcher) keep
+# the GUI responsive while a multi-second window reload/warm-up runs.
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Concurrent)
 set(CMAKE_AUTOMOC ON)
 
 # Headless core (no Qt): bag loading + the re-sim engine. Kept Qt-free so the
@@ -65,7 +67,10 @@ add_executable(sea_surface_tuner
   src/main.cpp
   src/main_window.cpp
 )
-target_link_libraries(sea_surface_tuner tuner_core Qt${QT_VERSION_MAJOR}::Widgets)
+target_link_libraries(sea_surface_tuner
+  tuner_core
+  Qt${QT_VERSION_MAJOR}::Widgets
+  Qt${QT_VERSION_MAJOR}::Concurrent)
 
 install(TARGETS sea_surface_tuner
   DESTINATION lib/${PROJECT_NAME}
