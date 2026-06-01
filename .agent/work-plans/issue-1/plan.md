@@ -330,3 +330,105 @@ operator station (`ros-jazzy-ffmpeg-image-transport*` installed).
 3. CompressedImage seg support (prefer raw). 4. 4-camera loader + fused engine +
 Rows 1–2. 5. recorded-costmap load/render + Row 3. 6. H.265 RGB decode + Row 1.
 Tests + README + `.agents/README.md` grow alongside.
+
+## Milestone D — windowed buffering for File→Open (2026-05-31)
+
+**Problem (found in review of the built tool).** `MainWindow::openBag` calls
+`load_bag(dir, load_opts_)` with `load_opts_` defaulting to the whole bag
+(`end_s = -1`). So opening from the menu **buffers the entire recording** — every
+segmentation frame plus every decoded H.265 RGB frame across all four cameras.
+On a long 4-camera `*_ffmpeg_seg` bag that is a large, unbounded memory load.
+Two separate issues: (1) File→Open inherits the CLI window (no menu-side window);
+(2) even a CLI-windowed load full-scans the file twice and discards the TF cache.
+
+**Decision (Roland, 2026-05-31, via questions).** On File→Open, buffer only what
+the viewed moment needs, and let that buffer change as the timeline is scrubbed
+**without re-opening the file**. The buffer is sized to the integration warm-up
+the marking algorithm needs, plus a scrub margin on each side, plus a retention
+budget so back-and-forth sweeps stay instant.
+
+### The buffering model
+
+For a view time `t` (the scrub point), define:
+
+- **`integration` = `k × decay_half_life_s`**, `k = 3` (default). At the 30 s
+  default half-life → 90 s. This is how far *back* the engine accumulates before
+  `t`: `decay()` is exponential with no hard cutoff, so "fully warmed" is a
+  multiple of the half-life (3× ⇒ ~12 % residual). Tying it to the knob means a
+  change to `decay_half_life_s` in the dock recomputes the required window.
+- **`margin` = 10 s** (default) — reload-free scrub slack on each side.
+- **Guaranteed window** = `[t − integration − margin, t + margin]`, clamped to
+  the bag's time bounds. Always resident. Re-sim still starts at
+  `t − integration`; the extra `margin` before it just lets a small rewind avoid
+  a reload.
+- **Retention** = `retention_s` (default 120 s). Already-loaded frames beyond the
+  guaranteed window are **kept**, not dropped, up to this budget. The loaded
+  buffer is a single **contiguous** `[lo, hi]` span; scrubbing extends it; when
+  its length exceeds `integration + 2·margin + retention_s` (≈230 s at defaults)
+  the end **farthest in time from `t`** is trimmed — never inside the guaranteed
+  window. So sweeping a region stays instant after the first pass.
+
+### Scrub semantics
+
+- The **scrubber spans the whole bag by time** (deciseconds; bounds from
+  `reader.get_metadata()` at open — no frames loaded to populate it).
+- Scrub to `t`:
+  - **inside the loaded span** → map to frame index, `seekTo`, instant (in-memory).
+  - **outside but overlapping** the guaranteed window → extend/reload the
+    contiguous span to cover the new guaranteed window, trim per retention,
+    rebuild the engine, seek.
+  - **far jump (guaranteed window does not overlap the loaded span)** → **drop
+    the current buffer and load fresh** around `t`. Non-overlapping frames can't
+    contribute warm-up, and the engine needs one contiguous ascending timeline,
+    so retention only helps contiguous scrubbing, not teleports (Roland confirmed).
+
+### Architecture changes
+
+- **`bag_loader` → stateful `BagSession`.** Split today's one-shot `load_bag`:
+  - **`BagSession::open(uri)`** (once): the single full file scan — builds the
+    persistent `tf2::BufferCore` (kept, not discarded), per-camera models,
+    seg-source selection, and caches the bag time bounds + a topic/time index.
+  - **`BagSession::loadWindow(start_s, end_s) → LoadedBag`**: `reader.seek()` +
+    read to `end_ns`, projecting seg frames against the **already-built** TF cache
+    and decoding RGB for just that span. No re-open, no re-scan.
+  - The free `load_bag()` stays as a thin `open()+loadWindow()` wrapper so the
+    synthetic-frame tests and `--probe` are untouched.
+- **`ReSimEngine`: unchanged.** It already replays `[frame 0 … current]` from
+  whatever `LoadedBag` it holds. If that bag *is* the window starting at
+  `t − integration − margin`, replay-from-0 yields correct warm-up for free. The
+  synthetic-frame unit tests keep passing as-is.
+- **`MainWindow`: time-based scrubber + a buffer manager.** Holds the
+  `BagSession`, the current loaded `[lo, hi]`, and the span policy. The span math
+  — given `t`, integration, margin, retention, current span, and bag bounds,
+  compute the next `[lo, hi]` and whether a reload/far-jump is needed — is
+  extracted into a **pure free function** so it is unit-tested without a bag or
+  Qt. Reloads are synchronous with a "Loading…" status (a ~110 s window loads in
+  a few seconds; async is a later refinement if needed).
+
+### New knobs
+
+CLI + live-adjustable: `--integration-halflives` (default 3), `--margin-s`
+(default 10), `--retention-s` (default 120). The existing `--start-s` / `--end-s`
+remain as an optional hard clamp for power users (a windowed session inside an
+explicit `[start,end]`).
+
+### Tests (added to `test_resim_engine.cpp` or a new `test_buffer_policy.cpp`)
+
+- Pure span-policy function: (a) open at `t=0` clamps `lo` to bag start (cold
+  start, warms forward); (b) scrub inside loaded span ⇒ no reload; (c) scrub just
+  outside ⇒ extend, guaranteed window covered; (d) retention trim drops the far
+  end, never the guaranteed window; (e) far jump (no overlap) ⇒ full reload;
+  (f) raising `decay_half_life_s` grows `integration` and forces the next reload.
+
+### Principles / consequences
+
+- **Only what's needed**: bounded memory is the whole point; the buffer is sized
+  to the algorithm's warm-up, not the file.
+- **Test what breaks**: the breakable logic is the span policy + the reuse of the
+  cached TF across windows — both covered by the pure-function tests above; the
+  full-bag `--probe` path stays as the loader integration check.
+- **A change includes its consequences**: `README.md` (File→Open now windowed;
+  document the new knobs + scrub behavior) and `.agents/README.md` (note the
+  `BagSession` stateful loader) update in the same PR.
+- **Capture decisions**: integration = 3× half-life, margin 10 s, retention
+  120 s, far-jump = drop+reload — all recorded here with their rationale.
