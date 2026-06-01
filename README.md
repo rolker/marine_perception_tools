@@ -41,7 +41,9 @@ ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
 
 - **Menu bar** — *File → Open Bag…* (open a rosbag2 directory at runtime;
   re-tunable without relaunching), *File → Quit*. The window can open empty.
-- **Layout**:
+- **Layout** — three rows in a vertical splitter that fills the window; drag the
+  handles to give each row more or less height. Costmap panes carry a boat marker
+  (a heading arrow at panel centre, since the panes are boat-centred / N-up).
   - Row 1 — camera RGB (H.265 `image_raw/ffmpeg`, decoded): port | fwd | stbd | aft
   - Row 2 — segmentation masks: port | fwd | stbd | aft
   - Row 3 — recorded costmap (`/bizzy/local_costmap/costmap`) | regenerated
@@ -64,9 +66,13 @@ ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
 - **Scrubber** spans the whole bag in time. Seeks *inside* the loaded window are
   instant — backward seeks restore a cached buffer checkpoint and replay only the
   short tail (forward seeks accumulate incrementally). A seek *outside* the
-  window loads a fresh window around the target; this is deferred to slider
-  release (a drag doesn't trigger a multi-second reload mid-motion) and shows a
-  "Warming up…" status while it loads.
+  window loads a fresh window around the target on a **background thread** so the
+  GUI never freezes (deferred to slider release — a drag doesn't trigger a reload
+  mid-motion). The load runs in **two stages**: the camera RGB, segmentation, and
+  recorded costmap appear as soon as the window is read (panes grey out while
+  loading so a stale view isn't mistaken for the target), then the slow
+  regenerated costmap fills in once its warm-up replay finishes (it shows
+  "computing costmap…" until then). A newer scrub supersedes an in-flight load.
 - **Fidelity caveat (windowed ≠ full history).** Because the regenerated costmap
   is warmed only over the window (not the whole bag), cells the boat observed
   *before* the window started read as unobserved — so near the window edge / for
@@ -81,12 +87,15 @@ ros2 run marine_perception_tools sea_surface_tuner <bag_uri> \
   - accumulation: `max_range`, `min_grazing_angle_deg`, `obstacle_prob_min`,
     `max_evidence_step`
 
+  Hover any knob (label or value box) for a tooltip explaining what it does.
   Editing a knob does **not** re-simulate immediately — a full warm-up replay is
   too expensive per keystroke. An edited-but-unapplied knob is highlighted;
-  **Apply** validates the whole batch and re-simulates once (an invalid value is
-  rejected to the status bar and the batch is left unapplied), and **Reset**
-  reverts edits to the applied values. Window geometry (`--window-m`/`--res`) is
-  CLI-only (it sizes the buffer at construction).
+  **Apply** validates the whole batch (an invalid value is rejected instantly to
+  the status bar and the batch is left unapplied) then re-simulates once **on a
+  background thread** so the GUI stays responsive ("applying…" while it runs), and
+  **Reset** reverts edits to the applied values. Applied tuning is preserved
+  across window reloads. Window geometry (`--window-m`/`--res`) is CLI-only (it
+  sizes the buffer at construction).
 - **`--probe`** loads the `[--start-s, --end-s]` range, prints seg/RGB/costmap
   counts (and the first RGB frame's size + channel means), and exits — a headless
   check of the loader, incl. H.265 decode, against a real bag. Run under

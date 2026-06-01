@@ -31,9 +31,9 @@ marine_perception_tools/
 ├── src/
 │   ├── bag_loader.{hpp,cpp}    # BagSession: one full scan (TF cache, models, bounds) + loadWindow(start,end) windowed reads; load_bag() one-shot wrapper. 4-camera merged PreparedFrames + RGB (H.265) + recorded costmap
 │   ├── buffer_policy.hpp       # pure plan_buffer(): given scrub time t, decide engine replay span + I/O-cache extent + reload action (no Qt/ROS)
-│   ├── resim_engine.{hpp,cpp}  # OccupancyBuffer wrapper: fuse all cameras, re-sim, render; frame-indexed checkpoint store for cheap backward seek; batched setParams
+│   ├── resim_engine.{hpp,cpp}  # OccupancyBuffer wrapper: fuse all cameras, re-sim, render (+ boat heading marker); checkpoint store for cheap backward seek; seekToStampDisplayOnly (images w/o warm-up); batched setParams; boat_yaw
 │   ├── cv_qt.hpp               # cv::Mat (rgb8/BGR) → QImage helper
-│   ├── main_window.{hpp,cpp}   # MainWindow: menu/File→Open, 4+4+2 pane grid, whole-bag time scrubber, buffer manager (BagSession+plan_buffer), Apply/Reset param dock
+│   ├── main_window.{hpp,cpp}   # MainWindow: menu/File→Open, splitter pane grid, whole-bag scrubber, ASYNC buffer manager (QtConcurrent two-stage load: images then costmap), async Apply, render/rescale split, param tooltips
 │   └── main.cpp                # CLI parse (+ --probe headless) → window → openBag
 ├── test/
 │   ├── test_resim_engine.cpp   # GTest: determinism, re-sim equivalence, clear, bounds-reject, multi-camera fusion, checkpoint rewind==fresh-replay, batched setParams
@@ -94,3 +94,24 @@ source ../../../.agent/scripts/setup.bash && colcon test --packages-select marin
 - **`--probe` does the one-shot `load_bag`, not the windowed read** — so a
   probe with no `--start-s/--end-s` clamp buffers the entire bag and can OOM.
   Always clamp manual probes.
+- **Window loads + Apply run on a worker thread** (`QtConcurrent::run` +
+  `QFutureWatcher`), so the multi-second load/warm never freezes the GUI. The
+  worker (`loadWindowJob`) must touch NO Qt/GUI state — it returns a `LoadResult`
+  (a `shared_ptr<ReSimEngine>` + the loaded `shared_ptr<LoadedBag>`) installed on
+  the GUI thread in `onLoadFinished`. One load in flight at a time; a newer
+  request supersedes via `request_id_` / `chase_target_s_`. A load is **two
+  stages**: stage A reads the window + builds a *display-only* engine
+  (`seekToStampDisplayOnly` — images, no warm-up); stage B builds a fresh engine
+  from the **same bag** (cv::Mat is refcounted, so this copies frame headers, not
+  pixels) and warms it. `~MainWindow` waits for any in-flight load.
+- **Tuning is preserved across reloads via `applied_occ_`/`applied_acc_`**, the
+  source of truth threaded into every (re)load — NOT read back off the engine.
+  The engine ctor only takes `occ` + geometry, so all four tunable
+  `AccumulateParams` knobs are applied after construction in `loadWindowJob`;
+  forgetting this silently resets dock tuning on the next scrub-triggered reload.
+- **`renderViews()` vs `rescaleViews()`** — rendering the costmaps is a per-pixel
+  `n²` cell loop, far too slow to run on every resize / `splitterMoved` tick (it
+  was, and the UI was sluggish). `renderViews()` re-renders into cached `QImage`s
+  only when engine state changes (seek/load/apply); `rescaleViews()` just
+  `QPixmap::scaled` the cache and runs on resize/splitter drag. Keep engine/render
+  calls out of `rescaleViews()`.
