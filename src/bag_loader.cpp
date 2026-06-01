@@ -354,10 +354,13 @@ LoadedBag BagSession::loadWindow(double start_s, double end_s) const
   decode_camera_rgb(bag_uri_, start_ns, end_ns, loaded);
 
   if (loaded.frames.empty()) {
+    // win_end < 0 means "to end of bag"; print "end" rather than a bare -1 that
+    // reads as an inverted range.
+    const std::string end_str =
+      (win_end < 0.0) ? "end" : (std::to_string(win_end) + "s");
     throw std::runtime_error(
-      "no usable segmentation frames in [" + std::to_string(win_start) + ", " +
-      std::to_string(win_end) + "]s (" + std::to_string(tf_skipped) +
-      " skipped for missing TF)");
+      "no usable segmentation frames in [" + std::to_string(win_start) + "s, " +
+      end_str + "] (" + std::to_string(tf_skipped) + " skipped for missing TF)");
   }
 
   return loaded;

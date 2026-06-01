@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -71,6 +72,14 @@ ReSimEngine::ReSimEngine(
   acc_.plane_z = 0.0;  // map_tide water plane
   acc_.max_range = max_range;
   acc_.min_grazing_angle_deg = min_grazing_angle_deg;
+  // The engine requires at least one frame: the ctor seeds the buffer from
+  // frame 0 (below), and every accessor indexes bag_.frames[current_]. The bag
+  // loaders (load_bag / BagSession::loadWindow) already throw on an empty window,
+  // but guard here so a direct/empty construction fails loudly instead of reading
+  // past the vector.
+  if (bag_.frames.empty()) {
+    throw std::invalid_argument("ReSimEngine requires a LoadedBag with >= 1 frame");
+  }
   // Populate the buffer for the first frame so the engine is immediately
   // renderable. accumulate() moves the window to the frame's boat position.
   accumulate(0);

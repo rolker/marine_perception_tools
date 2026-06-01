@@ -119,10 +119,13 @@ struct BagLoadOptions
 
 // A bag opened once for repeated windowed reads. The constructor performs the
 // single full-file scan that builds the persistent TF cache + per-camera models
-// + seg-source selection + bag time bounds; `loadWindow` then seeks and reads
-// only the requested span, reusing that cache (no re-open, no re-scan). This is
-// the stateful backbone of the windowed File->Open buffering (Milestone D): the
-// UI keeps one BagSession and reloads spans as the timeline is scrubbed.
+// + seg-source selection + bag time bounds; `loadWindow` then reads only the
+// requested span, reusing that cached TF/model state (no second discovery scan).
+// It does re-open a `rosbag2_cpp::Reader` and iterate, skipping by
+// `recv_timestamp` until the window — a future optimization is `Reader::seek` to
+// the window start instead of a linear skip. This is the stateful backbone of the
+// windowed File->Open buffering (Milestone D): the UI keeps one BagSession and
+// reloads spans as the timeline is scrubbed.
 //
 // Window gating uses bag receive time (recv_timestamp), matching the reference
 // driver and the original load_bag — the caller (the buffer manager) pads the

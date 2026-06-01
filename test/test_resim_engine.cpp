@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -288,6 +289,18 @@ TEST(ReSimEngine, FusesMultipleCamerasAndTracksLatestMask)
   ASSERT_FALSE(m1.empty());
   EXPECT_GT(cv::norm(m0, m1, cv::NORM_L1), 0.0)
     << "latestMask returned the same mask for two different cameras";
+}
+
+// An empty LoadedBag must fail loudly at construction, not read past frames[0].
+// The bag loaders already throw on an empty window, but a direct/alternate
+// construction (or a future windowed loader handing back zero frames) would
+// otherwise crash in the ctor's accumulate(0).
+TEST(ReSimEngine, EmptyBagThrowsAtConstruction)
+{
+  mpt::LoadedBag empty;
+  empty.camera_models.resize(1);  // a model but no frames
+  EXPECT_THROW(
+    mpt::ReSimEngine(empty, kWindowM, kRes, kMaxRange), std::invalid_argument);
 }
 
 // A camera with no frames in the bag yields an empty mask (UI shows a
