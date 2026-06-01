@@ -112,6 +112,11 @@ MainWindow::MainWindow(
   rows->setStretchFactor(0, 2);
   rows->setStretchFactor(1, 2);
   rows->setStretchFactor(2, 3);
+  // Dragging an internal handle resizes the rows but does NOT fire resizeEvent,
+  // so re-fit the pixmaps to the new label sizes on splitterMoved too.
+  connect(rows, &QSplitter::splitterMoved, this, [this] {
+      if (haveEngine()) {refreshViews();}
+    });
 
   // Whole-bag time scrubber in deciseconds (0.1 s steps); range set on open.
   // valueChanged fires continuously during a drag — handled live only when the
