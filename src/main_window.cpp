@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <exception>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -120,9 +121,10 @@ MainWindow::MainWindow(
   rows->setStretchFactor(1, 2);
   rows->setStretchFactor(2, 3);
   // Dragging an internal handle resizes the rows but does NOT fire resizeEvent,
-  // so re-fit the pixmaps to the new label sizes on splitterMoved too.
+  // so re-fit on splitterMoved too. Cheap rescale of cached images only — NOT a
+  // costmap re-render (splitterMoved fires continuously during a drag).
   connect(rows, &QSplitter::splitterMoved, this, [this] {
-      if (haveEngine()) {refreshViews();}
+      if (haveEngine()) {rescaleViews();}
     });
 
   // Whole-bag time scrubber in deciseconds (0.1 s steps); range set on open.
@@ -219,7 +221,7 @@ void MainWindow::openBag(const QString & bag_uri)
 
   // Reset the dock to the empty baseline, then kick the initial window load
   // around t=0 in the background (cold start: the window clamps to the bag start
-  // and warms forward — see the R5 caveat surfaced in refreshViews). The engine
+  // and warms forward — see the R5 caveat surfaced in renderViews). The engine
   // installs via onLoadFinished; the GUI stays responsive meanwhile.
   syncToEngine();
   requestCoverage(0.0);
@@ -262,7 +264,7 @@ void MainWindow::requestCoverage(double t_s)
   // background load happens to be in flight for somewhere else.
   if (engineCovers(t_s)) {
     engine_->seekToStamp(session_->startTime() + t_s);
-    refreshViews();
+    renderViews();
     return;
   }
 
@@ -475,6 +477,45 @@ void MainWindow::buildParamDock()
         }, nullptr, false});
   }
 
+  // Hover help per knob — what each parameter does, sourced from the
+  // sea_surface_segmentation OccupancyParams / AccumulateParams headers. Keyed by
+  // label so it stays separate from the data-driven knob table above.
+  const std::map<std::string, QString> tips = {
+    {"decay_half_life_s",
+      "How fast unobserved evidence is forgotten: accumulated log-odds in a cell "
+      "halves every this-many seconds when not re-observed. Larger = obstacles "
+      "persist longer after they leave view; smaller = the map clears faster."},
+    {"lethal_threshold",
+      "Log-odds at or above which a cell is published as a lethal obstacle "
+      "(occupancy 100). Lower = mark obstacles on less evidence (more sensitive, "
+      "more false positives); higher = require stronger evidence."},
+    {"obstacle_clamp",
+      "Upper log-odds bound a cell can accumulate to (must be > 0). Caps how "
+      "'certain' a cell gets so old evidence stays revisable and decays in "
+      "reasonable time — prevents saturation that would never clear."},
+    {"clear_floor",
+      "Lower (negative) log-odds bound for water/free evidence (must be < 0). How "
+      "strongly repeated water observations can drive a cell toward 'free'."},
+    {"free_threshold",
+      "Log-odds at or below which a cell has no obstacle opinion (published as "
+      "unknown, -1). Between free_threshold and lethal_threshold the cost ramps "
+      "1–99. Must satisfy clear_floor ≤ free_threshold < lethal_threshold."},
+    {"max_range",
+      "Metres: ground cells farther than this from the camera are not marked "
+      "(rays beyond max range are dropped). Caps how far obstacles project."},
+    {"min_grazing_angle_deg",
+      "Reject rays striking the water plane shallower than this angle from "
+      "horizontal (0 = no filter). Shallow rays have huge ground error per pixel, "
+      "so a few degrees trims a noisy far-field horizon band."},
+    {"obstacle_prob_min",
+      "Per-pixel obstacle-probability gate (0–1): the red channel implies "
+      "P(obstacle); at/above this it contributes positive evidence. Lower catches "
+      "marginal buoys (more sensitive); higher is more conservative."},
+    {"max_evidence_step",
+      "Per-frame cap on the log-odds a single observation can add (> 0). Flicker "
+      "rejection: limits how fast one noisy frame can move a cell. At defaults, "
+      "~2 consistent frames reach lethal."}};
+
   auto * panel = new QWidget;
   auto * form = new QFormLayout(panel);
   for (auto & knob : knobs_) {
@@ -486,7 +527,13 @@ void MainWindow::buildParamDock()
     // Editing marks the knob dirty (no re-sim — batched until Apply).
     connect(box, qOverload<double>(&QDoubleSpinBox::valueChanged),
       this, &MainWindow::onParamEdited);
-    form->addRow(QString::fromStdString(knob.label), box);
+    auto * row_label = new QLabel(QString::fromStdString(knob.label), panel);
+    const auto tip = tips.find(knob.label);
+    if (tip != tips.end()) {
+      row_label->setToolTip(tip->second);
+      box->setToolTip(tip->second);  // hover the value box too, not just the label
+    }
+    form->addRow(row_label, box);
     knob.box = box;
   }
 
@@ -538,7 +585,7 @@ void MainWindow::syncToEngine()
   if (apply_btn_ != nullptr) {apply_btn_->setEnabled(false);}
   if (reset_btn_ != nullptr) {reset_btn_->setEnabled(false);}
 
-  refreshViews();
+  renderViews();
 }
 
 void MainWindow::onSeek(int decisec)
@@ -553,7 +600,7 @@ void MainWindow::onSeek(int decisec)
   if (engineCovers(t_s)) {
     engine_->seekToStamp(session_->startTime() + t_s);
     pending_seek_s_ = -1.0;
-    refreshViews();
+    renderViews();
     return;
   }
   pending_seek_s_ = t_s;  // outside the window — load on release
@@ -653,9 +700,33 @@ void MainWindow::onResetParams()
   reset_btn_->setEnabled(false);
 }
 
-void MainWindow::refreshViews()
+void MainWindow::rescaleViews()
+{
+  // CHEAP path (resize / splitter drag): scale the cached source images into the
+  // labels at their current size. No engine work, no costmap re-render. A null
+  // cached image means the label shows placeholder text (set in renderViews).
+  auto fit = [](QLabel * lbl, const QImage & img) {
+      if (img.isNull()) {return;}  // keep the placeholder text already set
+      lbl->setPixmap(
+        QPixmap::fromImage(img).scaled(
+          lbl->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    };
+  for (int i = 0; i < kNumCameras; ++i) {
+    fit(rgb_labels_[i], rgb_imgs_[i]);
+    fit(seg_labels_[i], seg_imgs_[i]);
+  }
+  fit(recorded_label_, recorded_img_);
+  if (!grid_computing_) {fit(grid_label_, grid_img_);}
+}
+
+void MainWindow::renderViews()
 {
   if (!haveEngine()) {
+    rgb_imgs_ = {};
+    seg_imgs_ = {};
+    recorded_img_ = QImage();
+    grid_img_ = QImage();
+    grid_computing_ = false;
     for (int i = 0; i < kNumCameras; ++i) {
       rgb_labels_[i]->setPixmap(QPixmap());
       rgb_labels_[i]->setText(kCameraLabels[i]);
@@ -670,48 +741,39 @@ void MainWindow::refreshViews()
     return;
   }
 
-  // Scale a source image into a label at its current size, keeping aspect — so
-  // the panes track the splitter (no fixed tile height). KeepAspectRatio leaves
-  // letterbox margins, which is correct for the 4:3 camera tiles.
-  auto fit = [](QLabel * lbl, const QImage & img) {
-      lbl->setPixmap(
-        QPixmap::fromImage(img).scaled(
-          lbl->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    };
-
-  // Rows 1–2: per-camera RGB + segmentation (latest at/before the current frame).
+  // EXPENSIVE path: pull the camera/seg images from the engine and RE-RENDER the
+  // costmaps (per-pixel cell loops), caching each so a later resize only rescales.
   for (int i = 0; i < kNumCameras; ++i) {
     const cv::Mat rgb = engine_->latestRgb(i);
-    if (rgb.empty()) {
+    rgb_imgs_[i] = rgb.empty() ? QImage() : cvMatToQImage(rgb, /*bgr=*/true);
+    if (rgb_imgs_[i].isNull()) {
       rgb_labels_[i]->setPixmap(QPixmap());
       rgb_labels_[i]->setText(QString(kCameraLabels[i]) + " (no RGB)");
-    } else {
-      fit(rgb_labels_[i], cvMatToQImage(rgb, /*bgr=*/true));
     }
     const cv::Mat seg = engine_->latestMask(i);
-    if (seg.empty()) {
+    seg_imgs_[i] = seg.empty() ? QImage() : cvMatToQImage(seg, /*bgr=*/false);
+    if (seg_imgs_[i].isNull()) {
       seg_labels_[i]->setPixmap(QPixmap());
       seg_labels_[i]->setText(QString(kCameraLabels[i]) + " (no seg)");
-    } else {
-      fit(seg_labels_[i], cvMatToQImage(seg, /*bgr=*/false));
     }
   }
 
-  // Row 3: recorded costmap (bag) | regenerated (tuned) costmap, same window.
-  // Render the boat-centred square at each pane's shorter side so it fills the
-  // pane without distortion as the splitter resizes it. The recorded costmap is
-  // available immediately (stage A); the regenerated one needs the warm-up replay
-  // (stage B), so show "computing…" while the engine is display-only.
-  const int rec_px = std::max(64, std::min(recorded_label_->width(), recorded_label_->height()));
-  fit(recorded_label_, cvMatToQImage(engine_->renderRecorded(rec_px), /*bgr=*/true));
-  if (engine_->displayOnly()) {
+  // Costmaps rendered at a fixed working size (rescaled to the panes by
+  // rescaleViews). The recorded costmap is available immediately (stage A); the
+  // regenerated one needs the warm-up replay (stage B), so show "computing…"
+  // while the engine is display-only.
+  constexpr int kCostmapPx = 480;  // working render size; rescaled to fit panes
+  recorded_img_ = cvMatToQImage(engine_->renderRecorded(kCostmapPx), /*bgr=*/true);
+  grid_computing_ = engine_->displayOnly();
+  if (grid_computing_) {
+    grid_img_ = QImage();
     grid_label_->setPixmap(QPixmap());
     grid_label_->setText("computing costmap…");
   } else {
-    const int grid_px =
-      std::max(64, std::min(grid_label_->width(), grid_label_->height()));
-    fit(grid_label_, cvMatToQImage(engine_->renderGrid(grid_px), /*bgr=*/true));
+    grid_img_ = cvMatToQImage(engine_->renderGrid(kCostmapPx), /*bgr=*/true);
   }
+
+  rescaleViews();  // fit the freshly-rendered images to the labels now
 
   // Bag-relative time (raw header stamps are epoch seconds — not meaningful to a
   // user; Copilot 1.4 / R7). The warm-up actually behind the current frame is
@@ -730,9 +792,9 @@ void MainWindow::refreshViews()
 void MainWindow::resizeEvent(QResizeEvent * event)
 {
   QMainWindow::resizeEvent(event);
-  // Re-scale the panes to the new label sizes. Only when an engine is loaded —
-  // refreshViews paints the empty-state text otherwise, which needs no resize.
-  if (haveEngine()) {refreshViews();}
+  // Cheap rescale of the cached images — NOT a costmap re-render. Only when an
+  // engine is loaded (the empty state is static text, nothing to rescale).
+  if (haveEngine()) {rescaleViews();}
 }
 
 }  // namespace marine_perception_tools

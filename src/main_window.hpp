@@ -16,6 +16,7 @@
 #define MAIN_WINDOW_HPP_
 
 #include <QFutureWatcher>
+#include <QImage>
 #include <QMainWindow>
 #include <QString>
 
@@ -108,7 +109,13 @@ private:
   void buildParamDock();
   void setKnobDirty(Knob & knob, bool dirty);  // toggle the dirty-colour cue
   void syncToEngine();  // scrubber range + knob spinboxes + views for current engine
-  void refreshViews();
+  // renderViews(): pull/re-render the source images from the engine (the
+  // expensive part — costmap cell loops) into the cached QImages, then rescale.
+  // Call when engine state changes (seek / load / apply). rescaleViews(): just
+  // re-fit the CACHED images to the labels' current size — cheap, no engine work,
+  // no costmap re-render. Call on resize / splitter drag (fires continuously).
+  void renderViews();
+  void rescaleViews();
   bool haveEngine() const {return engine_ != nullptr;}
 
   // Buffer manager (Milestone D4). Ensure bag-relative time `t_s` is shown:
@@ -198,6 +205,15 @@ private:
   std::array<QLabel *, kNumCameras> seg_labels_{};   // Row 2: segmentation masks
   QLabel * recorded_label_ = nullptr;                // Row 3 left: recorded costmap
   QLabel * grid_label_ = nullptr;                    // Row 3 right: regenerated costmap
+
+  // Cached source images (full-res, from the last renderViews) so a resize /
+  // splitter drag only re-scales these — it does NOT re-render the costmaps or
+  // re-pull from the engine. A null QImage means "blank / placeholder text".
+  std::array<QImage, kNumCameras> rgb_imgs_{};
+  std::array<QImage, kNumCameras> seg_imgs_{};
+  QImage recorded_img_;
+  QImage grid_img_;
+  bool grid_computing_ = false;  // regenerated costmap not yet warmed (stage A)
   QSlider * scrubber_ = nullptr;
   QPushButton * apply_btn_ = nullptr;   // commit the dirty knob batch (one re-sim)
   QPushButton * reset_btn_ = nullptr;   // revert dirty knobs to applied values
