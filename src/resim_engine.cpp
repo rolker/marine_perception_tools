@@ -167,6 +167,20 @@ void ReSimEngine::seekTo(std::size_t k)
   current_ = k;
 }
 
+void ReSimEngine::seekToStamp(double stamp_s)
+{
+  if (bag_.frames.empty()) {return;}
+  // Largest frame index whose stamp <= stamp_s (frames are stamp-sorted). If the
+  // target is before the first frame, clamp to frame 0.
+  const auto begin = bag_.frames.begin();
+  const auto end = bag_.frames.end();
+  auto it = std::upper_bound(
+    begin, end, stamp_s,
+    [](double s, const PreparedFrame & f) {return s < f.stamp_s;});
+  std::size_t k = (it == begin) ? 0 : static_cast<std::size_t>((it - begin) - 1);
+  seekTo(k);
+}
+
 void ReSimEngine::resimToCurrent()
 {
   // A parameter change alters the buffer contents at every frame, so every

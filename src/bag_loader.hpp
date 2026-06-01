@@ -155,10 +155,15 @@ public:
   // Throws std::runtime_error if the resulting window has zero usable frames.
   LoadedBag loadWindow(double start_s, double end_s) const;
 
-  // Bag time bounds, in seconds from bag start. `duration_s()` is the span the
-  // whole-bag scrubber covers; both are known after construction without loading
-  // any frames.
+  // Bag time bounds. `duration_s()` is the span the whole-bag scrubber covers;
+  // `startTime()` is the bag's start epoch in seconds (the bag-receive start, the
+  // origin the windowed [start_s,end_s] requests are relative to). Both are known
+  // after construction without loading any frames. To convert a bag-relative
+  // scrub time `t_s` to the absolute stamp the engine seeks by, use
+  // `startTime() + t_s` (exact up to recording latency — fine for window
+  // containment and nearest-frame seeks; see the R7 note on recv-vs-header time).
   double duration_s() const {return duration_s_;}
+  double startTime() const {return static_cast<double>(bag_start_ns_) * 1e-9;}
 
 private:
   std::string bag_uri_;

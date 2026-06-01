@@ -15,6 +15,7 @@
 #include "main_window.hpp"
 
 #include <QAction>
+#include <QApplication>
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
@@ -81,10 +82,16 @@ MainWindow::MainWindow(
   cm_row->addWidget(recorded_label_, 1);
   cm_row->addWidget(grid_label_, 1);
 
+  // Whole-bag time scrubber in deciseconds (0.1 s steps); range set on open.
+  // valueChanged fires continuously during a drag — handled live only when the
+  // target is inside the loaded window (cheap seek). An out-of-window target is
+  // deferred to sliderReleased so a multi-second window reload never fires mid-
+  // drag (R8). Also commit on release for keyboard/wheel steps that don't drag.
   scrubber_ = new QSlider(Qt::Horizontal, this);
   scrubber_->setRange(0, 0);
   scrubber_->setValue(0);
   connect(scrubber_, &QSlider::valueChanged, this, &MainWindow::onSeek);
+  connect(scrubber_, &QSlider::sliderReleased, this, &MainWindow::onSeekReleased);
 
   auto * central = new QWidget(this);
   auto * layout = new QVBoxLayout(central);
@@ -124,25 +131,100 @@ void MainWindow::onOpen()
 
 void MainWindow::openBag(const QString & bag_uri)
 {
-  statusBar()->showMessage("Loading " + bag_uri + " …");
-  std::unique_ptr<ReSimEngine> engine;
+  statusBar()->showMessage("Opening " + bag_uri + " …");
+  // The one full scan (TF cache + models + bounds) happens here; windowed reads
+  // are cheap thereafter. Build into a local first so a bad pick doesn't blank a
+  // good session.
+  std::unique_ptr<BagSession> session;
   try {
-    LoadedBag bag = load_bag(bag_uri.toStdString(), load_opts_);
-    engine = std::make_unique<ReSimEngine>(
-      std::move(bag), window_m_, res_, max_range_,
-      sea_surface_segmentation::OccupancyParams{}, min_grazing_deg_);
+    session = std::make_unique<BagSession>(bag_uri.toStdString(), load_opts_);
   } catch (const std::exception & e) {
-    // Keep the prior engine (if any) so a bad pick doesn't blank a good session.
     statusBar()->showMessage(QString("Open failed: ") + e.what(), 8000);
     return;
   }
-  engine_ = std::move(engine);
+  session_ = std::move(session);
+  buffer_state_ = BufferState{};  // no cache yet — the first ensureCovers loads
+  engine_.reset();
+
+  // Whole-bag time scrubber, in deciseconds (0.1 s steps) over [0, duration].
+  scrubber_->blockSignals(true);
+  scrubber_->setRange(0, static_cast<int>(session_->duration_s() * 10.0));
+  scrubber_->setValue(0);
+  scrubber_->blockSignals(false);
+
+  // Load the initial window around t=0 (cold start: the window clamps to the bag
+  // start and warms forward — see the R5 caveat surfaced in refreshViews).
+  if (!ensureCovers(0.0)) {return;}  // ensureCovers reports its own failure
   syncToEngine();
-  if (engine_->usedCompressedSegmentation()) {
+  if (engine_ && engine_->usedCompressedSegmentation()) {
     statusBar()->showMessage(
       "Note: using compressed segmentation (raw topic absent) — if JPEG, the "
       "obstacle-probability channel is lossy; tuned values may not transfer.", 12000);
   }
+}
+
+double MainWindow::integrationSeconds() const
+{
+  // Warm-up tracks the decay half-life so changing the knob grows/shrinks the
+  // window. Fall back to the OccupancyParams default when no engine exists yet.
+  const double half_life = engine_ ? engine_->occupancyParams().decay_half_life_s :
+    sea_surface_segmentation::OccupancyParams{}.decay_half_life_s;
+  return integration_halflives_ * half_life;
+}
+
+BufferParams MainWindow::bufferParams() const
+{
+  BufferParams p;
+  p.integration_s = integrationSeconds();
+  p.margin_s = margin_s_;
+  p.retention_s = retention_s_;
+  p.bag_lo = 0.0;
+  p.bag_hi = session_ ? session_->duration_s() : 0.0;
+  return p;
+}
+
+bool MainWindow::ensureCovers(double t_s)
+{
+  if (!session_) {return false;}
+
+  // In-window fast path: the target is already covered by the loaded engine, so
+  // just seek (cheap via the checkpoint store) — no policy, no reload.
+  if (engine_ && t_s >= engine_->firstStamp() - session_->startTime() - 1e-6 &&
+    t_s <= engine_->lastStamp() - session_->startTime() + 1e-6)
+  {
+    engine_->seekToStamp(session_->startTime() + t_s);
+    return true;
+  }
+
+  const BufferPlan plan = plan_buffer(t_s, bufferParams(), buffer_state_);
+  if (!plan.read) {
+    // Policy says the replay span is already cached but the engine doesn't cover
+    // it (e.g. just constructed) — shouldn't happen in practice; fall through to
+    // a load of the planned cache span to be safe.
+  }
+
+  statusBar()->showMessage(
+    QString("Warming up %1 s window around t=%2 s …")
+    .arg(plan.cache_hi - plan.cache_lo, 0, 'f', 0).arg(t_s, 0, 'f', 1));
+  QApplication::processEvents();  // paint the status before the blocking load
+
+  std::unique_ptr<ReSimEngine> engine;
+  try {
+    LoadedBag bag = session_->loadWindow(plan.cache_lo, plan.cache_hi);
+    engine = std::make_unique<ReSimEngine>(
+      std::move(bag), window_m_, res_, max_range_,
+      engine_ ? engine_->occupancyParams() : sea_surface_segmentation::OccupancyParams{},
+      min_grazing_deg_);
+  } catch (const std::exception & e) {
+    statusBar()->showMessage(QString("Window load failed: ") + e.what(), 8000);
+    return false;
+  }
+  engine_ = std::move(engine);
+  buffer_state_.has_cache = true;
+  buffer_state_.cache_lo = plan.cache_lo;
+  buffer_state_.cache_hi = plan.cache_hi;
+  engine_->seekToStamp(session_->startTime() + t_s);
+  return true;
 }
 
 void MainWindow::buildParamDock()
@@ -219,12 +301,10 @@ void MainWindow::syncToEngine()
 {
   const bool have = haveEngine();
 
-  // Scrubber range + reset to frame 0 without firing onSeek mid-rebuild.
-  scrubber_->blockSignals(true);
-  scrubber_->setRange(0, have ? static_cast<int>(engine_->frameCount()) - 1 : 0);
-  scrubber_->setValue(0);
-  scrubber_->blockSignals(false);
-  scrubber_->setEnabled(have);
+  // The scrubber spans the whole bag in time (set in openBag), not the loaded
+  // window's frames — so it is NOT reset here; a window reload must not move the
+  // playhead. Only its enabled state tracks whether a bag is open.
+  scrubber_->setEnabled(session_ != nullptr);
 
   // Reseed each spinbox from the (new) engine's params without re-triggering edits.
   for (auto & knob : knobs_) {
@@ -238,11 +318,47 @@ void MainWindow::syncToEngine()
   refreshViews();
 }
 
-void MainWindow::onSeek(int index)
+void MainWindow::onSeek(int decisec)
 {
-  if (!haveEngine()) {return;}
-  engine_->seekTo(static_cast<std::size_t>(std::max(0, index)));
-  refreshViews();
+  if (!session_) {return;}
+  const double t_s = std::max(0, decisec) / 10.0;  // deciseconds -> bag-relative s
+
+  // In-window: seek live (cheap via the checkpoint store) so dragging tracks the
+  // costmap. Out-of-window: defer the reload to release (R8) — stash the target
+  // and surface that a release will load it, but don't block mid-drag.
+  if (engine_) {
+    const double rel_lo = engine_->firstStamp() - session_->startTime();
+    const double rel_hi = engine_->lastStamp() - session_->startTime();
+    if (t_s >= rel_lo - 1e-6 && t_s <= rel_hi + 1e-6) {
+      engine_->seekToStamp(session_->startTime() + t_s);
+      pending_seek_s_ = -1.0;
+      refreshViews();
+      return;
+    }
+  }
+  pending_seek_s_ = t_s;  // outside the window — commit on release
+  statusBar()->showMessage(
+    QString("Release to load t=%1 s …").arg(t_s, 0, 'f', 1));
+}
+
+void MainWindow::onSeekReleased()
+{
+  if (!session_) {return;}
+  // Commit a deferred out-of-window target; if none pending (the drag stayed in
+  // window, or a keyboard/wheel step landed in window), there's nothing to do.
+  const double t_s = (pending_seek_s_ >= 0.0) ?
+    pending_seek_s_ : scrubber_->value() / 10.0;
+  pending_seek_s_ = -1.0;
+  if (engine_) {
+    const double rel_lo = engine_->firstStamp() - session_->startTime();
+    const double rel_hi = engine_->lastStamp() - session_->startTime();
+    if (t_s >= rel_lo - 1e-6 && t_s <= rel_hi + 1e-6) {
+      engine_->seekToStamp(session_->startTime() + t_s);
+      refreshViews();
+      return;
+    }
+  }
+  if (ensureCovers(t_s)) {refreshViews();}
 }
 
 void MainWindow::onParamEdited()
@@ -309,11 +425,18 @@ void MainWindow::refreshViews()
   const QImage grid = cvMatToQImage(engine_->renderGrid(panel_px_), /*bgr=*/true);
   grid_label_->setPixmap(QPixmap::fromImage(grid));
 
+  // Bag-relative time (raw header stamps are epoch seconds — not meaningful to a
+  // user; Copilot 1.4 / R7). The warm-up actually behind the current frame is
+  // currentStamp - firstStamp; near the bag start it's shorter than the full
+  // integration, so the regenerated costmap has less history than the recorded
+  // one — surface that so an edge artifact isn't read as a parameter effect (R5).
+  const double t_rel = session_ ? engine_->currentStamp() - session_->startTime() :
+    engine_->currentStamp();
+  const double warmup = engine_->currentStamp() - engine_->firstStamp();
   statusBar()->showMessage(
-    QString("frame %1 / %2   t=%3 s")
-    .arg(engine_->currentIndex())
-    .arg(engine_->frameCount() - 1)
-    .arg(engine_->currentStamp(), 0, 'f', 1));
+    QString("t=%1 s   windowed: warm-up %2 s (regenerated costmap is not full history)")
+    .arg(t_rel, 0, 'f', 1)
+    .arg(warmup, 0, 'f', 0));
 }
 
 }  // namespace marine_perception_tools

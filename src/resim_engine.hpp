@@ -70,6 +70,19 @@ public:
   // contents change), forcing one full replay.
   void seekTo(std::size_t k);
 
+  // Seek to the frame whose stamp is the largest <= `stamp_s` (clamped to the
+  // engine's covered range). The window manager scrubs by time, not index, so
+  // this maps a target stamp onto the loaded window's frames. Frames are
+  // stamp-sorted, so this is a binary search + seekTo.
+  void seekToStamp(double stamp_s);
+
+  // The stamp range this engine's loaded window covers (absolute header-stamp
+  // seconds). A target stamp inside [firstStamp, lastStamp] can be rendered by an
+  // in-window seek (cheap via the checkpoint store); outside, the window manager
+  // must reload a new span.
+  double firstStamp() const {return bag_.frames.front().stamp_s;}
+  double lastStamp() const {return bag_.frames.back().stamp_s;}
+
   // Live-tunable knobs. On rejection, return false and set `why`, leaving engine
   // state unchanged. On success, apply and re-simulate to the current frame.
   bool setOccupancyParams(

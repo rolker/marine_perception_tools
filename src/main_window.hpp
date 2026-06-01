@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "bag_loader.hpp"
+#include "buffer_policy.hpp"
 #include "resim_engine.hpp"
 
 class QDoubleSpinBox;
@@ -51,13 +52,15 @@ public:
     BagLoadOptions load_opts, double window_m, double res, double max_range,
     double min_grazing_deg, QWidget * parent = nullptr);
 
-  // Load a bag and (re)build the engine. On failure the message goes to the
-  // status bar and the prior engine (if any) is left intact. Safe to call
-  // repeatedly (File->Open).
+  // Open a bag: build a BagSession (one full scan), set the whole-bag time
+  // scrubber range, and load the initial window around t=0. On failure the
+  // message goes to the status bar and the prior session/engine (if any) is left
+  // intact. Safe to call repeatedly (File->Open).
   void openBag(const QString & bag_uri);
 
 private slots:
-  void onSeek(int index);
+  void onSeek(int decisec);          // live during drag: in-window seek only
+  void onSeekReleased();             // commit: reload the window if out of span
   void onParamEdited();
   void onOpen();
 
@@ -79,12 +82,31 @@ private:
   void refreshViews();
   bool haveEngine() const {return engine_ != nullptr;}
 
+  // Buffer manager (Milestone D4). Ensure the engine covers bag-relative time
+  // `t_s`: consult the D3 span policy against the current cache; if a reload is
+  // needed, read the new window via the BagSession and rebuild the engine, then
+  // seek to `t_s`. Cheap (in-window seek) when the policy says NoReload. Returns
+  // false and leaves prior state intact on a load error (message to status bar).
+  bool ensureCovers(double t_s);
+  // Integration warm-up in seconds, derived from the current decay half-life
+  // (integration = integration_halflives_ * decay_half_life_s). Recomputed each
+  // call so a half-life knob change grows/shrinks the window (R-series).
+  double integrationSeconds() const;
+  // Build BufferParams from the current knobs + the open session's bounds.
+  BufferParams bufferParams() const;
+
   BagLoadOptions load_opts_;
   double window_m_;
   double res_;
   double max_range_;
   double min_grazing_deg_;
+  double integration_halflives_ = 1.0;  // window = this * decay_half_life_s
+  double margin_s_ = 10.0;              // reload-free scrub slack each side
+  double retention_s_ = 120.0;          // extra cached span kept beyond guaranteed
 
+  std::unique_ptr<BagSession> session_;  // one full scan; serves windowed reloads
+  BufferState buffer_state_;             // current I/O cache extent (bag-relative s)
+  double pending_seek_s_ = -1.0;         // out-of-span target deferred to release
   std::unique_ptr<ReSimEngine> engine_;
   std::array<QLabel *, kNumCameras> rgb_labels_{};   // Row 1: camera RGB (H.265)
   std::array<QLabel *, kNumCameras> seg_labels_{};   // Row 2: segmentation masks
