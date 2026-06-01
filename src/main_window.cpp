@@ -27,6 +27,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
+#include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -45,6 +46,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "cv_qt.hpp"
 
@@ -177,6 +179,18 @@ void MainWindow::buildMenu()
   QAction * quit = file->addAction("&Quit");
   quit->setShortcut(QKeySequence::Quit);
   connect(quit, &QAction::triggered, this, &MainWindow::close);
+
+  // Options → Horizon: overlay the water-plane horizon (from each image's
+  // own-stamp TF + the distortion-aware camera model) on the camera + seg panes,
+  // to eyeball TF/image timing sync. Re-render on toggle so it appears/clears.
+  QMenu * options = menuBar()->addMenu("&Options");
+  QAction * horizon = options->addAction("Show &horizon");
+  horizon->setCheckable(true);
+  horizon->setChecked(show_horizon_);
+  connect(horizon, &QAction::toggled, this, [this](bool on) {
+      show_horizon_ = on;
+      if (haveEngine()) {renderViews();}
+    });
 }
 
 void MainWindow::onOpen()
@@ -781,6 +795,24 @@ void MainWindow::renderViews()
     return;
   }
 
+  // Draw a horizon polyline (image-space points from the engine) onto a source
+  // QImage in place — done here, pre-cache, so rescaleViews scales it with the
+  // image. Detach first (cvMatToQImage may share the cv::Mat buffer).
+  auto overlay_horizon = [](QImage & img, const std::vector<cv::Point2d> & pts) {
+      if (img.isNull() || pts.size() < 2) {return;}
+      img.detach();
+      QPainter p(&img);
+      p.setRenderHint(QPainter::Antialiasing, true);
+      QPolygonF poly;
+      for (const auto & pt : pts) {
+        poly << QPointF(pt.x, pt.y);
+      }
+      p.setPen(QPen(QColor(0, 0, 0, 160), 3));      // dark halo for contrast
+      p.drawPolyline(poly);
+      p.setPen(QPen(QColor(255, 80, 80), 1));        // thin red horizon line
+      p.drawPolyline(poly);
+    };
+
   // EXPENSIVE path: pull the camera/seg images from the engine and RE-RENDER the
   // costmaps (per-pixel cell loops), caching each so a later resize only rescales.
   for (int i = 0; i < kNumCameras; ++i) {
@@ -789,12 +821,16 @@ void MainWindow::renderViews()
     if (rgb_imgs_[i].isNull()) {
       rgb_labels_[i]->setPixmap(QPixmap());
       rgb_labels_[i]->setText(QString(kCameraLabels[i]) + " (no RGB)");
+    } else if (show_horizon_) {
+      overlay_horizon(rgb_imgs_[i], engine_->rgbHorizon(i));
     }
     const cv::Mat seg = engine_->latestMask(i);
     seg_imgs_[i] = seg.empty() ? QImage() : cvMatToQImage(seg, /*bgr=*/false);
     if (seg_imgs_[i].isNull()) {
       seg_labels_[i]->setPixmap(QPixmap());
       seg_labels_[i]->setText(QString(kCameraLabels[i]) + " (no seg)");
+    } else if (show_horizon_) {
+      overlay_horizon(seg_imgs_[i], engine_->segHorizon(i));
     }
   }
 

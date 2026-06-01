@@ -85,6 +85,49 @@ void draw_boat_marker(cv::Mat & panel, double yaw)
   cv::polylines(panel, &pts, &npts, 1, true, cv::Scalar(0, 0, 0), 1, cv::LINE_AA);
 }
 
+// World-frame z of the ray back-projected through pixel (u,v) — distortion-aware
+// via the pinhole model. The horizon is where this crosses zero: a ray with zero
+// vertical component in the world points at the vanishing line of any horizontal
+// (water) plane, independent of camera height.
+double ray_world_z(
+  const image_geometry::PinholeCameraModel & model,
+  const cv::Matx33d & rotation_cam_to_target, double u, double v)
+{
+  const cv::Point3d ray_cam = model.projectPixelTo3dRay(cv::Point2d(u, v));
+  const cv::Vec3d ray_world = rotation_cam_to_target *
+    cv::Vec3d(ray_cam.x, ray_cam.y, ray_cam.z);
+  return ray_world[2];
+}
+
+// Trace the horizon across the image: for each of `n_cols` columns, bisect rows
+// for the pixel where ray_world_z crosses zero. Returns image-space points;
+// columns whose ray never crosses zero in [0,h) (camera pitched so the plane
+// isn't in view at that column) are skipped. Pure geometry — no engine state.
+std::vector<cv::Point2d> compute_horizon(
+  const image_geometry::PinholeCameraModel & model,
+  const cv::Matx33d & rotation_cam_to_target, int width, int height, int n_cols)
+{
+  std::vector<cv::Point2d> pts;
+  if (width <= 1 || height <= 1 || n_cols < 2) {return pts;}
+  for (int c = 0; c < n_cols; ++c) {
+    const double u = (width - 1.0) * c / (n_cols - 1);
+    double z_top = ray_world_z(model, rotation_cam_to_target, u, 0.0);
+    double z_bot = ray_world_z(model, rotation_cam_to_target, u, height - 1.0);
+    if (!std::isfinite(z_top) || !std::isfinite(z_bot) || (z_top > 0) == (z_bot > 0)) {
+      continue;  // no sign change in this column → horizon not in view here
+    }
+    double lo = 0.0, hi = height - 1.0;
+    for (int it = 0; it < 24; ++it) {  // ~1/2^24 px precision — well sub-pixel
+      const double mid = 0.5 * (lo + hi);
+      const double zm = ray_world_z(model, rotation_cam_to_target, u, mid);
+      if (!std::isfinite(zm)) {break;}
+      if ((zm > 0) == (z_top > 0)) {lo = mid;} else {hi = mid;}
+    }
+    pts.emplace_back(u, 0.5 * (lo + hi));
+  }
+  return pts;
+}
+
 }  // namespace
 
 ReSimEngine::ReSimEngine(
@@ -147,6 +190,49 @@ cv::Mat ReSimEngine::latestRgb(int cam) const
     best = r.bgr;
   }
   return best;
+}
+
+std::vector<cv::Point2d> ReSimEngine::rgbHorizon(int cam, int n_cols) const
+{
+  // Latest RGB frame for cam at/before the current stamp (mirror latestRgb), with
+  // its own-stamp pose. camera_models is indexed by cam.
+  if (bag_.rgb_frames.empty() || cam < 0 ||
+    cam >= static_cast<int>(bag_.camera_models.size()))
+  {
+    return {};
+  }
+  const double t = currentStamp();
+  const RgbFrame * best = nullptr;
+  for (const auto & r : bag_.rgb_frames) {
+    if (r.cam != cam) {continue;}
+    if (r.stamp_s > t) {break;}  // sorted
+    best = &r;
+  }
+  if (best == nullptr || !best->has_pose || best->bgr.empty()) {return {};}
+  return compute_horizon(
+    bag_.camera_models[cam], best->rotation_cam_to_target,
+    best->bgr.cols, best->bgr.rows, n_cols);
+}
+
+std::vector<cv::Point2d> ReSimEngine::segHorizon(int cam, int n_cols) const
+{
+  // Latest segmentation frame for cam at/before the current index (mirror
+  // latestMask), with its own-stamp pose. The seg mask is what the costmap uses,
+  // so its horizon is the "ground truth" pose line to compare the RGB one against.
+  if (bag_.frames.empty() || cam < 0 ||
+    cam >= static_cast<int>(bag_.camera_models.size()))
+  {
+    return {};
+  }
+  for (std::size_t i = current_ + 1; i-- > 0; ) {
+    const PreparedFrame & f = bag_.frames[i];
+    if (f.cam != cam) {continue;}
+    if (f.mask_rgb8.empty()) {return {};}
+    return compute_horizon(
+      bag_.camera_models[cam], f.rotation_cam_to_target,
+      f.mask_rgb8.cols, f.mask_rgb8.rows, n_cols);
+  }
+  return {};
 }
 
 RecordedCostmap ReSimEngine::currentRecordedCostmap() const

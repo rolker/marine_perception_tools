@@ -69,6 +69,11 @@ struct RgbFrame
   int cam = 0;
   double stamp_s = 0.0;
   cv::Mat bgr;  // CV_8UC3, BGR (ready for cv_qt with bgr=true)
+  // camera-optical → world rotation at THIS image's stamp, resolved from TF
+  // (identity + has_pose=false if TF was unavailable). Drives the horizon overlay
+  // — using each image's own-stamp pose is what makes a TF/image desync visible.
+  cv::Matx33d rotation_cam_to_target = cv::Matx33d::eye();
+  bool has_pose = false;
 };
 
 // A recorded nav2 costmap sample (the boat's own /…/local_costmap/costmap at a

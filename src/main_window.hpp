@@ -214,6 +214,7 @@ private:
   QImage recorded_img_;
   QImage grid_img_;
   bool grid_computing_ = false;  // regenerated costmap not yet warmed (stage A)
+  bool show_horizon_ = false;    // Options→Horizon: overlay the water-plane horizon
   QSlider * scrubber_ = nullptr;
   QPushButton * apply_btn_ = nullptr;   // commit the dirty knob batch (one re-sim)
   QPushButton * reset_btn_ = nullptr;   // revert dirty knobs to applied values

@@ -360,6 +360,26 @@ LoadedBag BagSession::loadWindow(double start_s, double end_s) const
   // Display-only RGB: decode the H.265 camera streams over the same window.
   decode_camera_rgb(bag_uri_, start_ns, end_ns, loaded);
 
+  // Resolve each RGB frame's camera→world rotation from TF at THAT image's own
+  // stamp (the horizon overlay needs it). Per-image-stamp resolution is
+  // deliberate: a TF/image desync then shows as a drawn horizon that doesn't
+  // match the visual one. Missing model or TF leaves identity + has_pose=false.
+  for (auto & rf : loaded.rgb_frames) {
+    if (!have_model_[rf.cam] || optical_frame_[rf.cam].empty()) {continue;}
+    const auto tf_time = tf2::TimePoint(
+      std::chrono::nanoseconds(static_cast<int64_t>(rf.stamp_s * 1e9)));
+    try {
+      const auto tf =
+        tf_buffer_->lookupTransform(opts_.world_frame, optical_frame_[rf.cam], tf_time);
+      const auto & q = tf.transform.rotation;
+      rf.rotation_cam_to_target =
+        sea_surface_segmentation::rotation_matrix_from_quaternion(q.x, q.y, q.z, q.w);
+      rf.has_pose = true;
+    } catch (const tf2::TransformException &) {
+      // leave identity + has_pose=false; the overlay skips this frame's camera
+    }
+  }
+
   if (loaded.frames.empty()) {
     // win_end < 0 means "to end of bag"; print "end" rather than a bare -1 that
     // reads as an inverted range.

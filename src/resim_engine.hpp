@@ -19,6 +19,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <opencv2/core.hpp>
 
@@ -127,6 +128,16 @@ public:
   cv::Mat latestMask(int cam) const;
   cv::Mat latestRgb(int cam) const;
   double currentStamp() const {return bag_.frames[current_].stamp_s;}
+
+  // Horizon polyline for the overlay: image-space (x,y) points tracing where the
+  // water plane vanishes, in the coordinates of the latest RGB / segmentation
+  // frame for `cam` at or before the current stamp. Empty if that frame is
+  // absent or its pose is unavailable. Computed from the camera model
+  // (distortion-aware projectPixelTo3dRay) + that frame's own-stamp camera→world
+  // rotation, so a TF/image timing desync shows as a mismatched line. `n_cols`
+  // samples evenly across the image width.
+  std::vector<cv::Point2d> rgbHorizon(int cam, int n_cols = 64) const;
+  std::vector<cv::Point2d> segHorizon(int cam, int n_cols = 64) const;
 
   // The recorded costmap sample at or before the current frame's stamp (an empty
   // RecordedCostmap — resolution <= 0 — if none yet). Display-only comparison.

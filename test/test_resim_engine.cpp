@@ -455,6 +455,43 @@ TEST(ReSimEngine, WarmingSeekAfterDisplayOnlyMatchesFresh)
     << "warming seek after a display-only jump diverged from a fresh seek";
 }
 
+// Horizon overlay: for a level forward-looking camera the water-plane horizon is
+// a flat line at the principal-point row (cy). Rotation maps optical z (forward)
+// → world +x, optical y (down) → world −z, optical x → world +y, so a ray's
+// world-z = −(v−cy)/fy, zero at v=cy=24. segHorizon traces it per column.
+TEST(ReSimEngine, SegHorizonIsFlatLineForLevelForwardCamera)
+{
+  // Level forward camera: columns are the world images of optical x,y,z.
+  const cv::Matx33d level_fwd(0, 0, 1, 1, 0, 0, 0, -1, 0);
+  mpt::LoadedBag bag;
+  bag.camera_models.resize(1);
+  bag.camera_models[0].fromCameraInfo(make_camera_info());
+  mpt::PreparedFrame f;
+  f.cam = 0;
+  f.stamp_s = 0.0;
+  f.mask_rgb8 = make_mask();
+  f.camera_origin = cv::Vec3d(0.0, 0.0, 2.0);
+  f.rotation_cam_to_target = level_fwd;
+  bag.frames.push_back(f);
+
+  mpt::ReSimEngine e(bag, kWindowM, kRes, kMaxRange);
+  const auto h = e.segHorizon(0, /*n_cols=*/16);
+  ASSERT_GE(h.size(), 8u) << "horizon should be visible across the image";
+  for (const auto & p : h) {
+    EXPECT_NEAR(p.y, 24.0, 0.5) << "horizon row should sit at cy=24 for a level cam";
+  }
+}
+
+// A camera looking straight down never sees the horizon → empty polyline (the
+// ray's world-z is constant, no zero crossing). Guards the "not in view" path.
+TEST(ReSimEngine, SegHorizonEmptyForDownLookingCamera)
+{
+  const auto bag = make_bag(1);  // uses down_look_rotation (optical z → world −z)
+  mpt::ReSimEngine e(bag, kWindowM, kRes, kMaxRange);
+  EXPECT_TRUE(e.segHorizon(0).empty())
+    << "a straight-down camera has no horizon in view";
+}
+
 // An empty LoadedBag must fail loudly at construction, not read past frames[0].
 // The bag loaders already throw on an empty window, but a direct/alternate
 // construction (or a future windowed loader handing back zero frames) would
