@@ -71,6 +71,15 @@ source ../../../.agent/scripts/setup.bash && colcon test --packages-select marin
   `occupancy_buffer.hpp`, `segments_projection.hpp`, `occupancy_accumulator.hpp`
   (header-only; the rendering palette is *copied* from the tool's non-exported
   `render_new`, so it can drift cosmetically).
+- **`max_pool_bins` is pinned, not exposed.** `unh_marine_perception#26` added a
+  per-cell max-pool to `project_observations_inverse` gated by a `max_pool_bins`
+  arg (default **true**); the deployed `SeaSurfaceLayer` exposes it as a ROS
+  param. The tuner reaches the algorithm via `accumulate_frame`, which doesn't
+  forward it → the tuner is hardwired to the `true` default. This matches the
+  boat *while the layer keeps the default*, and the tuner's dock does NOT yet let
+  you A/B it. If the field flips `max_pool_bins` off, expose it as a dock toggle
+  (it's a bool, so the double-typed knob table needs a small extension) to keep
+  parity. Verified build + fidelity compatible with #26/#27 (2026-06-01).
 - **Stale `sea_surface_segmentation` install gotcha**: those exported headers
   only appear in the install tree after `sea_surface_segmentation` is
   *rebuilt* post-#23. An install predating #24 has an empty
