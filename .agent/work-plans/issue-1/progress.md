@@ -84,3 +84,29 @@ issue: 1
 
 ### False positives
 - (none) — Copilot R3's findings are all valid or minor-valid; the test-brittleness item is real (kept as a nit), not dismissed.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-06-01 13:50 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+
+**PR**: #2 at `51a06f6`
+**Sources**: 3 (Copilot R4 @ `51a06f6`, prior Integrated Reviews @ `7c21e85`/`01cb273`, CI rollup)
+**Cross-source confirmations**: 2 (Copilot vs. the repo's own documented contracts)
+**CI**: all-pass (`build-and-test`)
+
+### Findings
+- [ ] (cross-confirmed: Copilot R4 + `buffer_policy.hpp:56-57` contract) `--start-s/--end-s` clamp the session (loader honors at `bag_loader.cpp:251-254`) but the UI ignores it — scrubber range `[0,duration]`, initial load `requestCoverage(0.0)`, `bufferParams()` hard-codes `bag_lo=0`/`bag_hi=duration`; scrubber disagrees with silently-clamped display — `src/main_window.cpp:241,258,276-277`. Fix: thread start_s/effective end_s into scrubber range + initial requestCoverage + bag_lo/bag_hi.
+- [ ] (major, Copilot R4) In-window fast-path seek returns without recording the new target; a completing in-flight load installs the older target and overwrites the user's newer scrub (contradicts README "newer scrubs supersede") — `src/main_window.cpp:289-309`. Fix: set `chase_target_s_ = t_s` in the fast path when `load_in_flight_`.
+- [ ] (cross-confirmed: Copilot R4 + the codebase's own applied_-not-engine_ pattern) Dock `Knob::read` getters read `engine_` not `applied_occ_`/`applied_acc_`; stale dirty-tracking/Reset during async Apply/window-warm — `src/main_window.cpp:495,512`. `integrationSeconds()` (267) already fixed for this exact pattern. Fix: read from applied_* structs.
+- [ ] (minor, Copilot R2) `arg_double` uses `std::atof` (silent 0.0 on parse error / trailing garbage) — `src/main.cpp:35`.
+- [ ] (minor, Copilot R3) `latestRgb` scans the whole `rgb_frames` vector for a sparse/absent camera every refresh (break gated behind cam filter) — `src/resim_engine.cpp:191`.
+- [ ] (nit, Copilot R3) `camera_models` "always size kNumCameras" comment overstates the enforced contract — `src/bag_loader.hpp:101`.
+- [ ] (nit, Copilot R3) Test asserts hard-coded `obstacle_clamp == 5.0` (brittle); `grids_equal` already covers no-state-change — `test/test_resim_engine.cpp:247`.
+
+### Resolved since prior triage (verified fixed at `51a06f6`)
+- integrationSeconds reads applied_occ_ (267); onApplyParams reloads wider window when half-life grows (724-735); openBag in-flight guard bumps request_id_/waitForFinished before session swap (220-228); `<stdexcept>` included (21); ReSimEngine ctor throws on empty LoadedBag before accumulate(0) (152-157); renderGrid/renderRecorded map via `2.0*acc_.half_extent/panel_px` (472,501); end_s<0 error prints "end" not "-1s" (386-387).
+
+### False positives / non-issues
+- (Copilot R1/R2) `--end-s -1` decodes the whole bag → OOM: the GUI path is windowed via `loadWindow`/`plan_buffer` (bounded memory); the full-range one-shot `load_bag` runs only under the explicit `--probe` headless diagnostic. Addressed by D4 windowing; default interactive open no longer OOMs.
+- (Copilot R3) BufferPlan Extend ("reads only the new slice") unimplemented: documented deferral (`loadWindowJob` comment 391-398 + `.agents/README`) — a full re-read is a correct superset, not a defect; the policy/tests are staged for the future optimization.
