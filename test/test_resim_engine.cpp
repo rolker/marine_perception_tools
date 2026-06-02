@@ -514,6 +514,44 @@ TEST(ReSimEngine, LatestMaskEmptyForAbsentCamera)
   EXPECT_TRUE(e.latestMask(3).empty());  // aft camera not present in this bag
 }
 
+// latestRgb/rgbHorizon return the last frame for the requested camera at or
+// before the current stamp. rgb_frames are globally stamp-sorted across all
+// cameras, so the scan breaks once any frame passes the stamp (before the
+// per-camera filter) — this locks in that the early-exit stays
+// behaviour-preserving for a sparse/absent camera.
+TEST(ReSimEngine, LatestRgbSelectsPerCameraFrameAtOrBeforeStamp)
+{
+  auto bag = make_multicam_bag(/*n_cams=*/2, /*n_per=*/3);  // seg stamps 0.0..0.5
+  auto rgb = [](int cam, double t, uchar fill) {
+      mpt::RgbFrame r;
+      r.cam = cam;
+      r.stamp_s = t;
+      r.bgr = cv::Mat(4, 4, CV_8UC3, cv::Vec3b(fill, fill, fill));
+      return r;
+    };
+  // Globally stamp-sorted across both cameras; cam 1 is sparse (one early frame),
+  // so a cam-gated scan would run to the vector end every repaint.
+  bag.rgb_frames = {rgb(0, 0.00, 10), rgb(1, 0.10, 20), rgb(0, 0.20, 30),
+    rgb(0, 0.40, 40)};
+
+  mpt::ReSimEngine e(bag, kWindowM, kRes, kMaxRange);
+  e.seekTo(e.frameCount() - 1);
+  ASSERT_NEAR(e.currentStamp(), 0.5, 1e-9);
+
+  const cv::Mat r0 = e.latestRgb(0);
+  const cv::Mat r1 = e.latestRgb(1);
+  ASSERT_FALSE(r0.empty());
+  ASSERT_FALSE(r1.empty());
+  EXPECT_EQ(r0.at<cv::Vec3b>(0, 0)[0], 40);  // cam 0 latest at/before 0.5 → t=0.40
+  EXPECT_EQ(r1.at<cv::Vec3b>(0, 0)[0], 20);  // cam 1 latest at/before 0.5 → t=0.10
+
+  // Before cam 1's only frame: cam 0 still resolves, cam 1 is empty (none yet).
+  e.seekTo(0);
+  ASSERT_NEAR(e.currentStamp(), 0.0, 1e-9);
+  EXPECT_FALSE(e.latestRgb(0).empty());
+  EXPECT_TRUE(e.latestRgb(1).empty());
+}
+
 // Build a bag holding exactly the frames whose stamp lies in [lo, hi] — the
 // engine's view of one buffered span. Frame i has stamp 0.5*i (see make_bag).
 mpt::LoadedBag slice_bag(int n_frames, double lo, double hi)

@@ -185,8 +185,11 @@ cv::Mat ReSimEngine::latestRgb(int cam) const
   const double t = currentStamp();
   cv::Mat best;
   for (const auto & r : bag_.rgb_frames) {
+    // rgb_frames are globally stamp-sorted across all cameras, so once any
+    // frame passes t nothing later can qualify — break before the cam filter
+    // to avoid an O(N) scan when this camera is sparse or absent.
+    if (r.stamp_s > t) {break;}
     if (r.cam != cam) {continue;}
-    if (r.stamp_s > t) {break;}  // sorted — nothing later qualifies
     best = r.bgr;
   }
   return best;
@@ -204,8 +207,10 @@ std::vector<cv::Point2d> ReSimEngine::rgbHorizon(int cam, int n_cols) const
   const double t = currentStamp();
   const RgbFrame * best = nullptr;
   for (const auto & r : bag_.rgb_frames) {
+    // Globally stamp-sorted (see latestRgb): break before the cam filter so an
+    // absent/sparse camera doesn't force a full scan every repaint.
+    if (r.stamp_s > t) {break;}
     if (r.cam != cam) {continue;}
-    if (r.stamp_s > t) {break;}  // sorted
     best = &r;
   }
   if (best == nullptr || !best->has_pose || best->bgr.empty()) {return {};}

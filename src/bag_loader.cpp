@@ -254,6 +254,17 @@ LoadedBag BagSession::loadWindow(double start_s, double end_s) const
     win_end = (win_end < 0.0) ? opts_.end_s : std::min(win_end, opts_.end_s);
   }
 
+  // Reject an inverted window up front so the failure points at the real cause
+  // (bad bounds) rather than the downstream "no usable segmentation frames"
+  // error a zero/negative span would otherwise produce. A negative win_end means
+  // "to end of bag" and is not inverted.
+  if (win_end >= 0.0 && win_end < win_start) {
+    throw std::runtime_error(
+      "loadWindow: requested window end (" + std::to_string(win_end) +
+      "s) is before its start (" + std::to_string(win_start) +
+      "s); check --start-s/--end-s");
+  }
+
   LoadedBag loaded;
   loaded.camera_models = camera_models_;
   loaded.used_compressed_segmentation = used_compressed_segmentation_;
