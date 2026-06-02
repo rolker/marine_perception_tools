@@ -110,3 +110,29 @@ issue: 1
 ### False positives / non-issues
 - (Copilot R1/R2) `--end-s -1` decodes the whole bag → OOM: the GUI path is windowed via `loadWindow`/`plan_buffer` (bounded memory); the full-range one-shot `load_bag` runs only under the explicit `--probe` headless diagnostic. Addressed by D4 windowing; default interactive open no longer OOMs.
 - (Copilot R3) BufferPlan Extend ("reads only the new slice") unimplemented: documented deferral (`loadWindowJob` comment 391-398 + `.agents/README`) — a full re-read is a correct superset, not a defect; the policy/tests are staged for the future optimization.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-06-02 09:15 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+
+**PR**: #2 at `636dcb2`
+**Sources**: 4 (Copilot R5 @ `636dcb2`, prior Integrated Reviews @ `7c21e85`/`01cb273`/`51a06f6`, CI rollup)
+**Cross-source confirmations**: 1 (`latestRgb` early-exit — Copilot R3 + R4 + R5, still open at this head)
+**CI**: all-pass (`build-and-test` ✓ at `636dcb2`)
+
+### Findings (all fixed this round)
+- [x] (cross-confirmed: Copilot R3/R4/R5) `latestRgb` scans the whole globally-stamp-sorted `rgb_frames` for a sparse/absent camera every repaint — the `break` was gated behind the `cam` filter. Fixed: test `stamp_s > t` before the cam filter (behaviour-preserving early-exit) — `src/resim_engine.cpp:187`. New test `LatestRgbSelectsPerCameraFrameAtOrBeforeStamp` locks the contract.
+- [x] (valid, Copilot R5) `rgbHorizon` shares the identical O(N) cam-gated scan — same reorder applied — `src/resim_engine.cpp:206`.
+- [x] (minor, Copilot R5) `loadWindow` produced a confusing "no usable segmentation frames" error for an inverted window (`--end-s < --start-s`). Fixed: explicit precondition throw naming the real cause before any I/O — `src/bag_loader.cpp:256` (a negative `win_end` = "to end of bag" is exempt).
+
+### Carry-forward (prior-round open, NOT re-flagged by R5, still unresolved at `636dcb2`)
+- [ ] (minor, Copilot R2) `arg_double` uses `std::atof` (silent `0.0` on parse error / trailing garbage) — `src/main.cpp:32`.
+- [ ] (nit, Copilot R3) `camera_models` "always size kNumCameras" comment overstates the enforced contract — `src/bag_loader.hpp`.
+- [ ] (nit, Copilot R3) Test asserts hard-coded `obstacle_clamp == 5.0` (brittle); `grids_equal` already covers no-state-change — `test/test_resim_engine.cpp`.
+
+### Resolved since R4 (verified at `636dcb2`, commit "honor session clamp + applied state")
+- `Knob::read` getters now read `applied_occ_`/`applied_acc_` not `engine_` (519-540) — R4 cross-confirmed stale-dirty-tracking finding; `--start-s/--end-s` session clamp threaded into scrubber range + `bufferParams`; in-flight fast-path chase-target handled.
+
+### False positives / non-issues
+- (none this round) — all three R5 findings valid; the two perf items are low-severity but correctness-preserving and worth the O(N)→early-exit win on a per-repaint path.
