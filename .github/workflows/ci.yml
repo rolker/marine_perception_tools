@@ -39,6 +39,17 @@ jobs:
       - name: Create workspace
         run: mkdir -p ../ws/src && ln -s "$GITHUB_WORKSPACE" ../ws/src/marine_perception_tools
 
+      # sea_surface_segmentation is a source sibling (not in rosdep): the tuner
+      # reuses its exported header-only algorithm core. Clone it so the build
+      # resolves. This pulls its heavier transitive deps (depthai, nav2, grid_map)
+      # via rosdep below — the workspace `make build` is the primary integration
+      # gate; this per-repo CI is the lighter-weight check.
+      - name: Clone sea_surface_segmentation source dependency
+        run: >
+          git clone --depth 1 -b jazzy
+          https://github.com/rolker/unh_marine_perception.git
+          ../ws/src/unh_marine_perception
+
       - name: Install ROS dependencies
         working-directory: ../ws
         run: >

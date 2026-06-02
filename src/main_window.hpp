@@ -15,21 +15,223 @@
 #ifndef MAIN_WINDOW_HPP_
 #define MAIN_WINDOW_HPP_
 
+#include <QFutureWatcher>
+#include <QImage>
 #include <QMainWindow>
+#include <QString>
+
+#include <array>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "bag_loader.hpp"
+#include "buffer_policy.hpp"
+#include "resim_engine.hpp"
+
+class QDoubleSpinBox;
+class QLabel;
+class QPushButton;
+class QResizeEvent;
+class QSlider;
 
 namespace marine_perception_tools
 {
 
-// Top-level window for the sea_surface_tuner. A placeholder shell at this
-// stage; the bag-replay timeline, camera/segmentation/costmap panes, and
-// parameter widgets described in marine_perception_tools#1 are layered in by
-// the MVP that follows this skeleton.
+// The sea_surface_tuner main window: a forward-camera segmentation pane beside
+// the re-simulated costmap, a frame scrubber, and a parameter dock. Editing a
+// knob re-simulates and refreshes the costmap; scrubbing seeks the engine.
+//
+// The window owns the engine and rebuilds it on File->Open, so it can be opened
+// with no bag (empty state) and load one interactively. The window geometry /
+// replay options are fixed for the window's lifetime (they size the
+// OccupancyBuffer); each opened bag builds a fresh engine with them.
 class MainWindow : public QMainWindow
 {
   Q_OBJECT
 
 public:
-  explicit MainWindow(QWidget * parent = nullptr);
+  // window_m/res/max_range/min_grazing_deg size the OccupancyBuffer + projection
+  // (construction-fixed). integration_halflives/margin_s/retention_s tune the
+  // windowed-buffer policy (Milestone D4): window = integration_halflives *
+  // decay_half_life_s of warm-up, +/- margin_s of reload-free scrub slack, with
+  // retention_s of extra already-read frames kept beyond the guaranteed window.
+  MainWindow(
+    BagLoadOptions load_opts, double window_m, double res, double max_range,
+    double min_grazing_deg, double integration_halflives = 1.0,
+    double margin_s = 10.0, double retention_s = 120.0, QWidget * parent = nullptr);
+
+  // Wait for any in-flight background window load before teardown, so its
+  // completion can't fire onLoadFinished on a half-destructed window.
+  ~MainWindow() override;
+
+  // Open a bag: build a BagSession (one full scan), set the whole-bag time
+  // scrubber range, and load the initial window around t=0. On failure the
+  // message goes to the status bar and the prior session/engine (if any) is left
+  // intact. Safe to call repeatedly (File->Open).
+  void openBag(const QString & bag_uri);
+
+private slots:
+  void onSeek(int decisec);          // live during drag: in-window seek only
+  void onSeekReleased();             // commit: reload the window if out of span
+  void onParamEdited();              // mark a knob dirty (no re-sim — batched)
+  void onApplyParams();              // validate+apply the dirty batch, one re-sim
+  void onResetParams();              // revert dirty boxes to the applied values
+  void onLoadFinished();             // a background window load completed
+  void onOpen();
+
+private:
+  // One row of the data-driven param dock. Milestone B (after
+  // unh_marine_perception#22-P1) swaps the knob set by editing the table that
+  // builds these — not the widget code.
+  //
+  // Editing a box does NOT re-simulate (a full warm-up replay is too expensive
+  // per keystroke — see Milestone D4 profiling). Instead an edit marks the knob
+  // dirty (distinct box colour); pressing Apply validates the whole batch and
+  // re-sims once. `read` pulls the applied value from the engine (for display /
+  // Reset); `stage` writes the box's value into a staged params struct that Apply
+  // hands to ReSimEngine::setParams.
+  struct Knob
+  {
+    std::string label;
+    std::function<double()> read;  // applied source-of-truth value (NOT the live
+                                   // engine, which lags during an async Apply/warm)
+    std::function<void(
+        double v,
+        sea_surface_segmentation::OccupancyParams & occ,
+        sea_surface_segmentation::AccumulateParams & acc)> stage;  // box -> staged
+    QDoubleSpinBox * box = nullptr;
+    bool dirty = false;
+  };
+
+  void buildMenu();
+  void buildParamDock();
+  void setKnobDirty(Knob & knob, bool dirty);  // toggle the dirty-colour cue
+  void syncToEngine();  // scrubber range + knob spinboxes + views for current engine
+  // renderViews(): pull/re-render the source images from the engine (the
+  // expensive part — costmap cell loops) into the cached QImages, then rescale.
+  // Call when engine state changes (seek / load / apply). rescaleViews(): just
+  // re-fit the CACHED images to the labels' current size — cheap, no engine work,
+  // no costmap re-render. Call on resize / splitter drag (fires continuously).
+  void renderViews();
+  void rescaleViews();
+  bool haveEngine() const {return engine_ != nullptr;}
+
+  // Buffer manager (Milestone D4). Ensure bag-relative time `t_s` is shown:
+  //  - if the loaded engine already covers it, seek synchronously (cheap via the
+  //    checkpoint store);
+  //  - otherwise launch a BACKGROUND window load (D3 span policy → loadWindow →
+  //    new engine warmed to t_s) and grey the panes until it lands. The GUI stays
+  //    responsive; a newer requestCoverage while a load is in flight just updates
+  //    the chased target, and onLoadFinished re-launches for it if the finished
+  //    window doesn't cover it (single-flight + chase-latest supersession).
+  void requestCoverage(double t_s);
+  void startLoad(double t_s);        // kick a background load (stage A) for t_s
+  // Launch one worker stage: preloaded == nullptr → stage A (load + display-only
+  // engine); preloaded set → stage B (warm a fresh engine from that bag).
+  void launchStage(double t_s, std::uint64_t id, std::shared_ptr<LoadedBag> preloaded);
+  bool engineCovers(double t_s) const;  // does the loaded engine's window cover t_s?
+  // Integration warm-up in seconds, derived from the current decay half-life
+  // (integration = integration_halflives_ * decay_half_life_s). Recomputed each
+  // call so a half-life knob change grows/shrinks the window (R-series).
+  double integrationSeconds() const;
+  // Build BufferParams from the current knobs + the open session's bounds.
+  BufferParams bufferParams() const;
+
+  // Effective [lo, hi] scrub bounds in bag-relative seconds: the session's
+  // --start-s/--end-s clamp intersected with [0, duration] (end_s < 0 == to end).
+  // The scrubber range, the initial load target, and bufferParams bag_lo/bag_hi
+  // all derive from this so the UI honors the clamp the loader enforces.
+  std::pair<double, double> scrubBounds() const;
+
+  // The product of one background load stage, moved back to the GUI thread
+  // (shared_ptr survives the QFuture copy; engine null + error set on failure).
+  // A window load runs in TWO stages so the camera/segmentation/recorded views
+  // appear before the slow regenerated costmap (run feedback):
+  //   * stage A (warmed=false): loadWindow + build a display-only engine
+  //     (seekToStampDisplayOnly — no warm-up replay). `bag` carries the loaded
+  //     window so stage B can reuse it without re-reading.
+  //   * stage B (warmed=true): build a fresh engine from the SAME `bag` and warm
+  //     it to the target (seekToStamp). cv::Mat is refcounted, so building from
+  //     the shared bag copies frame headers, not pixels.
+  // `target_s`/`cache_*` echo the request so onLoadFinished installs buffer_state_
+  // and detects supersession by request_id.
+  struct LoadResult
+  {
+    std::shared_ptr<ReSimEngine> engine;
+    std::shared_ptr<LoadedBag> bag;  // stage A's loaded window, reused by stage B
+    double target_s = 0.0;
+    double cache_lo = 0.0;
+    double cache_hi = 0.0;
+    bool warmed = false;  // false: stage A (display-only); true: stage B (warmed)
+    std::string error;    // empty on success
+    std::uint64_t request_id = 0;
+  };
+  // Run on a worker thread (no Qt calls). Stage A (preloaded == nullptr): load
+  // the window via the session, build a display-only engine. Stage B (preloaded
+  // set): build a fresh engine from that bag and warm it to the target. Static so
+  // it can't accidentally touch GUI state.
+  static LoadResult loadWindowJob(
+    std::shared_ptr<BagSession> session, BufferParams params, BufferState state,
+    double t_s, double window_m, double res, double max_range, double min_grazing_deg,
+    sea_surface_segmentation::OccupancyParams occ,
+    sea_surface_segmentation::AccumulateParams acc, std::uint64_t request_id,
+    std::shared_ptr<LoadedBag> preloaded);
+
+  BagLoadOptions load_opts_;
+  double window_m_;
+  double res_;
+  double max_range_;
+  double min_grazing_deg_;
+  double integration_halflives_ = 1.0;  // window = this * decay_half_life_s
+  double margin_s_ = 10.0;              // reload-free scrub slack each side
+  double retention_s_ = 120.0;          // extra cached span kept beyond guaranteed
+
+  std::shared_ptr<BagSession> session_;  // one full scan; serves windowed reloads
+  BufferState buffer_state_;             // current I/O cache extent (bag-relative s)
+  double pending_seek_s_ = -1.0;         // out-of-span target deferred to release
+  std::shared_ptr<ReSimEngine> engine_;
+  std::shared_ptr<LoadedBag> current_bag_;  // loaded window; reused by Apply's warm
+  // Applied tunable params — the source of truth carried into every (re)load so a
+  // window reload preserves tuning (the engine ctor only takes occ + the geometry
+  // args, so acc's obstacle_prob_min/max_evidence_step would otherwise reset).
+  sea_surface_segmentation::OccupancyParams applied_occ_;
+  sea_surface_segmentation::AccumulateParams applied_acc_;
+
+  // Async window-load state. One load in flight at a time; `load_in_flight_`
+  // guards it, `chase_target_s_` (>= 0) holds a target requested while busy that
+  // the in-flight result must be checked against, and `request_id_` supersedes
+  // stale finishes.
+  QFutureWatcher<LoadResult> load_watcher_;
+  bool load_in_flight_ = false;
+  double chase_target_s_ = -1.0;
+  std::uint64_t request_id_ = 0;
+  std::array<QLabel *, kNumCameras> rgb_labels_{};   // Row 1: camera RGB (H.265)
+  std::array<QLabel *, kNumCameras> seg_labels_{};   // Row 2: segmentation masks
+  QLabel * recorded_label_ = nullptr;                // Row 3 left: recorded costmap
+  QLabel * grid_label_ = nullptr;                    // Row 3 right: regenerated costmap
+
+  // Cached source images (full-res, from the last renderViews) so a resize /
+  // splitter drag only re-scales these — it does NOT re-render the costmaps or
+  // re-pull from the engine. A null QImage means "blank / placeholder text".
+  std::array<QImage, kNumCameras> rgb_imgs_{};
+  std::array<QImage, kNumCameras> seg_imgs_{};
+  QImage recorded_img_;
+  QImage grid_img_;
+  bool grid_computing_ = false;  // regenerated costmap not yet warmed (stage A)
+  bool show_horizon_ = false;    // Options→Horizon: overlay the water-plane horizon
+  QSlider * scrubber_ = nullptr;
+  QPushButton * apply_btn_ = nullptr;   // commit the dirty knob batch (one re-sim)
+  QPushButton * reset_btn_ = nullptr;   // revert dirty knobs to applied values
+  std::vector<Knob> knobs_;
+
+protected:
+  // Re-fit the panes when the window / splitter resizes (pixmaps are scaled to
+  // the labels' current size in refreshViews).
+  void resizeEvent(QResizeEvent * event) override;
 };
 
 }  // namespace marine_perception_tools
