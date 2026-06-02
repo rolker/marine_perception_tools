@@ -176,6 +176,13 @@ public:
   // can surface the fidelity caveat on open without loading a window first.
   bool usedCompressedSegmentation() const {return used_compressed_segmentation_;}
 
+  // The session's [start_s, end_s] clamp (from the ctor opts), in seconds from
+  // bag start; end_s < 0 == to end of bag. The whole-bag scrubber and the buffer
+  // policy honor these so the UI never offers a time the loader would silently
+  // clamp away (see BufferParams::bag_lo/bag_hi).
+  double clampStartS() const {return opts_.start_s;}
+  double clampEndS() const {return opts_.end_s;}
+
 private:
   std::string bag_uri_;
   BagLoadOptions opts_;

@@ -267,3 +267,55 @@ TEST(BufferPolicy, OutOfRangeViewIsClamped)
   EXPECT_NEAR(under.replay_hi, 0.0, kEps);
   EXPECT_NEAR(under.replay_lo, 0.0, kEps);
 }
+
+// --- scrub_bounds(): the session --start-s/--end-s clamp the UI must honor. ----
+// The scrubber range, the initial load target, and BufferParams::bag_lo/bag_hi
+// all derive from this, so it must agree with what BagSession::loadWindow reads.
+
+TEST(ScrubBounds, NoClampSpansWholeBag)
+{
+  const auto [lo, hi] = mpt::scrub_bounds(0.0, -1.0, 600.0);
+  EXPECT_NEAR(lo, 0.0, kEps);
+  EXPECT_NEAR(hi, 600.0, kEps);  // end_s < 0 == to end of bag
+}
+
+TEST(ScrubBounds, StartAndEndClampApplied)
+{
+  const auto [lo, hi] = mpt::scrub_bounds(120.0, 300.0, 600.0);
+  EXPECT_NEAR(lo, 120.0, kEps);
+  EXPECT_NEAR(hi, 300.0, kEps);
+}
+
+TEST(ScrubBounds, EndBeyondDurationClampsToDuration)
+{
+  const auto [lo, hi] = mpt::scrub_bounds(0.0, 900.0, 600.0);
+  EXPECT_NEAR(lo, 0.0, kEps);
+  EXPECT_NEAR(hi, 600.0, kEps);
+}
+
+TEST(ScrubBounds, StartBeyondDurationCollapsesToEnd)
+{
+  // Pathological --start-s past the bag end: lo clamps to duration and hi can't
+  // fall below lo, so the window collapses to a point at the bag end rather than
+  // producing an inverted [lo, hi] the scrubber/policy would mishandle.
+  const auto [lo, hi] = mpt::scrub_bounds(800.0, -1.0, 600.0);
+  EXPECT_NEAR(lo, 600.0, kEps);
+  EXPECT_NEAR(hi, 600.0, kEps);
+  EXPECT_LE(lo, hi);
+}
+
+TEST(ScrubBounds, NegativeStartClampsToZero)
+{
+  const auto [lo, hi] = mpt::scrub_bounds(-30.0, 200.0, 600.0);
+  EXPECT_NEAR(lo, 0.0, kEps);
+  EXPECT_NEAR(hi, 200.0, kEps);
+}
+
+TEST(ScrubBounds, EndBelowStartCollapsesToStart)
+{
+  // --end-s earlier than --start-s: hi is floored at lo (no inverted range).
+  const auto [lo, hi] = mpt::scrub_bounds(300.0, 100.0, 600.0);
+  EXPECT_NEAR(lo, 300.0, kEps);
+  EXPECT_NEAR(hi, 300.0, kEps);
+  EXPECT_LE(lo, hi);
+}

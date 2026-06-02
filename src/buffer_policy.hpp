@@ -16,9 +16,26 @@
 #define BUFFER_POLICY_HPP_
 
 #include <algorithm>
+#include <utility>
 
 namespace marine_perception_tools
 {
+
+// Effective scrub bounds for the timeline: the session's --start-s/--end-s clamp
+// intersected with the bag's [0, duration]. `end_s < 0` means "to end of bag".
+// Returns {lo, hi} with 0 <= lo <= hi <= duration_s, so the scrubber range, the
+// initial load target, and BufferParams::bag_lo/bag_hi all agree with the span
+// the loader (BagSession::loadWindow) will actually read — the UI can't offer a
+// time that would be silently clamped away. Pure (no Qt/ROS) so it is unit-tested
+// alongside plan_buffer.
+inline std::pair<double, double> scrub_bounds(
+  double start_s, double end_s, double duration_s)
+{
+  const double dur = std::max(0.0, duration_s);
+  const double lo = std::clamp(start_s, 0.0, dur);
+  const double hi = (end_s < 0.0) ? dur : std::clamp(end_s, lo, dur);
+  return {lo, hi};
+}
 
 // Pure window-buffering policy for the windowed File->Open scrub (Milestone D).
 // No Qt, no ROS — just time arithmetic, so the breakable logic is unit-testable

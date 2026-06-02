@@ -236,10 +236,15 @@ void MainWindow::openBag(const QString & bag_uri)
   buffer_state_ = BufferState{};  // no cache yet — the first requestCoverage loads
   engine_.reset();
 
-  // Whole-bag time scrubber, in deciseconds (0.1 s steps) over [0, duration].
+  // Whole-bag time scrubber, in deciseconds (0.1 s steps) over the clamped span
+  // [start_s, end_s] — NOT [0, duration] — so the timeline can't offer a time the
+  // loader would silently clamp away (which would make the scrubber position and
+  // the displayed frame disagree).
+  const auto [scrub_lo, scrub_hi] = scrubBounds();
   scrubber_->blockSignals(true);
-  scrubber_->setRange(0, static_cast<int>(session_->duration_s() * 10.0));
-  scrubber_->setValue(0);
+  scrubber_->setRange(
+    static_cast<int>(scrub_lo * 10.0), static_cast<int>(scrub_hi * 10.0));
+  scrubber_->setValue(static_cast<int>(scrub_lo * 10.0));
   scrubber_->blockSignals(false);
 
   // Surface the compressed-segmentation caveat now (a scan-time property) — the
@@ -250,12 +255,14 @@ void MainWindow::openBag(const QString & bag_uri)
       "obstacle-probability channel is lossy; tuned values may not transfer.", 12000);
   }
 
-  // Reset the dock to the empty baseline, then kick the initial window load
-  // around t=0 in the background (cold start: the window clamps to the bag start
-  // and warms forward — see the R5 caveat surfaced in renderViews). The engine
-  // installs via onLoadFinished; the GUI stays responsive meanwhile.
+  // Reset the dock to the empty baseline, then kick the initial window load at
+  // the clamp start (cold start: the window clamps to the bag start and warms
+  // forward — see the R5 caveat surfaced in renderViews). Loading at scrub_lo
+  // (not a hard-coded 0) keeps the first frame consistent with where the scrubber
+  // now sits under --start-s. The engine installs via onLoadFinished; the GUI
+  // stays responsive meanwhile.
   syncToEngine();
-  requestCoverage(0.0);
+  requestCoverage(scrub_lo);
 }
 
 double MainWindow::integrationSeconds() const
@@ -267,14 +274,24 @@ double MainWindow::integrationSeconds() const
   return integration_halflives_ * applied_occ_.decay_half_life_s;
 }
 
+std::pair<double, double> MainWindow::scrubBounds() const
+{
+  if (!session_) {return {0.0, 0.0};}
+  return scrub_bounds(
+    session_->clampStartS(), session_->clampEndS(), session_->duration_s());
+}
+
 BufferParams MainWindow::bufferParams() const
 {
   BufferParams p;
   p.integration_s = integrationSeconds();
   p.margin_s = margin_s_;
   p.retention_s = retention_s_;
-  p.bag_lo = 0.0;
-  p.bag_hi = session_ ? session_->duration_s() : 0.0;
+  // Honor the session's --start-s/--end-s clamp so the buffer policy's
+  // guaranteed-window math matches what the loader will actually read.
+  const auto [lo, hi] = scrubBounds();
+  p.bag_lo = lo;
+  p.bag_hi = hi;
   return p;
 }
 
@@ -296,6 +313,12 @@ void MainWindow::requestCoverage(double t_s)
   if (engineCovers(t_s)) {
     engine_->seekToStamp(session_->startTime() + t_s);
     renderViews();
+    // A background load may be in flight for a different (out-of-window) target.
+    // Record this newer scrub so onLoadFinished re-serves it instead of snapping
+    // the view back to the load's older target — newer scrubs supersede in-flight
+    // loads (the README contract). Without this the completing load overwrites
+    // the position the user just scrubbed to.
+    if (load_in_flight_) {chase_target_s_ = t_s;}
     return;
   }
 
@@ -492,7 +515,11 @@ void MainWindow::buildParamDock()
   {
     knobs_.push_back({label,
         [this, field] {
-          return engine_ ? engine_->occupancyParams().*field : OccupancyParams{}.*field;
+          // Read the APPLIED source of truth, not engine_: during an async
+          // Apply/window-warm applied_occ_ is committed before the warmed engine
+          // installs, so reading the engine would yield stale dirty-tracking and
+          // Reset values mid-load (mirrors integrationSeconds()'s applied_occ_).
+          return applied_occ_.*field;
         },
         [field](double v, OccupancyParams & occ, AccumulateParams &) {
           occ.*field = v;  // stage into the occupancy struct Apply will submit
@@ -509,7 +536,8 @@ void MainWindow::buildParamDock()
   {
     knobs_.push_back({label,
         [this, field] {
-          return engine_ ? engine_->accumulateParams().*field : AccumulateParams{}.*field;
+          // Applied source of truth, not engine_ — see the occupancy knob above.
+          return applied_acc_.*field;
         },
         [field](double v, OccupancyParams &, AccumulateParams & acc) {
           acc.*field = v;  // stage into the accumulate struct Apply will submit

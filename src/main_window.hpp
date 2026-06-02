@@ -25,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "bag_loader.hpp"
@@ -96,7 +97,8 @@ private:
   struct Knob
   {
     std::string label;
-    std::function<double()> read;  // applied value from the engine (or default)
+    std::function<double()> read;  // applied source-of-truth value (NOT the live
+                                   // engine, which lags during an async Apply/warm)
     std::function<void(
         double v,
         sea_surface_segmentation::OccupancyParams & occ,
@@ -138,6 +140,12 @@ private:
   double integrationSeconds() const;
   // Build BufferParams from the current knobs + the open session's bounds.
   BufferParams bufferParams() const;
+
+  // Effective [lo, hi] scrub bounds in bag-relative seconds: the session's
+  // --start-s/--end-s clamp intersected with [0, duration] (end_s < 0 == to end).
+  // The scrubber range, the initial load target, and bufferParams bag_lo/bag_hi
+  // all derive from this so the UI honors the clamp the loader enforces.
+  std::pair<double, double> scrubBounds() const;
 
   // The product of one background load stage, moved back to the GUI thread
   // (shared_ptr survives the QFuture copy; engine null + error set on failure).
