@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "sidescan_geometry.hpp"
@@ -59,6 +60,26 @@ TEST(SidescanGeometry, GroundRangeFlatBottom)
   EXPECT_NEAR(ground_range(2.0, 3.0), 0.0, kEps);            // inside the nadir gap
   EXPECT_NEAR(ground_range(5.0, 0.0), 5.0, kEps);            // unknown altitude -> flat
   EXPECT_NEAR(ground_range(5.0, -1.0), 5.0, kEps);
+}
+
+TEST(SidescanGeometry, GroundRangeGuardsNonFinite)
+{
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  EXPECT_EQ(ground_range(nan, 3.0), 0.0);
+  EXPECT_EQ(ground_range(5.0, nan), 0.0);
+  EXPECT_EQ(ground_range(inf, 3.0), 0.0);
+}
+
+TEST(SidescanGeometry, ProjectWithZeroScaleIsNadirOnly)
+{
+  // metres_per_sample == 0 (no sound_speed/sample_rate) -> every slant range is 0.
+  // With a known altitude that means every sample is inside the nadir gap.
+  PingGeometry g;
+  g.metres_per_sample = 0.0;
+  g.altitude = 3.0;
+  g.lateral_sign = +1;
+  EXPECT_FALSE(project_sample(g, 100).valid);
 }
 
 TEST(SidescanGeometry, ProjectPortStarboardHeadingEast)

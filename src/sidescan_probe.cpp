@@ -59,6 +59,7 @@ int main(int argc, char ** argv)
     std::printf("along-track distance: %.1f m\n", session.totalDistance());
     std::printf("poses: %zu resolved, %zu skipped\n",
       session.posesResolved(), session.posesSkipped());
+    std::printf("decode errors (skipped messages): %zu\n", session.decodeErrors());
     std::printf("geo-reference (earth->world): %s\n",
       session.hasGeoReference() ? "available" : "ABSENT (datum fallback needed)");
     std::printf("altitude source: %s\n",

@@ -75,6 +75,7 @@ struct SidescanBagOptions
   std::string base_frame = "bizzy/base_link";  // along-track distance reference
   std::string geo_frame = "earth";           // earth->world presence => geo export OK
   double altitude_threshold_frac = 0.5;      // nadir first-return detection level
+  double altitude_max_dt_s = 2.0;            // max time gap to trust a nadir depth
 };
 
 // Opens a sidescan bag once, builds the full TF cache, then reads every ping into
@@ -119,12 +120,17 @@ public:
   // source was available at all).
   bool usedNadirDepth() const {return used_nadir_depth_;}
 
+  // Count of bag messages that failed to deserialize and were skipped (one bad
+  // message does not abort the load). A large value signals a corrupt bag.
+  std::size_t decodeErrors() const {return decode_errors_;}
+
 private:
   std::vector<SidescanPing> pings_;
   std::unique_ptr<tf2::BufferCore> tf_buffer_;
   double total_distance_m_ = 0.0;
   std::size_t poses_resolved_ = 0;
   std::size_t poses_skipped_ = 0;
+  std::size_t decode_errors_ = 0;
   bool has_geo_reference_ = false;
   bool used_nadir_depth_ = false;
 };

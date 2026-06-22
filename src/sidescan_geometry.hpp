@@ -78,6 +78,7 @@ inline double slant_range_at(std::size_t i, uint32_t sample0, double metres_per_
 // caller. Negative/zero altitude (unknown) degrades gracefully to ground == slant.
 inline double ground_range(double slant, double altitude)
 {
+  if (!std::isfinite(slant) || !std::isfinite(altitude)) {return 0.0;}  // guard NaN/Inf
   if (!(altitude > 0.0)) {return slant;}        // unknown altitude → flat (slant≈ground)
   const double d2 = slant * slant - altitude * altitude;
   return (d2 > 0.0) ? std::sqrt(d2) : 0.0;

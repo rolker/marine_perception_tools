@@ -53,18 +53,36 @@ double yaw_from_quaternion(double x, double y, double z, double w)
   return std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
 }
 
+// True when this host is big-endian (runtime check; std::endian is C++20).
+bool host_is_big_endian()
+{
+  const uint16_t one = 1;
+  return *reinterpret_cast<const uint8_t *>(&one) == 0;
+}
+
 // Decode beam 0 of a RawSonarImage into amplitudes normalized to [0, 1]. The data
 // buffer holds `beam_count * samples_per_beam` elements of `dtype`, beam-major, so
 // beam 0 is the leading `samples_per_beam` elements. Integer types normalize by
 // their full-scale max; float types are passed through (already physical/relative)
-// and clamped to [0, 1]. Unknown dtypes yield an empty vector (ping kept, unpaintable).
+// and clamped to [0, 1]. When the message's byte order differs from the host's,
+// each multi-byte element is byte-swapped — otherwise a big-endian-recorded bag
+// would decode to silent garbage. Unknown dtypes yield an empty vector (ping kept,
+// unpaintable).
 template<typename T>
-std::vector<float> normalize_beam0(const uint8_t * bytes, std::size_t n, double scale)
+std::vector<float> normalize_beam0(const uint8_t * bytes, std::size_t n, double scale, bool swap)
 {
   std::vector<float> out(n);
   for (std::size_t i = 0; i < n; ++i) {
     T v;
-    std::memcpy(&v, bytes + i * sizeof(T), sizeof(T));
+    if (swap && sizeof(T) > 1) {
+      unsigned char tmp[sizeof(T)];
+      for (std::size_t k = 0; k < sizeof(T); ++k) {
+        tmp[k] = bytes[i * sizeof(T) + (sizeof(T) - 1 - k)];
+      }
+      std::memcpy(&v, tmp, sizeof(T));
+    } else {
+      std::memcpy(&v, bytes + i * sizeof(T), sizeof(T));
+    }
     out[i] = static_cast<float>(static_cast<double>(v) / scale);
   }
   return out;
@@ -90,17 +108,20 @@ std::vector<float> extract_beam0(
     default: return {};  // unsupported (incl. 64-bit ints) — leave unpaintable
   }
   if (img.data.size() < n * elem_size) {return {};}
+  const bool swap = img.is_bigendian != host_is_big_endian();
   const uint8_t * b = img.data.data();
   std::vector<float> out;
   switch (img.dtype) {
-    case SonarImageData::DTYPE_UINT8: out = normalize_beam0<uint8_t>(b, n, 255.0); break;
-    case SonarImageData::DTYPE_INT8: out = normalize_beam0<int8_t>(b, n, 127.0); break;
-    case SonarImageData::DTYPE_UINT16: out = normalize_beam0<uint16_t>(b, n, 65535.0); break;
-    case SonarImageData::DTYPE_INT16: out = normalize_beam0<int16_t>(b, n, 32767.0); break;
-    case SonarImageData::DTYPE_UINT32: out = normalize_beam0<uint32_t>(b, n, 4294967295.0); break;
-    case SonarImageData::DTYPE_INT32: out = normalize_beam0<int32_t>(b, n, 2147483647.0); break;
-    case SonarImageData::DTYPE_FLOAT32: out = normalize_beam0<float>(b, n, 1.0); break;
-    case SonarImageData::DTYPE_FLOAT64: out = normalize_beam0<double>(b, n, 1.0); break;
+    case SonarImageData::DTYPE_UINT8: out = normalize_beam0<uint8_t>(b, n, 255.0, swap); break;
+    case SonarImageData::DTYPE_INT8: out = normalize_beam0<int8_t>(b, n, 127.0, swap); break;
+    case SonarImageData::DTYPE_UINT16: out = normalize_beam0<uint16_t>(b, n, 65535.0, swap); break;
+    case SonarImageData::DTYPE_INT16: out = normalize_beam0<int16_t>(b, n, 32767.0, swap); break;
+    case SonarImageData::DTYPE_UINT32:
+      out = normalize_beam0<uint32_t>(b, n, 4294967295.0, swap); break;
+    case SonarImageData::DTYPE_INT32:
+      out = normalize_beam0<int32_t>(b, n, 2147483647.0, swap); break;
+    case SonarImageData::DTYPE_FLOAT32: out = normalize_beam0<float>(b, n, 1.0, swap); break;
+    case SonarImageData::DTYPE_FLOAT64: out = normalize_beam0<double>(b, n, 1.0, swap); break;
     default: return {};
   }
   for (float & v : out) {
@@ -140,10 +161,15 @@ SidescanBagSession::SidescanBagSession(
     auto bag_msg = reader.read_next();
     const std::string & topic = bag_msg->topic_name;
     if (topic == "/tf" || topic == "/tf_static") {
-      auto tfm = deserialize<tf2_msgs::msg::TFMessage>(bag_msg);
-      const bool is_static = (topic == "/tf_static");
-      for (const auto & tr : tfm.transforms) {
-        tf_buffer_->setTransform(tr, "bag", is_static);
+      // A single corrupt /tf message is skipped, not fatal (mirrors bag_loader).
+      try {
+        auto tfm = deserialize<tf2_msgs::msg::TFMessage>(bag_msg);
+        const bool is_static = (topic == "/tf_static");
+        for (const auto & tr : tfm.transforms) {
+          tf_buffer_->setTransform(tr, "bag", is_static);
+        }
+      } catch (const std::exception &) {
+        ++decode_errors_;
       }
     }
   }
@@ -163,29 +189,34 @@ SidescanBagSession::SidescanBagSession(
   reader2.open(bag_uri);
   while (reader2.has_next()) {
     auto bag_msg = reader2.read_next();
-    if (bag_msg->topic_name == kNadirDepthTopic) {
-      auto rng = deserialize<sensor_msgs::msg::Range>(bag_msg);
-      if (std::isfinite(rng.range)) {
-        const double t = rng.header.stamp.sec + rng.header.stamp.nanosec * 1e-9;
-        nadir_depths.emplace_back(t, static_cast<double>(rng.range));
+    // One unreadable message (corrupt/truncated) is skipped + counted, not fatal.
+    try {
+      if (bag_msg->topic_name == kNadirDepthTopic) {
+        auto rng = deserialize<sensor_msgs::msg::Range>(bag_msg);
+        if (std::isfinite(rng.range)) {
+          const double t = rng.header.stamp.sec + rng.header.stamp.nanosec * 1e-9;
+          nadir_depths.emplace_back(t, static_cast<double>(rng.range));
+        }
+        continue;
       }
-      continue;
-    }
-    auto ch_it = topic_to_channel.find(bag_msg->topic_name);
-    if (ch_it == topic_to_channel.end()) {continue;}
+      auto ch_it = topic_to_channel.find(bag_msg->topic_name);
+      if (ch_it == topic_to_channel.end()) {continue;}
 
-    auto img = deserialize<marine_acoustic_msgs::msg::RawSonarImage>(bag_msg);
-    SidescanPing ping;
-    ping.channel = ch_it->second;
-    ping.stamp_s = img.header.stamp.sec + img.header.stamp.nanosec * 1e-9;
-    ping.sound_speed = img.ping_info.sound_speed;
-    ping.sample_rate = img.sample_rate;
-    ping.amplitudes = extract_beam0(img.image, img.samples_per_beam);
-    ping.geometry.sample0 = img.sample0;
-    ping.geometry.metres_per_sample =
-      slant_metres_per_sample(img.ping_info.sound_speed, img.sample_rate);
-    ping.geometry.lateral_sign = channel_lateral_sign(ping.channel);
-    pings_.push_back(std::move(ping));
+      auto img = deserialize<marine_acoustic_msgs::msg::RawSonarImage>(bag_msg);
+      SidescanPing ping;
+      ping.channel = ch_it->second;
+      ping.stamp_s = img.header.stamp.sec + img.header.stamp.nanosec * 1e-9;
+      ping.sound_speed = img.ping_info.sound_speed;
+      ping.sample_rate = img.sample_rate;
+      ping.amplitudes = extract_beam0(img.image, img.samples_per_beam);
+      ping.geometry.sample0 = img.sample0;
+      ping.geometry.metres_per_sample =
+        slant_metres_per_sample(img.ping_info.sound_speed, img.sample_rate);
+      ping.geometry.lateral_sign = channel_lateral_sign(ping.channel);
+      pings_.push_back(std::move(ping));
+    } catch (const std::exception &) {
+      ++decode_errors_;
+    }
   }
 
   std::stable_sort(
@@ -266,7 +297,7 @@ SidescanBagSession::SidescanBagSession(
       auto it = std::lower_bound(
         nadir.begin(), nadir.end(), ping.stamp_s,
         [](const NadirAlt & na, double s) {return na.stamp_s < s;});
-      double best = nadir.front().altitude;
+      double best = 0.0;
       double best_dt = std::numeric_limits<double>::max();
       for (auto cand : {it == nadir.begin() ? it : std::prev(it),
           it == nadir.end() ? std::prev(it) : it})
@@ -274,7 +305,10 @@ SidescanBagSession::SidescanBagSession(
         const double dt = std::abs(cand->stamp_s - ping.stamp_s);
         if (dt < best_dt) {best_dt = dt; best = cand->altitude;}
       }
-      ping.geometry.altitude = best;
+      // Only trust the nadir depth if it is close enough in time; across a long
+      // nadir dropout, leave altitude unknown (0 -> flat slant≈ground) rather than
+      // painting with a stale depth.
+      ping.geometry.altitude = (best_dt <= opts.altitude_max_dt_s) ? best : 0.0;
     }
   }
 
