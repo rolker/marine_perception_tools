@@ -102,6 +102,7 @@ add_executable(sidescan_target_viewer
   src/sidescan_viewer_main.cpp
   src/sidescan_viewer_window.cpp
   src/sidescan_canvas.cpp
+  src/sidescan_waterfall.cpp
 )
 target_link_libraries(sidescan_target_viewer
   sidescan_core

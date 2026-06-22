@@ -35,6 +35,7 @@ namespace marine_perception_tools
 {
 
 class SidescanCanvas;
+class SidescanWaterfall;
 
 // Result of an off-thread bag load: either a session or an error message. Copyable
 // (shared_ptr + QString) so it can ride through QFuture/QFutureWatcher.
@@ -50,10 +51,14 @@ struct SidescanLoadResult
 struct SidescanRenderResult
 {
   bool ok = false;
-  QImage image;
+  QImage image;          // georeferenced coverage (map frame)
+  QImage waterfall;      // uncorrected slant-range waterfall of the same window
   double origin_x = 0.0;
   double origin_y = 0.0;
   double res_m = 0.25;
+  double center_x = 0.0;  // map centre of the window's painted swath
+  double center_y = 0.0;
+  bool has_center = false;
   std::size_t npings = 0;
   double head_m = 0.0;
   double total_m = 0.0;
@@ -96,6 +101,7 @@ private:
   QDoubleSpinBox * window_spin_ = nullptr;
   QLabel * status_ = nullptr;
   QProgressBar * progress_ = nullptr;
+  SidescanWaterfall * waterfall_ = nullptr;
 
   QFutureWatcher<SidescanLoadResult> load_watcher_;
   QFutureWatcher<SidescanRenderResult> render_watcher_;

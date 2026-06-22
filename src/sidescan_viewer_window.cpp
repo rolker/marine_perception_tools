@@ -25,6 +25,7 @@
 #include <QPointF>
 #include <QProgressBar>
 #include <QSlider>
+#include <QSplitter>
 #include <QString>
 #include <QtConcurrent>
 #include <QVBoxLayout>
@@ -32,6 +33,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <utility>
 #include <vector>
@@ -40,6 +42,7 @@
 #include "distance_buffer_policy.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
+#include "sidescan_waterfall.hpp"
 
 namespace marine_perception_tools
 {
@@ -74,9 +77,58 @@ QImage render_coverage(const CoverageRaster & r)
   return img;
 }
 
+// The uncorrected slant-range waterfall for a window: one row per ping cycle,
+// port samples on the left (near range at centre, far range outward), starboard on
+// the right. Port/starboard pings are paired by index in along-track order. No
+// georeferencing or slant correction — the raw stacked display.
+QImage build_waterfall(const std::vector<WindowPing> & pings)
+{
+  std::vector<const WindowPing *> port;
+  std::vector<const WindowPing *> stbd;
+  for (const auto & p : pings) {
+    if (p.channel == SidescanChannel::Port) {
+      port.push_back(&p);
+    } else if (p.channel == SidescanChannel::Starboard) {stbd.push_back(&p);}
+  }
+  const int rows = static_cast<int>(std::max(port.size(), stbd.size()));
+  if (rows == 0) {return QImage();}
+  std::size_t pn = 0;
+  std::size_t sn = 0;
+  for (const auto * p : port) {
+    pn = std::max(pn, p->amplitudes.size());
+  }
+  for (const auto * p : stbd) {
+    sn = std::max(sn, p->amplitudes.size());
+  }
+  const int width = static_cast<int>(pn + sn);
+  if (width == 0) {return QImage();}
+
+  QImage img(width, rows, QImage::Format_Grayscale8);
+  img.fill(0);
+  auto gray = [](float a) {
+      return static_cast<uint8_t>(std::clamp(a * 255.0f + 0.5f, 0.0f, 255.0f));
+    };
+  for (int r = 0; r < rows; ++r) {
+    uchar * line = img.scanLine(r);
+    if (r < static_cast<int>(port.size())) {
+      const auto & a = port[r]->amplitudes;
+      for (std::size_t i = 0; i < a.size() && i < pn; ++i) {
+        line[pn - 1 - i] = gray(a[i]);  // near range -> centre, far -> left edge
+      }
+    }
+    if (r < static_cast<int>(stbd.size())) {
+      const auto & a = stbd[r]->amplitudes;
+      for (std::size_t i = 0; i < a.size() && i < sn; ++i) {
+        line[pn + i] = gray(a[i]);      // near range -> centre, far -> right edge
+      }
+    }
+  }
+  return img;
+}
+
 // Build the coverage render for a distance window on a worker thread (readWindow +
-// paint + rasterize). Touches no widgets, so it is safe off the UI thread; the
-// caller applies the result on the UI thread.
+// paint + rasterize + waterfall). Touches no widgets, so it is safe off the UI
+// thread; the caller applies the result on the UI thread.
 SidescanRenderResult render_window(
   std::shared_ptr<SidescanBagSession> session, double head, double total,
   double win_lo, double win_hi, int max_pings, double res)
@@ -92,6 +144,19 @@ SidescanRenderResult render_window(
   const std::vector<WindowPing> paint = session->readWindow(win_lo, win_hi, max_pings);
   out.npings = paint.size();
   if (paint.empty()) {return out;}  // ok, but a null image -> canvas clears
+
+  // Uncorrected waterfall + the window's track centre (for the follow-the-playhead
+  // recentre) — both from the same pings, so map and waterfall stay in lockstep.
+  out.waterfall = build_waterfall(paint);
+  double cx = 0.0;
+  double cy = 0.0;
+  for (const auto & p : paint) {
+    cx += p.geometry.sensor_x;
+    cy += p.geometry.sensor_y;
+  }
+  out.center_x = cx / static_cast<double>(paint.size());
+  out.center_y = cy / static_cast<double>(paint.size());
+  out.has_center = true;
 
   double min_x = paint.front().geometry.sensor_x;
   double max_x = min_x;
@@ -169,9 +234,17 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   crow->addWidget(window_spin_);
   crow->addWidget(progress_);
 
+  // Geo map (left) beside the uncorrected waterfall (right), user-resizable.
+  waterfall_ = new SidescanWaterfall(this);
+  auto * split = new QSplitter(Qt::Horizontal, this);
+  split->addWidget(canvas_);
+  split->addWidget(waterfall_);
+  split->setStretchFactor(0, 3);
+  split->setStretchFactor(1, 1);
+
   auto * central = new QWidget(this);
   auto * col = new QVBoxLayout(central);
-  col->addWidget(canvas_, 1);
+  col->addWidget(split, 1);
   col->addWidget(controls);
   col->addWidget(status_);
   setCentralWidget(central);
@@ -307,6 +380,8 @@ void SidescanViewerWindow::onRenderFinished()
   rendering_ = false;
   const SidescanRenderResult r = render_watcher_.result();
   canvas_->setCoverage(r.image, r.origin_x, r.origin_y, r.res_m);
+  waterfall_->setImage(r.waterfall);
+  if (r.has_center) {canvas_->setCenter(r.center_x, r.center_y);}
   status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted")
     .arg(r.head_m, 0, 'f', 1)
     .arg(r.total_m, 0, 'f', 1)

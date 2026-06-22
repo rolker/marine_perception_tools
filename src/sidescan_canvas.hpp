@@ -46,6 +46,10 @@ public:
 
   void setGridSpacing(double metres);
 
+  // Recenter the view on a map point (metres) without changing zoom — used to keep
+  // the scrubbed window centred ("follow the playhead").
+  void setCenter(double map_x, double map_y);
+
   // Fit the current coverage extent (or track) into the widget.
   void resetView();
 

@@ -61,6 +61,12 @@ void SidescanCanvas::setGridSpacing(double metres)
   }
 }
 
+void SidescanCanvas::setCenter(double map_x, double map_y)
+{
+  center_map_ = QPointF(map_x, map_y);
+  update();
+}
+
 QPointF SidescanCanvas::mapToScreen(double mx, double my) const
 {
   // North-up: +x east -> right, +y north -> up (screen y grows downward).
