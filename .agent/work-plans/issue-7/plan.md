@@ -24,19 +24,23 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
    (RawSonarImage), `geographic_msgs` + `geodesy` (export-boundary geo).
 2. **Ingest** — `SidescanBagSession` (mirror `BagSession`): scan builds TF cache + nav
    timeline (`/bizzy/odom` + TF) + per-channel `RawSonarImage` ping index +
-   cumulative along-track distance; windowed read **by distance** (not time).
-3. **Projection (pure, unit-tested)** — per-ping sensor pose in `map` from TF; nadir
-   first-return → altitude; slant→ground-range; across-track sample → map-frame XY.
-4. **Swath render + coverage** — paint ground-range samples into an in-app map-frame
-   raster (`grid_map_core`); **quality-wins** per cell (grazing-angle/range metric);
-   coverage mask → **skip fully-covered pings**; distance buffer policy (distance
-   analogue of `buffer_policy.hpp`) with **stationary ping cap**.
+   cumulative along-track distance; windowed read **by distance** (not time). Verify
+   `earth → bizzy/map` presence on scan (geo-export readiness).
+3. **Projection (pure, unit-tested)** — per-ping sensor pose in `bizzy/map` from TF;
+   nadir-channel first-return → altitude; slant→ground-range; across-track sample →
+   `bizzy/map` XY.
+4. **Swath render + coverage** — paint port+starboard ground-range samples into an
+   in-app `bizzy/map`-frame raster (`grid_map_core`); **quality-wins** per cell
+   (grazing-angle/range metric); coverage mask → **skip fully-covered pings**; distance
+   buffer policy (distance analogue of `buffer_policy.hpp`) with **stationary ping
+   cap**. Cap + coverage-skip thresholds are exposed as tunable params, not hardcoded.
 5. **Map canvas (Qt)** — north-up `QGraphicsView` in map meters; **customizable
    measuring grid**; **zoom**; render swath raster + boat track; **distance scrubber**.
 6. **Contact marking** — box-drag → `Contact` (`ORIGIN_HUMAN`, `STATUS_PROPOSED`,
-   `Shape.BOX` dims from box extent, shadow→height, `geo_pose` via earth→map TF +
-   geodesy, `source="sidescan.port"`); thumbnail crop; target-list pane (table +
-   thumbnail), click-to-locate.
+   `existence_probability=1.0`, single `Classification` @ 1.0, `Shape.BOX` dims from box
+   extent, shadow→height, `geo_pose` **resolved** via `earth → bizzy/map` TF + geodesy
+   — never left NaN, `source="sidescan.port"`); thumbnail crop; target-list pane (table
+   + thumbnail), click-to-locate.
 7. **Store + cross-pass overlay** — thin `ContactArray` file store (forward-compatible
    with contact_manager #167); load on open → in-memory spatial index; reverse-project
    in-view contacts (from any pass) onto the canvas.
@@ -86,13 +90,22 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
   GGGS/Web-Mercator tile stack for display. GGGS tile-store sharing is a fast-follow.
 - **Store format = CDR.** Serialize `ContactArray` as CDR (exact message fidelity,
   closest to the contact_manager #167 seam).
+- **Frames (verified against bag `bizzyboat_sonar/2026-06-18T19-39-06+00-00`):** render
+  in **`bizzy/map`** (this bag's `tf_static` carries `bizzy/map → map`); odom =
+  **`bizzy/odom` → `bizzy/base_link`**; sensors = **`bizzy/garmin_sidescan_{port,
+  starboard,down}`**. NOT the tuner's `bizzy/map_tide`. Geo export needs
+  `earth → bizzy/map` — PR1 ingest verifies its presence; datum fallback if absent.
+- **`marine_acoustic_msgs` confirmed** installed at `/opt/ros/jazzy` (binary dep) —
+  PR1 compiles. Add as `<depend>`.
+- **Down channel = nadir altitude only** (first-return → height-above-bottom); port +
+  starboard are the painted swath. (Resolves the down-look ambiguity.)
 
 ## Open Questions
 
 - **Echogram (fast-follow):** `rqt_marine_sonar` has a C++ Qt echogram widget — reuse by
   extraction vs reimplement. Decide when we start that phase.
-- **`marine_acoustic_msgs`** is a rosdep (not a source package here) — confirm it's
-  present on the operator station build (rqt sonar tools already use it, so likely yes).
+- **`earth → bizzy/map` availability:** present in these bags? PR1 ingest verifies; if
+  absent, geo_pose export needs a datum fallback (lake datum 52.3 m WGS84 known).
 
 ## Estimated Scope
 
