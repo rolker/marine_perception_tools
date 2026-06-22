@@ -18,3 +18,20 @@ issue: 7
 - [ ] Store format: serialize ContactArray as CDR (msg-fidelity, closest to #167) vs YAML (human-editable) — lean CDR.
 - [ ] Echogram (fast-follow): reuse rqt_marine_sonar C++ Qt echogram widget by extraction vs reimplement.
 - [ ] Confirm marine_acoustic_msgs (rosdep, not a source package here) is present on the operator-station build.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-21 23:54 -0400
+**By**: Claude Code Agent (Claude Opus) (in-context — author self-review)
+
+**Plan**: `.agent/work-plans/issue-7/plan.md` at `c48b8fb`
+**PR**: PR-less (file-path / --issue mode)
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (must-fix) Frame names are generic, not pinned to the real bag. Plan §2 reads nav from `/bizzy/odom`+TF and §3 projects sensor pose "in `map`"; issue body says "ROS `map` frame". But the existing `BagSession` default `world_frame` is `bizzy/map_tide` (namespaced) — see `src/bag_loader.hpp:122` (`BagLoadOptions.world_frame = "bizzy/map_tide"`). v1 painting into an "in-app map-frame raster" must commit to one verified world/odom/sensor frame triple (verified against the real sidescan bag), not the bare `map`/`/bizzy/odom` shorthand, or projection lands in the wrong frame — `plan.md:30,32,36`
+- [ ] (must-fix) Critical-path dep `marine_acoustic_msgs` (RawSonarImage) is left as an open question — confirmed NOT a source package in the workspace (rosdep only). PR1 (ingest) cannot compile without it. Resolve before PR1 starts, not "likely yes" — `plan.md:24,95`
+- [ ] (suggestion) `down` sidescan channel under-specified. Issue lists port/starboard/**down** topics; plan only does port/starboard swath projection and `source="sidescan.port"`. State whether down-look is projected, used for nadir-altitude only, or descoped for v1 — `plan.md:30,38`
+- [ ] (suggestion) Contact field completeness: `Contact.msg` documents `existence_probability = 1.0` for human-drawn contacts and `geo_pose` unresolved-when-`latitude==NaN`; plan's marking step (§6) omits both. Set `existence_probability=1.0` and resolve `geo_pose` (don't leave NaN) when boxing a contact — verified against `marine_interfaces/msg/Contact.msg` on main — `plan.md:38`
+- [ ] (suggestion) Stationary-ping cap and "skip fully-covered ping" thresholds are named but unvalued. Expose as constants/params so they're tunable against the real Massabesic bag rather than hardcoded — `plan.md:33,52`
+- [ ] Reuse/ADR alignment is otherwise solid: `BagSession`/`buffer_policy.hpp`/`cv_qt.hpp` names verified real; `tuner_core`+Qt-app split mirrors the actual CMake; `Contact`/`ContactArray` confirmed merged in `marine_interfaces` on main; ADR-0005/0006 (sidescan store) and ADR-0007 (GeoCoder) correctly scoped as non-blocking; GGGS-descope + CDR-store decisions resolved with Roland.
