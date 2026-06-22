@@ -18,10 +18,12 @@
 #include <QImage>
 #include <QPoint>
 #include <QRectF>
+#include <QVector>
 #include <QWidget>
 
 #include <vector>
 
+#include "sidescan_canvas.hpp"   // ContactMarker
 #include "sidescan_geometry.hpp"
 
 namespace marine_perception_tools
@@ -56,6 +58,11 @@ public:
   void setImage(const QImage & image);
   void setIndex(const WaterfallIndex & index);
 
+  // Contacts to overlay (map metres). Each is drawn at every ping/sample pixel that
+  // ensonified its location, so a target ensonified by several pings (e.g. on the
+  // return pass after a turn) is marked at each occurrence.
+  void setContacts(const QVector<ContactMarker> & contacts);
+
   // In mark mode, left-drag draws a contact box and emits boxMarked() (map coords).
   void setMarkMode(bool on);
 
@@ -74,6 +81,7 @@ private:
 
   QImage image_;
   WaterfallIndex index_;
+  QVector<ContactMarker> contacts_;
   bool mark_mode_ = false;
   bool marking_ = false;
   QPoint mark_start_;

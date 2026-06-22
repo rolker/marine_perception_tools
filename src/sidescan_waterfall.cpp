@@ -45,6 +45,12 @@ void SidescanWaterfall::setIndex(const WaterfallIndex & index)
   index_ = index;
 }
 
+void SidescanWaterfall::setContacts(const QVector<ContactMarker> & contacts)
+{
+  contacts_ = contacts;
+  update();
+}
+
 void SidescanWaterfall::setMarkMode(bool on)
 {
   mark_mode_ = on;
@@ -143,6 +149,58 @@ void SidescanWaterfall::paintEvent(QPaintEvent * event)
   // Stretch the slant-range image to fill the pane (across-track on x, scrub
   // distance on y). Smooth only vertically would be ideal; keep it simple.
   painter.drawImage(rect(), image_);
+
+  // Overlay contacts at every ping/sample pixel that ensonified each one (the
+  // inverse of project_sample: a contact at map (cx,cy) lands on a ping whose
+  // across-track line passes near it, at the sample matching its ground range).
+  const int img_w = index_.pn + index_.sn;
+  if (!contacts_.empty() && index_.rows > 0 && img_w > 0) {
+    const double sx = static_cast<double>(width()) / img_w;
+    const double sy = static_cast<double>(height()) / index_.rows;
+    constexpr double kAlongTol = 1.0;   // metres; "on this ping's line"
+    QPen pen(QColor(255, 210, 60));
+    pen.setWidthF(1.5);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+
+    auto mark = [&](const PingGeometry & g, int row, bool is_port, double cx, double cy) {
+        if (g.metres_per_sample <= 0.0) {return;}
+        const double dx = cx - g.sensor_x;
+        const double dy = cy - g.sensor_y;
+        const double along = dx * std::cos(g.yaw) + dy * std::sin(g.yaw);
+        if (std::abs(along) > kAlongTol) {return;}
+        const double across =
+          (dx * -std::sin(g.yaw) + dy * std::cos(g.yaw)) * g.lateral_sign;
+        if (across <= 0.0) {return;}
+        const double alt = (g.altitude > 0.0) ? g.altitude : 0.0;
+        const double slant = std::sqrt(across * across + alt * alt);
+        const int i = static_cast<int>(slant / g.metres_per_sample - g.sample0 + 0.5);
+        const int max_i = is_port ? index_.pn : index_.sn;
+        if (i < 0 || i >= max_i) {return;}
+        const int col = is_port ? (index_.pn - 1 - i) : (index_.pn + i);
+        painter.drawEllipse(QPointF((col + 0.5) * sx, (row + 0.5) * sy), 3.0, 3.0);
+      };
+
+    for (const auto & c : contacts_) {
+      for (int r = 0; r < index_.rows; ++r) {
+        if (r < static_cast<int>(index_.port_geo.size())) {
+          mark(index_.port_geo[r], r, true, c.x, c.y);
+        }
+        if (r < static_cast<int>(index_.stbd_geo.size())) {
+          mark(index_.stbd_geo[r], r, false, c.x, c.y);
+        }
+      }
+    }
+  }
+
+  // Rubber-band box while drawing a contact.
+  if (marking_) {
+    QPen pen(QColor(255, 210, 60));
+    pen.setStyle(Qt::DashLine);
+    painter.setPen(pen);
+    painter.setBrush(QColor(255, 210, 60, 40));
+    painter.drawRect(QRectF(mark_start_, mark_cur_).normalized());
+  }
 }
 
 }  // namespace marine_perception_tools

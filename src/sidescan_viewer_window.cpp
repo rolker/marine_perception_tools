@@ -575,6 +575,7 @@ void SidescanViewerWindow::refreshContacts()
       .arg(p.x, 0, 'f', 1).arg(p.y, 0, 'f', 1));
   }
   canvas_->setContacts(markers);
+  waterfall_->setContacts(markers);
 }
 
 void SidescanViewerWindow::updateScrubStep()
