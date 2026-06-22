@@ -35,6 +35,7 @@ class QSpinBox;
 class QProgressBar;
 class QPushButton;
 class QListWidget;
+class QComboBox;
 class QRectF;
 
 namespace marine_perception_tools
@@ -119,6 +120,7 @@ private:
   QProgressBar * progress_ = nullptr;
   QPushButton * mark_button_ = nullptr;
   QListWidget * contact_list_ = nullptr;
+  QComboBox * palette_combo_ = nullptr;
   SidescanWaterfall * waterfall_ = nullptr;
 
   ContactStore contact_store_;

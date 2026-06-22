@@ -19,6 +19,7 @@ find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(geographic_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(marine_acoustic_msgs REQUIRED)
+find_package(marine_colormap REQUIRED)
 find_package(marine_interfaces REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -113,6 +114,7 @@ target_link_libraries(sidescan_target_viewer
   sidescan_core
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Concurrent)
+ament_target_dependencies(sidescan_target_viewer marine_colormap)
 
 install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}

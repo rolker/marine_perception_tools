@@ -14,6 +14,7 @@
 
 #include "sidescan_viewer_window.hpp"
 
+#include <QComboBox>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -37,6 +38,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -46,6 +48,9 @@
 #include "contact_store.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
+#include "marine_colormap/colormap.hpp"
+#include "marine_colormap/palette.hpp"
+#include "marine_colormap/transfer.hpp"
 #include "marine_interfaces/msg/contact.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
@@ -64,7 +69,55 @@ double ping_max_range(const WindowPing & p)
   return slant_range_at(p.amplitudes.size(), p.geometry.sample0, p.geometry.metres_per_sample);
 }
 
-QImage render_coverage(const CoverageRaster & r)
+// Auto colormap scale: low/high percentiles of the window's backscatter, so
+// contrast adapts to the data. Histogram over [0, 1] (amplitudes are already
+// normalized), O(n). Returns the full range if degenerate.
+std::pair<float, float> auto_range(
+  const std::vector<WindowPing> & pings, double lo_pct, double hi_pct)
+{
+  std::array<std::size_t, 256> hist{};
+  std::size_t total = 0;
+  for (const auto & p : pings) {
+    for (float a : p.amplitudes) {
+      hist[static_cast<std::size_t>(std::clamp(static_cast<int>(a * 255.0f), 0, 255))]++;
+      ++total;
+    }
+  }
+  if (total == 0) {return {0.0f, 1.0f};}
+  const auto lo_count = static_cast<std::size_t>(lo_pct * total);
+  const auto hi_count = static_cast<std::size_t>(hi_pct * total);
+  int lo_bin = 0;
+  int hi_bin = 255;
+  std::size_t cum = 0;
+  for (int i = 0; i < 256; ++i) {
+    cum += hist[i]; if (cum >= lo_count) {
+      lo_bin = i; break;
+    }
+  }
+  cum = 0;
+  for (int i = 0; i < 256; ++i) {
+    cum += hist[i]; if (cum >= hi_count) {
+      hi_bin = i; break;
+    }
+  }
+  const float lo = lo_bin / 255.0f;
+  const float hi = hi_bin / 255.0f;
+  return (hi > lo) ? std::pair<float, float>{lo, hi} : std::pair<float, float>{0.0f, 1.0f};
+}
+
+// Map a normalized amplitude through the auto-range + baked colormap LUT.
+QRgb lut_color(float amp, const std::vector<marine_colormap::Rgba8> & lut, float lo, float hi)
+{
+  float t = (hi > lo) ? (amp - lo) / (hi - lo) : amp;
+  t = std::clamp(t, 0.0f, 1.0f);
+  const auto & c = lut[static_cast<std::size_t>(std::clamp(
+      static_cast<int>(t * (lut.size() - 1) + 0.5f), 0, static_cast<int>(lut.size() - 1)))];
+  return qRgba(c.r, c.g, c.b, 255);
+}
+
+QImage render_coverage(
+  const CoverageRaster & r, const std::vector<marine_colormap::Rgba8> & lut,
+  float lo, float hi)
 {
   QImage img(r.width(), r.height(), QImage::Format_ARGB32);
   img.fill(Qt::transparent);
@@ -77,8 +130,7 @@ QImage render_coverage(const CoverageRaster & r)
     for (int col = 0; col < r.width(); ++col) {
       const float a = r.amplitudeAt(col, row);
       if (a < 0.0f) {continue;}  // uncovered -> transparent
-      const int g = std::clamp(static_cast<int>(a * 255.0f + 0.5f), 0, 255);
-      line[col] = qRgba(g, g, g, 255);
+      line[col] = lut_color(a, lut, lo, hi);
     }
   }
   return img;
@@ -90,7 +142,9 @@ QImage render_coverage(const CoverageRaster & r)
 // run newest-at-top (matching the live rqt plugin), so the channel lists are
 // reversed and both align at the newest (top) edge. No georeferencing or slant
 // correction — the raw stacked display.
-QImage build_waterfall(const std::vector<WindowPing> & pings, WaterfallIndex & index)
+QImage build_waterfall(
+  const std::vector<WindowPing> & pings, WaterfallIndex & index,
+  const std::vector<marine_colormap::Rgba8> & lut, float lo, float hi)
 {
   index = WaterfallIndex{};
   std::vector<const WindowPing *> port;
@@ -128,23 +182,20 @@ QImage build_waterfall(const std::vector<WindowPing> & pings, WaterfallIndex & i
     index.stbd_geo.push_back(p->geometry);
   }
 
-  QImage img(width, rows, QImage::Format_Grayscale8);
-  img.fill(0);
-  auto gray = [](float a) {
-      return static_cast<uint8_t>(std::clamp(a * 255.0f + 0.5f, 0.0f, 255.0f));
-    };
+  QImage img(width, rows, QImage::Format_ARGB32);
+  img.fill(qRgba(0, 0, 0, 255));
   for (int r = 0; r < rows; ++r) {
-    uchar * line = img.scanLine(r);
+    QRgb * line = reinterpret_cast<QRgb *>(img.scanLine(r));
     if (r < static_cast<int>(port.size())) {
       const auto & a = port[r]->amplitudes;
       for (std::size_t i = 0; i < a.size() && i < pn; ++i) {
-        line[pn - 1 - i] = gray(a[i]);  // near range -> centre, far -> left edge
+        line[pn - 1 - i] = lut_color(a[i], lut, lo, hi);  // near->centre, far->left
       }
     }
     if (r < static_cast<int>(stbd.size())) {
       const auto & a = stbd[r]->amplitudes;
       for (std::size_t i = 0; i < a.size() && i < sn; ++i) {
-        line[pn + i] = gray(a[i]);      // near range -> centre, far -> right edge
+        line[pn + i] = lut_color(a[i], lut, lo, hi);       // near->centre, far->right
       }
     }
   }
@@ -156,7 +207,7 @@ QImage build_waterfall(const std::vector<WindowPing> & pings, WaterfallIndex & i
 // thread; the caller applies the result on the UI thread.
 SidescanRenderResult render_window(
   std::shared_ptr<SidescanBagSession> session, double head, double total,
-  double win_lo, double win_hi, int max_pings, double res)
+  double win_lo, double win_hi, int max_pings, double res, int palette_index)
 {
   SidescanRenderResult out;
   out.res_m = res;
@@ -170,9 +221,19 @@ SidescanRenderResult render_window(
   out.npings = paint.size();
   if (paint.empty()) {return out;}  // ok, but a null image -> canvas clears
 
+  // Shared colormap (marine_colormap, same as the rqt/rviz/CAMP apps) with an
+  // auto contrast scale from this window's backscatter distribution.
+  const auto [lo, hi] = auto_range(paint, 0.02, 0.98);
+  const std::size_t n_pal = marine_colormap::palette_count();
+  const std::size_t idx = (n_pal > 0) ?
+    static_cast<std::size_t>(std::clamp(palette_index, 0, static_cast<int>(n_pal - 1))) :
+    0;
+  const auto lut = marine_colormap::bake_lut(
+    marine_colormap::palette(idx), marine_colormap::TransferParams{}, 256);
+
   // Uncorrected waterfall + the window's track centre (for the follow-the-playhead
   // recentre) — both from the same pings, so map and waterfall stay in lockstep.
-  out.waterfall = build_waterfall(paint, out.waterfall_index);
+  out.waterfall = build_waterfall(paint, out.waterfall_index, lut, lo, hi);
   double cx = 0.0;
   double cy = 0.0;
   for (const auto & p : paint) {
@@ -211,7 +272,7 @@ SidescanRenderResult render_window(
     paint_ping(raster, p.geometry, p.amplitudes);
   }
 
-  out.image = render_coverage(raster);
+  out.image = render_coverage(raster, lut, lo, hi);
   out.origin_x = min_x;
   out.origin_y = min_y;
   return out;
@@ -271,6 +332,18 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   mark_button_->setCheckable(true);
   mark_button_->setToolTip("Toggle marking: drag a box around a target on the map.");
   crow->addWidget(mark_button_);
+
+  // Shared marine_colormap palette selector (same palettes as the rqt/rviz apps).
+  palette_combo_ = new QComboBox(this);
+  for (const auto & name : marine_colormap::palette_names()) {
+    palette_combo_->addItem(QString::fromStdString(name));
+  }
+  if (const auto vi = marine_colormap::palette_index("viridis")) {
+    palette_combo_->setCurrentIndex(static_cast<int>(*vi));
+  }
+  crow->addWidget(new QLabel("Palette:", this));
+  crow->addWidget(palette_combo_);
+
   crow->addWidget(progress_);
 
   // Geo map (left) beside the uncorrected waterfall (right), user-resizable.
@@ -314,6 +387,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onWindowLengthChanged);
   connect(max_pings_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
     this, &SidescanViewerWindow::onMaxPingsChanged);
+  connect(palette_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {requestRender();});
   connect(mark_button_, &QPushButton::toggled, this, [this](bool on) {
       canvas_->setMarkMode(on);
       waterfall_->setMarkMode(on);
@@ -527,9 +602,11 @@ void SidescanViewerWindow::requestRender()
   auto session = session_;  // keep alive for the worker
   const int max_pings = max_window_pings_;
   const double res = resolution_m_;
+  const int palette = palette_combo_ ? palette_combo_->currentIndex() : 0;
   render_watcher_.setFuture(QtConcurrent::run(
-      [session, head, total, win, max_pings, res]() {
-        return render_window(session, head, total, win.lo, win.hi, max_pings, res);
+      [session, head, total, win, max_pings, res, palette]() {
+        return render_window(
+          session, head, total, win.lo, win.hi, max_pings, res, palette);
       }));
 }
 
