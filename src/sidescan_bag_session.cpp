@@ -59,6 +59,50 @@ double yaw_from_quaternion(double x, double y, double z, double w)
   return std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
 }
 
+// One sample of the boat pose (world<-base) plus along-track cumulative distance.
+struct BasePoseSample
+{
+  double t = 0.0;
+  double x = 0.0;
+  double y = 0.0;
+  double yaw = 0.0;
+  double cumdist = 0.0;
+};
+
+// Interpolate the boat pose at time `t` from the coarse sample table. Returns false
+// when `t` is outside the table's time span or the bracketing samples straddle a
+// gap larger than `max_gap` (a TF dropout we shouldn't interpolate across). Yaw is
+// interpolated by the shortest angle.
+bool interp_base_pose(
+  const std::vector<BasePoseSample> & tbl, double t, double max_gap, BasePoseSample & out)
+{
+  if (tbl.empty()) {return false;}
+  if (tbl.size() == 1) {
+    if (std::abs(tbl.front().t - t) > max_gap) {return false;}
+    out = tbl.front();
+    return true;
+  }
+  if (t < tbl.front().t || t > tbl.back().t) {return false;}
+  const auto it = std::upper_bound(
+    tbl.begin(), tbl.end(), t,
+    [](double s, const BasePoseSample & e) {return s < e.t;});
+  if (it == tbl.begin()) {out = tbl.front(); return true;}
+  const BasePoseSample & b = *it;
+  const BasePoseSample & a = *(it - 1);
+  const double gap = b.t - a.t;
+  if (gap > max_gap) {return false;}
+  const double f = (gap > 1e-9) ? (t - a.t) / gap : 0.0;
+  double dyaw = b.yaw - a.yaw;
+  while (dyaw > M_PI) {dyaw -= 2.0 * M_PI;}
+  while (dyaw < -M_PI) {dyaw += 2.0 * M_PI;}
+  out.t = t;
+  out.x = a.x + (b.x - a.x) * f;
+  out.y = a.y + (b.y - a.y) * f;
+  out.yaw = a.yaw + dyaw * f;
+  out.cumdist = a.cumdist + (b.cumdist - a.cumdist) * f;
+  return true;
+}
+
 // True when this host is big-endian (runtime check; std::endian is C++20).
 bool host_is_big_endian()
 {
@@ -153,14 +197,10 @@ SidescanBagSession::SidescanBagSession(
       std::fprintf(stderr, "[profile] %-22s %8.0f ms\n", label, ms);
     };
 
-  // ---- Pass 1: bounds, TF cache, channel presence. ----
+  // ---- Open + bounds + channel presence. ----
   rosbag2_cpp::Reader reader;
   reader.open(bag_uri);
   const auto & meta = reader.get_metadata();
-  const double duration_s = std::chrono::duration_cast<std::chrono::duration<double>>(
-    meta.duration).count();
-  tf_buffer_ = std::make_unique<tf2::BufferCore>(tf2::durationFromSec(duration_s + 60.0));
-
   std::map<std::string, std::size_t> counts;
   for (const auto & t : meta.topics_with_message_count) {
     counts[t.topic_metadata.name] = t.message_count;
@@ -175,46 +215,76 @@ SidescanBagSession::SidescanBagSession(
       "bag has no Garmin sidescan ping topics (sonar_image_{port,starboard,down})");
   }
 
-  while (reader.has_next()) {
-    auto bag_msg = reader.read_next();
-    const std::string & topic = bag_msg->topic_name;
-    if (topic == "/tf" || topic == "/tf_static") {
-      // A single corrupt /tf message is skipped, not fatal (mirrors bag_loader).
-      try {
-        auto tfm = deserialize<tf2_msgs::msg::TFMessage>(bag_msg);
-        const bool is_static = (topic == "/tf_static");
-        for (const auto & tr : tfm.transforms) {
-          tf_buffer_->setTransform(tr, "bag", is_static);
-        }
-      } catch (const std::exception &) {
-        ++decode_errors_;
-      }
-    }
-  }
+  // BOUNDED tf cache. A full-bag cache makes each lookupTransform pay for the whole
+  // recording's transform depth, so per-ping pose resolution becomes ~O(n^2) on a
+  // multi-hour survey. Instead keep the cache small and sample the boat pose at a
+  // coarse cadence as we stream in time order, then interpolate per ping.
+  tf_buffer_ = std::make_unique<tf2::BufferCore>(tf2::durationFromSec(opts.tf_cache_s));
 
-  prof("pass1 tf cache");
-
-  // ---- Pass 2: read pings, decode samples. Pose is resolved afterwards, once
-  // the whole TF cache is populated. ----
   std::map<std::string, SidescanChannel> topic_to_channel;
   for (int c = 0; c < kNumSidescanChannels; ++c) {
     topic_to_channel[kSidescanTopics[c]] = static_cast<SidescanChannel>(c);
   }
 
-  // The driver's bottom-tracked nadir depth (stamp_s, height-above-bottom m),
-  // collected in bag order, the authoritative altitude source. `down_estimates`
-  // is the amplitude-derived fallback (stamp_s, altitude), computed transiently
-  // here from the down channel so no sample data needs to be retained.
+  // The driver's bottom-tracked nadir depth (stamp_s, height-above-bottom m), the
+  // authoritative altitude source. `down_estimates` is the amplitude-derived
+  // fallback, computed transiently from the down channel (no samples retained).
   std::vector<std::pair<double, double>> nadir_depths;
   std::vector<std::pair<double, double>> down_estimates;
 
-  rosbag2_cpp::Reader reader2;
-  reader2.open(bag_uri);
-  while (reader2.has_next()) {
-    auto bag_msg = reader2.read_next();
+  // Coarse boat-pose table (world<-base), sampled ~1/pose_sample_dt_s as the TF
+  // frontier advances. The lookup lags the frontier by `kMargin` so it always has
+  // transforms bracketing the query time (no extrapolation throw).
+  std::vector<BasePoseSample> base_table;
+  double frontier_s = -std::numeric_limits<double>::infinity();
+  double last_sample_s = -std::numeric_limits<double>::infinity();
+  const double sample_dt = std::max(0.01, opts.pose_sample_dt_s);
+  constexpr double kMargin = 0.1;
+
+  // ---- Single pass: stream the bag in order. ----
+  while (reader.has_next()) {
+    auto bag_msg = reader.read_next();
     // One unreadable message (corrupt/truncated) is skipped + counted, not fatal.
     try {
-      if (bag_msg->topic_name == kNadirDepthTopic) {
+      const std::string & topic = bag_msg->topic_name;
+      if (topic == "/tf" || topic == "/tf_static") {
+        auto tfm = deserialize<tf2_msgs::msg::TFMessage>(bag_msg);
+        const bool is_static = (topic == "/tf_static");
+        for (const auto & tr : tfm.transforms) {
+          tf_buffer_->setTransform(tr, "bag", is_static);
+          if (!is_static) {
+            frontier_s = std::max(
+              frontier_s, tr.header.stamp.sec + tr.header.stamp.nanosec * 1e-9);
+          }
+        }
+        // Sample the boat pose at the coarse cadence (lagging the frontier).
+        const double sample_t = frontier_s - kMargin;
+        if (std::isfinite(sample_t) && sample_t - last_sample_s >= sample_dt) {
+          const auto tp = tf2::TimePoint(
+            std::chrono::nanoseconds(static_cast<int64_t>(sample_t * 1e9)));
+          try {
+            const auto tf =
+              tf_buffer_->lookupTransform(opts.world_frame, opts.base_frame, tp);
+            const auto & tr = tf.transform.translation;
+            const auto & q = tf.transform.rotation;
+            BasePoseSample s;
+            s.t = sample_t;
+            s.x = tr.x;
+            s.y = tr.y;
+            s.yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w);
+            base_table.push_back(s);
+            last_sample_s = sample_t;
+            if (!has_geo_reference_) {
+              has_geo_reference_ =
+                tf_buffer_->canTransform(opts.geo_frame, opts.world_frame, tp);
+            }
+          } catch (const tf2::TransformException &) {
+            // Chain not resolvable at this time yet; retry on the next cadence tick.
+          }
+        }
+        continue;
+      }
+      if (topic == kNadirDepthTopic) {
         auto rng = deserialize<sensor_msgs::msg::Range>(bag_msg);
         if (std::isfinite(rng.range)) {
           const double t = rng.header.stamp.sec + rng.header.stamp.nanosec * 1e-9;
@@ -222,7 +292,7 @@ SidescanBagSession::SidescanBagSession(
         }
         continue;
       }
-      auto ch_it = topic_to_channel.find(bag_msg->topic_name);
+      auto ch_it = topic_to_channel.find(topic);
       if (ch_it == topic_to_channel.end()) {continue;}
 
       auto img = deserialize<marine_acoustic_msgs::msg::RawSonarImage>(bag_msg);
@@ -257,50 +327,32 @@ SidescanBagSession::SidescanBagSession(
     pings_.begin(), pings_.end(),
     [](const SidescanPing & a, const SidescanPing & b) {return a.stamp_s < b.stamp_s;});
 
-  prof("pass2 read pings");
+  prof("single pass read");
 
-  // ---- Resolve per-ping sensor pose + along-track distance. ----
-  bool have_prev_base = false;
-  double prev_bx = 0.0;
-  double prev_by = 0.0;
-  double cumulative = 0.0;
+  // ---- Resolve per-ping pose by interpolating the coarse boat-pose table. ----
+  // Heading is the boat heading; the channel's port/starboard sign places the
+  // swath. No per-ping TF lookup (the expensive part is gone). First accumulate
+  // along-track distance along the table.
+  for (std::size_t i = 0; i < base_table.size(); ++i) {
+    base_table[i].cumdist = (i == 0) ? 0.0 :
+      base_table[i - 1].cumdist +
+      std::hypot(base_table[i].x - base_table[i - 1].x, base_table[i].y - base_table[i - 1].y);
+  }
+  total_distance_m_ = base_table.empty() ? 0.0 : base_table.back().cumdist;
+
   for (auto & ping : pings_) {
-    const auto stamp = tf2::TimePoint(
-      std::chrono::nanoseconds(static_cast<int64_t>(ping.stamp_s * 1e9)));
-    const std::string sensor_frame =
-      kSidescanSensorFrames[static_cast<int>(ping.channel)];
-
-    // Sensor pose (projection origin) in the world plane.
-    try {
-      const auto tf = tf_buffer_->lookupTransform(opts.world_frame, sensor_frame, stamp);
-      const auto & t = tf.transform.translation;
-      const auto & q = tf.transform.rotation;
-      ping.geometry.sensor_x = t.x;
-      ping.geometry.sensor_y = t.y;
-      ping.geometry.yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w);
+    BasePoseSample bp;
+    if (interp_base_pose(base_table, ping.stamp_s, opts.pose_max_gap_s, bp)) {
+      ping.geometry.sensor_x = bp.x;
+      ping.geometry.sensor_y = bp.y;
+      ping.geometry.yaw = bp.yaw;
+      ping.cumulative_distance_m = bp.cumdist;
       ping.has_pose = true;
       ++poses_resolved_;
-    } catch (const tf2::TransformException &) {
+    } else {
       ++poses_skipped_;
     }
-
-    // Along-track distance from the boat (base_link), shared across channels.
-    try {
-      const auto tf = tf_buffer_->lookupTransform(opts.world_frame, opts.base_frame, stamp);
-      const double bx = tf.transform.translation.x;
-      const double by = tf.transform.translation.y;
-      if (have_prev_base) {
-        cumulative += std::hypot(bx - prev_bx, by - prev_by);
-      }
-      prev_bx = bx;
-      prev_by = by;
-      have_prev_base = true;
-    } catch (const tf2::TransformException &) {
-      // No base pose at this stamp — carry the running distance forward unchanged.
-    }
-    ping.cumulative_distance_m = cumulative;
   }
-  total_distance_m_ = cumulative;
 
   prof("pose+distance resolve");
 
@@ -347,15 +399,9 @@ SidescanBagSession::SidescanBagSession(
     }
   }
 
-  prof("altitude assign");
-
-  // ---- Geo-export readiness: earth -> world resolves at the mid-recording stamp. ----
-  if (!pings_.empty()) {
-    const auto mid = tf2::TimePoint(std::chrono::nanoseconds(
-        static_cast<int64_t>(pings_[pings_.size() / 2].stamp_s * 1e9)));
-    has_geo_reference_ = tf_buffer_->canTransform(opts.geo_frame, opts.world_frame, mid);
-  }
-  prof("geo + done");
+  // Geo-export readiness (earth -> world) was probed during the streaming pass,
+  // while the relevant transforms were still in the bounded cache.
+  prof("altitude assign + done");
 }
 
 SidescanBagSession::~SidescanBagSession() = default;

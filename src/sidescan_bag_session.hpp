@@ -32,18 +32,14 @@ namespace marine_perception_tools
 {
 
 // The three Garmin sidescan channels, in SidescanChannel order (Port, Starboard,
-// Down). `kSidescanTopics` are the recorded topics; `kSidescanSensorFrames` are
-// the TF frames each ping's pose is resolved in. Verified against
-// bizzyboat_sonar/2026-06-18T19-39-06+00-00.
+// Down). `kSidescanTopics` are the recorded ping topics. Verified against
+// bizzyboat_sonar/2026-06-18T19-39-06+00-00. Pose comes from the boat (base_frame)
+// heading + the channel's port/starboard sign, not a per-sensor-frame TF lookup.
 inline constexpr int kNumSidescanChannels = 3;
 inline constexpr std::array<const char *, kNumSidescanChannels> kSidescanTopics{
   "/bizzy/sensors/sidescan/garmin_sidescan/sonar_image_port",
   "/bizzy/sensors/sidescan/garmin_sidescan/sonar_image_starboard",
   "/bizzy/sensors/sidescan/garmin_sidescan/sonar_image_down"};
-inline constexpr std::array<const char *, kNumSidescanChannels> kSidescanSensorFrames{
-  "bizzy/garmin_sidescan_port",
-  "bizzy/garmin_sidescan_starboard",
-  "bizzy/garmin_sidescan_down"};
 
 // The Garmin driver's bottom-tracked nadir depth (sensor_msgs/Range, height above
 // bottom). This is the authoritative altitude source; the amplitude-based
@@ -85,10 +81,16 @@ struct WindowPing
 struct SidescanBagOptions
 {
   std::string world_frame = "bizzy/map";     // local-tangent ENU render frame
-  std::string base_frame = "bizzy/base_link";  // along-track distance reference
+  std::string base_frame = "bizzy/base_link";  // boat pose / heading reference
   std::string geo_frame = "earth";           // earth->world presence => geo export OK
   double altitude_threshold_frac = 0.5;      // nadir first-return detection level
   double altitude_max_dt_s = 2.0;            // max time gap to trust a nadir depth
+  // Pose resolution is O(n_pings) only via a coarse boat-pose table sampled with a
+  // BOUNDED TF cache, then interpolated per ping (no per-ping TF lookup). This is
+  // what keeps load time linear on multi-hour surveys.
+  double tf_cache_s = 30.0;                  // bounded tf2 cache window
+  double pose_sample_dt_s = 0.2;             // boat-pose sampling cadence (~5 Hz)
+  double pose_max_gap_s = 2.0;               // don't interpolate a ping across a bigger gap
 };
 
 // Opens a sidescan bag once and builds a lightweight in-memory index: the full TF
