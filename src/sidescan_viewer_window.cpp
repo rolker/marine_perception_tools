@@ -58,16 +58,72 @@ QImage render_coverage(const CoverageRaster & r)
   QImage img(r.width(), r.height(), QImage::Format_ARGB32);
   img.fill(Qt::transparent);
   for (int row = 0; row < r.height(); ++row) {
-    // Raster row 0 = south (min north); image row 0 = north edge (top).
+    // Raster row 0 = south (min north); image row 0 = north edge (top). Write the
+    // scanline directly (setPixel per cell is ~100x slower and was a scrub-time
+    // bottleneck).
     const int img_row = r.height() - 1 - row;
+    QRgb * line = reinterpret_cast<QRgb *>(img.scanLine(img_row));
     for (int col = 0; col < r.width(); ++col) {
       const float a = r.amplitudeAt(col, row);
       if (a < 0.0f) {continue;}  // uncovered -> transparent
       const int g = std::clamp(static_cast<int>(a * 255.0f + 0.5f), 0, 255);
-      img.setPixel(col, img_row, qRgba(g, g, g, 255));
+      line[col] = qRgba(g, g, g, 255);
     }
   }
   return img;
+}
+
+// Build the coverage render for a distance window on a worker thread (readWindow +
+// paint + rasterize). Touches no widgets, so it is safe off the UI thread; the
+// caller applies the result on the UI thread.
+SidescanRenderResult render_window(
+  std::shared_ptr<SidescanBagSession> session, double head, double total,
+  double win_lo, double win_hi, int max_pings, double res)
+{
+  SidescanRenderResult out;
+  out.res_m = res;
+  out.head_m = head;
+  out.total_m = total;
+  out.win_lo = win_lo;
+  out.win_hi = win_hi;
+  out.ok = true;
+
+  const std::vector<WindowPing> paint = session->readWindow(win_lo, win_hi, max_pings);
+  out.npings = paint.size();
+  if (paint.empty()) {return out;}  // ok, but a null image -> canvas clears
+
+  double min_x = paint.front().geometry.sensor_x;
+  double max_x = min_x;
+  double min_y = paint.front().geometry.sensor_y;
+  double max_y = min_y;
+  double pad = 0.0;
+  for (const auto & p : paint) {
+    min_x = std::min(min_x, p.geometry.sensor_x);
+    max_x = std::max(max_x, p.geometry.sensor_x);
+    min_y = std::min(min_y, p.geometry.sensor_y);
+    max_y = std::max(max_y, p.geometry.sensor_y);
+    pad = std::max(pad, ping_max_range(p));
+  }
+  min_x -= pad;
+  max_x += pad;
+  min_y -= pad;
+  max_y += pad;
+
+  int w = static_cast<int>(std::ceil((max_x - min_x) / res)) + 1;
+  int h = static_cast<int>(std::ceil((max_y - min_y) / res)) + 1;
+  constexpr int kMaxDim = 4000;
+  w = std::clamp(w, 1, kMaxDim);
+  h = std::clamp(h, 1, kMaxDim);
+
+  CoverageRaster raster(min_x, min_y, res, w, h);
+  for (const auto & p : paint) {
+    paint_ping(raster, p.geometry, p.amplitudes);
+  }
+
+  out.image = render_coverage(raster);
+  out.origin_x = min_x;
+  out.origin_y = min_y;
+  return out;
 }
 
 }  // namespace
@@ -119,6 +175,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   connect(&load_watcher_, &QFutureWatcher<SidescanLoadResult>::finished,
     this, &SidescanViewerWindow::onLoadFinished);
+  connect(&render_watcher_, &QFutureWatcher<SidescanRenderResult>::finished,
+    this, &SidescanViewerWindow::onRenderFinished);
   connect(scrub_, &QSlider::valueChanged, this, &SidescanViewerWindow::onScrubChanged);
   connect(grid_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, &SidescanViewerWindow::onGridSpacingChanged);
@@ -170,11 +228,13 @@ void SidescanViewerWindow::onLoadFinished()
     if (p.has_pose) {track.emplace_back(p.geometry.sensor_x, p.geometry.sensor_y);}
   }
   canvas_->setTrack(track);
+  canvas_->resetView();  // fit to the track now; coverage fills in asynchronously
 
   scrub_->setEnabled(true);
-  scrub_->setValue(scrub_->maximum());  // start at the end of the track
-  renderCurrentWindow();
-  canvas_->resetView();
+  scrub_->blockSignals(true);
+  scrub_->setValue(scrub_->minimum());  // start at the beginning of the track
+  scrub_->blockSignals(false);
+  requestRender();
 
   status_->setText(QString(
       "%1 pings (%2 port, %3 stbd, %4 down) • %5 m track • alt: %6 • geo: %7")
@@ -189,7 +249,7 @@ void SidescanViewerWindow::onLoadFinished()
 
 void SidescanViewerWindow::onScrubChanged()
 {
-  renderCurrentWindow();
+  requestRender();
 }
 
 void SidescanViewerWindow::onGridSpacingChanged(double metres)
@@ -200,12 +260,18 @@ void SidescanViewerWindow::onGridSpacingChanged(double metres)
 void SidescanViewerWindow::onWindowLengthChanged(double metres)
 {
   window_len_m_ = metres;
-  renderCurrentWindow();
+  requestRender();
 }
 
-void SidescanViewerWindow::renderCurrentWindow()
+void SidescanViewerWindow::requestRender()
 {
   if (!session_) {return;}
+  // Coalesce: if a render is already running, flag a pending one and re-launch on
+  // finish with the latest scrub position (so a drag never queues a backlog).
+  if (rendering_) {
+    render_pending_ = true;
+    return;
+  }
   const double total = session_->totalDistance();
   const double frac = (scrub_->maximum() > 0) ?
     static_cast<double>(scrub_->value()) / scrub_->maximum() :
@@ -213,54 +279,33 @@ void SidescanViewerWindow::renderCurrentWindow()
   const double head = frac * total;
   const DistanceWindow win = distance_window(head, window_len_m_, total);
 
-  // Re-read the window's port+stbd sample data from the bag (stationary-capped).
-  // The resident index holds no samples, so this bounds memory to the window.
-  const std::vector<WindowPing> paint =
-    session_->readWindow(win.lo, win.hi, max_window_pings_);
+  rendering_ = true;
+  auto session = session_;  // keep alive for the worker
+  const int max_pings = max_window_pings_;
+  const double res = resolution_m_;
+  render_watcher_.setFuture(QtConcurrent::run(
+      [session, head, total, win, max_pings, res]() {
+        return render_window(session, head, total, win.lo, win.hi, max_pings, res);
+      }));
+}
 
-  if (paint.empty()) {
-    canvas_->setCoverage(QImage(), 0.0, 0.0, resolution_m_);
-    return;
-  }
-
-  // Bounding box of the painted swath: sensor positions padded by max ground range.
-  double min_x = paint.front().geometry.sensor_x;
-  double max_x = min_x;
-  double min_y = paint.front().geometry.sensor_y;
-  double max_y = min_y;
-  double pad = 0.0;
-  for (const auto & p : paint) {
-    min_x = std::min(min_x, p.geometry.sensor_x);
-    max_x = std::max(max_x, p.geometry.sensor_x);
-    min_y = std::min(min_y, p.geometry.sensor_y);
-    max_y = std::max(max_y, p.geometry.sensor_y);
-    pad = std::max(pad, ping_max_range(p));
-  }
-  min_x -= pad;
-  max_x += pad;
-  min_y -= pad;
-  max_y += pad;
-
-  // Size the raster; cap dimensions so a huge extent can't allocate unboundedly.
-  int w = static_cast<int>(std::ceil((max_x - min_x) / resolution_m_)) + 1;
-  int h = static_cast<int>(std::ceil((max_y - min_y) / resolution_m_)) + 1;
-  constexpr int kMaxDim = 4000;
-  w = std::clamp(w, 1, kMaxDim);
-  h = std::clamp(h, 1, kMaxDim);
-
-  CoverageRaster raster(min_x, min_y, resolution_m_, w, h);
-  for (const auto & p : paint) {
-    paint_ping(raster, p.geometry, p.amplitudes);
-  }
-
-  canvas_->setCoverage(render_coverage(raster), min_x, min_y, resolution_m_);
-
+void SidescanViewerWindow::onRenderFinished()
+{
+  rendering_ = false;
+  const SidescanRenderResult r = render_watcher_.result();
+  canvas_->setCoverage(r.image, r.origin_x, r.origin_y, r.res_m);
   status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted")
-    .arg(head, 0, 'f', 1)
-    .arg(total, 0, 'f', 1)
-    .arg(win.lo, 0, 'f', 1)
-    .arg(win.hi, 0, 'f', 1)
-    .arg(paint.size()));
+    .arg(r.head_m, 0, 'f', 1)
+    .arg(r.total_m, 0, 'f', 1)
+    .arg(r.win_lo, 0, 'f', 1)
+    .arg(r.win_hi, 0, 'f', 1)
+    .arg(r.npings));
+
+  // A scrub arrived while we were rendering — render once more with the latest.
+  if (render_pending_) {
+    render_pending_ = false;
+    requestRender();
+  }
 }
 
 }  // namespace marine_perception_tools

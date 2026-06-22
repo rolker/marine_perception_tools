@@ -18,6 +18,7 @@
 // the runnable end-to-end check for PR1 against a real bag, the sidescan analogue
 // of sea_surface_tuner's `--probe`.
 
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <string>
@@ -67,7 +68,7 @@ int main(int argc, char ** argv)
 
     // Re-read the first 50 m window's samples and project a sample, exercising
     // the windowed read path end-to-end.
-    const auto win = session.readWindow(0.0, 50.0);
+    const auto win = session.readWindow(0.0, 50.0, 600);
     if (!win.empty()) {
       const auto & p = win.front();
       const std::size_t mid = p.amplitudes.size() / 2;
@@ -78,6 +79,23 @@ int main(int argc, char ** argv)
         win.size(), channel_name(p.channel), p.amplitudes.size(),
         p.geometry.altitude, mid, gp.ground_range, gp.x, gp.y, gp.valid);
     }
+
+    // Time a window read at each end of the track — this is the per-scrub cost on
+    // the UI thread. An end-of-track read that is far slower than a start read
+    // means seek() is not repositioning (it falls back to a scan from the start).
+    const double total = session.totalDistance();
+    auto time_window = [&session](double lo, double hi) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto w = session.readWindow(lo, hi, 600);
+        const auto t1 = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        return std::make_pair(w.size(), ms);
+      };
+    const auto [n_start, ms_start] = time_window(0.0, 100.0);
+    const auto [n_end, ms_end] = time_window(total - 100.0, total);
+    std::printf("readWindow timing: start[0,100]=%.0f ms (%zu pings), "
+      "end[%.0f,%.0f]=%.0f ms (%zu pings)\n",
+      ms_start, n_start, total - 100.0, total, ms_end, n_end);
     return 0;
   } catch (const std::exception & e) {
     std::fprintf(stderr, "error: %s\n", e.what());

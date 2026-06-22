@@ -16,9 +16,11 @@
 #define SIDESCAN_VIEWER_WINDOW_HPP_
 
 #include <QFutureWatcher>
+#include <QImage>
 #include <QMainWindow>
 #include <QString>
 
+#include <cstddef>
 #include <memory>
 #include <string>
 
@@ -41,6 +43,23 @@ struct SidescanLoadResult
   QString error;
 };
 
+// Result of an off-thread window render: the painted coverage image + its map
+// extent. Built on a worker thread (readWindow + paint + rasterize) so scrubbing
+// never blocks the UI; only the final setCoverage runs on the UI thread.
+struct SidescanRenderResult
+{
+  bool ok = false;
+  QImage image;
+  double origin_x = 0.0;
+  double origin_y = 0.0;
+  double res_m = 0.25;
+  std::size_t npings = 0;
+  double head_m = 0.0;
+  double total_m = 0.0;
+  double win_lo = 0.0;
+  double win_hi = 0.0;
+};
+
 // Offline sidescan viewer main window: File->Open a bag, then scrub along
 // distance travelled. A rolling ~window of pings is painted (quality-wins) into a
 // coverage raster at true map position and shown north-up on the canvas, with the
@@ -59,12 +78,16 @@ public:
 private slots:
   void onOpenBag();
   void onLoadFinished();
+  void onRenderFinished();
   void onScrubChanged();
   void onGridSpacingChanged(double metres);
   void onWindowLengthChanged(double metres);
 
 private:
-  void renderCurrentWindow();
+  // Launch a window render on a worker thread, coalescing rapid scrub changes:
+  // if a render is in flight, just flag a pending one and re-launch on finish
+  // with the latest scrub position.
+  void requestRender();
 
   SidescanCanvas * canvas_ = nullptr;
   QSlider * scrub_ = nullptr;
@@ -73,7 +96,10 @@ private:
   QLabel * status_ = nullptr;
 
   QFutureWatcher<SidescanLoadResult> load_watcher_;
+  QFutureWatcher<SidescanRenderResult> render_watcher_;
   bool loading_ = false;
+  bool rendering_ = false;
+  bool render_pending_ = false;
 
   std::shared_ptr<SidescanBagSession> session_;
   double window_len_m_ = 100.0;
