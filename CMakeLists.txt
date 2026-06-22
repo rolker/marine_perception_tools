@@ -97,7 +97,17 @@ ament_target_dependencies(sidescan_core ${SIDESCAN_CORE_DEPS})
 add_executable(sidescan_probe src/sidescan_probe.cpp)
 target_link_libraries(sidescan_probe sidescan_core)
 
-install(TARGETS sea_surface_tuner sidescan_probe
+# Qt app: offline georeferenced sidescan viewer + target tracker (issue #7).
+add_executable(sidescan_target_viewer
+  src/sidescan_viewer_main.cpp
+  src/sidescan_viewer_window.cpp
+  src/sidescan_canvas.cpp
+)
+target_link_libraries(sidescan_target_viewer
+  sidescan_core
+  Qt${QT_VERSION_MAJOR}::Widgets)
+
+install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
 )
 

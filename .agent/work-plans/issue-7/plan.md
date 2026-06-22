@@ -131,9 +131,19 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
   `grid_map_core` — deterministic to unit-test, no Eigen-heavy dep in the test, and the
   paint/quality-wins/coverage logic is the part we most want under test. Reversible if
   we later want grid_map interop. Quality metric is a range proxy (`range_quality`),
-  a placeholder for a grazing-angle metric. **Remaining PR2:** the Qt canvas
-  (`QGraphicsView` map-frame render, measuring grid, zoom, distance scrubber wiring) —
-  needs the visual-verification loop.
+  a placeholder for a grazing-angle metric.
+- **PR2 (Qt canvas) landed — first runnable `sidescan_target_viewer`.**
+  `sidescan_canvas.{hpp,cpp}` (north-up custom-QWidget map render in `bizzy/map` metres:
+  coverage QImage at true position + boat-track polyline + measuring grid; wheel zoom
+  about cursor, drag pan), `sidescan_viewer_window.{hpp,cpp}` (File→Open bag, distance
+  scrubber, grid-spacing + window-length spins, status line), `sidescan_viewer_main.cpp`.
+  Per scrub it paints the rolling window's port+stbd pings (stationary-capped) into a
+  bbox-sized `CoverageRaster`, renders grayscale, shows it at map position. Verified:
+  builds, 180 tests pass, lint clean, **headless offscreen run on the real bag loaded +
+  rendered + ran the event loop ~18 s, no crash**. Awaiting Roland's visual check.
+  Placeholders: synchronous bag load (async/QtConcurrent is a follow-up like the tuner);
+  grayscale render (marine_colormap shader later). **Remaining:** visual tuning →
+  contact marking + Contact store + cross-pass overlay (PR3).
 
 ## Estimated Scope
 
