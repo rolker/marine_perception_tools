@@ -23,9 +23,9 @@ namespace marine_perception_tools
 
 // The classic uncorrected (slant-range) sidescan waterfall for the current scrub
 // window: each row is a ping cycle, port samples on the left (far range outward)
-// and starboard on the right, intensity = backscatter. No georeferencing or
-// slant-to-ground correction — the raw display analysts read. Displays the image
-// stretched to fill the widget.
+// and starboard on the right, intensity = backscatter, newest ping at the top
+// (matching the live rqt waterfall plugin). No georeferencing or slant-to-ground
+// correction — the raw display analysts read. Stretched to fill the widget.
 class SidescanWaterfall : public QWidget
 {
   Q_OBJECT

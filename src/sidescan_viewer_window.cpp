@@ -79,8 +79,10 @@ QImage render_coverage(const CoverageRaster & r)
 
 // The uncorrected slant-range waterfall for a window: one row per ping cycle,
 // port samples on the left (near range at centre, far range outward), starboard on
-// the right. Port/starboard pings are paired by index in along-track order. No
-// georeferencing or slant correction — the raw stacked display.
+// the right. Port/starboard pings are paired by index in along-track order. Rows
+// run newest-at-top (matching the live rqt plugin), so the channel lists are
+// reversed and both align at the newest (top) edge. No georeferencing or slant
+// correction — the raw stacked display.
 QImage build_waterfall(const std::vector<WindowPing> & pings)
 {
   std::vector<const WindowPing *> port;
@@ -90,6 +92,8 @@ QImage build_waterfall(const std::vector<WindowPing> & pings)
       port.push_back(&p);
     } else if (p.channel == SidescanChannel::Starboard) {stbd.push_back(&p);}
   }
+  std::reverse(port.begin(), port.end());   // newest first -> top row
+  std::reverse(stbd.begin(), stbd.end());
   const int rows = static_cast<int>(std::max(port.size(), stbd.size()));
   if (rows == 0) {return QImage();}
   std::size_t pn = 0;
