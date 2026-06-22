@@ -23,6 +23,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPointF>
+#include <QProgressBar>
 #include <QSlider>
 #include <QString>
 #include <QtConcurrent>
@@ -151,6 +152,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   status_ = new QLabel("Open a bag to begin (File → Open Bag).", this);
 
+  // Indeterminate "busy" bar shown only while a bag loads off-thread.
+  progress_ = new QProgressBar(this);
+  progress_->setRange(0, 0);
+  progress_->setTextVisible(false);
+  progress_->setMaximumWidth(160);
+  progress_->setVisible(false);
+
   auto * controls = new QWidget(this);
   auto * crow = new QHBoxLayout(controls);
   crow->addWidget(new QLabel("Distance:", this));
@@ -159,6 +167,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   crow->addWidget(grid_spin_);
   crow->addWidget(new QLabel("Window:", this));
   crow->addWidget(window_spin_);
+  crow->addWidget(progress_);
 
   auto * central = new QWidget(this);
   auto * col = new QVBoxLayout(central);
@@ -195,9 +204,12 @@ void SidescanViewerWindow::onOpenBag()
 
 void SidescanViewerWindow::openBag(const std::string & bag_uri)
 {
-  if (loading_) {return;}  // a load is already in flight
+  // Opening a new bag while one is still loading replaces it: setFuture() below
+  // makes the watcher track only the newest load, so the stale one's result is
+  // dropped on arrival (its worker runs to completion harmlessly).
   loading_ = true;
   scrub_->setEnabled(false);
+  progress_->setVisible(true);
   status_->setText(QString("Loading %1 …").arg(QString::fromStdString(bag_uri)));
 
   // Read the bag off the UI thread so the window stays responsive (no WM
@@ -214,6 +226,7 @@ void SidescanViewerWindow::openBag(const std::string & bag_uri)
 void SidescanViewerWindow::onLoadFinished()
 {
   loading_ = false;
+  progress_->setVisible(false);
   const SidescanLoadResult result = load_watcher_.result();
   if (!result.session) {
     status_->setText("Open a bag to begin (File → Open Bag).");

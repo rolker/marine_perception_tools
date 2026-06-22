@@ -29,6 +29,7 @@
 class QLabel;
 class QSlider;
 class QDoubleSpinBox;
+class QProgressBar;
 
 namespace marine_perception_tools
 {
@@ -94,6 +95,7 @@ private:
   QDoubleSpinBox * grid_spin_ = nullptr;
   QDoubleSpinBox * window_spin_ = nullptr;
   QLabel * status_ = nullptr;
+  QProgressBar * progress_ = nullptr;
 
   QFutureWatcher<SidescanLoadResult> load_watcher_;
   QFutureWatcher<SidescanRenderResult> render_watcher_;
