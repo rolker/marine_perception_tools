@@ -35,3 +35,20 @@ issue: 7
 - [ ] (suggestion) Contact field completeness: `Contact.msg` documents `existence_probability = 1.0` for human-drawn contacts and `geo_pose` unresolved-when-`latitude==NaN`; plan's marking step (§6) omits both. Set `existence_probability=1.0` and resolve `geo_pose` (don't leave NaN) when boxing a contact — verified against `marine_interfaces/msg/Contact.msg` on main — `plan.md:38`
 - [ ] (suggestion) Stationary-ping cap and "skip fully-covered ping" thresholds are named but unvalued. Expose as constants/params so they're tunable against the real Massabesic bag rather than hardcoded — `plan.md:33,52`
 - [ ] Reuse/ADR alignment is otherwise solid: `BagSession`/`buffer_policy.hpp`/`cv_qt.hpp` names verified real; `tuner_core`+Qt-app split mirrors the actual CMake; `Contact`/`ContactArray` confirmed merged in `marine_interfaces` on main; ADR-0005/0006 (sidescan store) and ADR-0007 (GeoCoder) correctly scoped as non-blocking; GGGS-descope + CDR-store decisions resolved with Roland.
+
+## Implementation
+**Status**: complete (PR1 of 3)
+**When**: 2026-06-22
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+
+**Commit**: `0522f58` on feature/issue-7 (local; not pushed)
+**Scope**: PR1 = sidescan_core ingest + projection.
+- `src/sidescan_geometry.hpp` — pure projection (slant→ground, sample→bizzy/map XY, nadir altitude); 9 gtests, all pass.
+- `src/sidescan_bag_session.{hpp,cpp}` — rosbag2 ingest of RawSonarImage(port/stbd/down)+/tf; per-ping TF pose, along-track distance, nearest-nadir altitude, window-by-distance.
+- `src/sidescan_probe.cpp` — headless end-to-end CLI.
+- CMake: `sidescan_core` lib + `sidescan_probe` exe + `test_sidescan_geometry`; `marine_acoustic_msgs` dep added.
+
+**Verification**: 124 package tests, 0 failures (9 new geometry gtests). cpplint clean; uncrustify clean. Probe on `bizzyboat_sonar/2026-06-18T19-39-06+00-00`: 48 551 pings (port/stbd/down balanced), 676 m track, earth→bizzy/map available, ~24% pings no-TF (early-bag warm-up, expected).
+
+### Open questions
+- [ ] PR2 must tune nadir altitude auto-detect (probe showed implausible ~0.1 m — near-field ringing beats min_gate=1; safe-degrades to flat). Visually verifiable once rendering lands.
