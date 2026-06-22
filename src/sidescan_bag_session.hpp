@@ -142,6 +142,11 @@ public:
   // be exported to geographic coordinates without a datum fallback.
   bool hasGeoReference() const {return has_geo_reference_;}
 
+  // Convert a world (map-frame) point to WGS84 geodetic (lat/lon degrees, altitude
+  // metres) using the captured earth->world transform. Returns false when no geo
+  // reference resolved during load.
+  bool mapToGeo(double x, double y, double & lat_deg, double & lon_deg, double & alt) const;
+
   // True when ping altitudes came from the driver's nadir_depth Range topic;
   // false means the amplitude-based estimator fallback was used (or no altitude
   // source was available at all).
@@ -161,6 +166,16 @@ private:
   std::size_t decode_errors_ = 0;
   bool has_geo_reference_ = false;
   bool used_nadir_depth_ = false;
+
+  // Captured earth<-world transform (geo_frame <- world_frame): ECEF translation +
+  // quaternion, used by mapToGeo(). Valid only when has_geo_reference_.
+  double geo_tx_ = 0.0;
+  double geo_ty_ = 0.0;
+  double geo_tz_ = 0.0;
+  double geo_qx_ = 0.0;
+  double geo_qy_ = 0.0;
+  double geo_qz_ = 0.0;
+  double geo_qw_ = 1.0;
 };
 
 }  // namespace marine_perception_tools

@@ -22,6 +22,8 @@
 
 using marine_perception_tools::SidescanChannel;
 using marine_perception_tools::channel_lateral_sign;
+using marine_perception_tools::ecef_to_geodetic;
+using marine_perception_tools::geodetic_to_ecef;
 using marine_perception_tools::estimate_altitude_from_nadir;
 using marine_perception_tools::ground_range;
 using marine_perception_tools::PingGeometry;
@@ -146,6 +148,25 @@ TEST(SidescanGeometry, EstimateAltitudeFromNadirFirstReturn)
   amps[41] = 0.9f;
   const double alt = estimate_altitude_from_nadir(amps, 0, 0.1, 0.5);
   EXPECT_NEAR(alt, 4.0, kEps);  // 40 samples * 0.1 m
+}
+
+TEST(SidescanGeometry, GeodeticEcefRoundTrip)
+{
+  // A Lake Massabesic-ish point; round-trip should return to within mm.
+  const double lat = 43.0;
+  const double lon = -71.0;
+  const double alt = 52.3;
+  double ex = 0.0;
+  double ey = 0.0;
+  double ez = 0.0;
+  geodetic_to_ecef(lat, lon, alt, ex, ey, ez);
+  double lat2 = 0.0;
+  double lon2 = 0.0;
+  double alt2 = 0.0;
+  ecef_to_geodetic(ex, ey, ez, lat2, lon2, alt2);
+  EXPECT_NEAR(lat2, lat, 1e-7);   // ~1 cm in latitude
+  EXPECT_NEAR(lon2, lon, 1e-7);
+  EXPECT_NEAR(alt2, alt, 1e-3);
 }
 
 TEST(SidescanGeometry, EstimateAltitudeNanWhenNoBottom)

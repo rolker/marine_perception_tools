@@ -159,6 +159,49 @@ inline double estimate_altitude_from_nadir(
   return nan;
 }
 
+// --- WGS84 geodetic <-> ECEF (earth-centred earth-fixed), for resolving a
+// contact's geo_pose from its map-frame position. Pure math, unit-tested. ---
+
+// Geodetic (lat/lon in degrees, altitude in metres) -> ECEF metres.
+inline void geodetic_to_ecef(
+  double lat_deg, double lon_deg, double alt, double & ex, double & ey, double & ez)
+{
+  constexpr double a = 6378137.0;                 // WGS84 semi-major axis
+  constexpr double f = 1.0 / 298.257223563;       // flattening
+  const double e2 = f * (2.0 - f);
+  const double lat = lat_deg * M_PI / 180.0;
+  const double lon = lon_deg * M_PI / 180.0;
+  const double sl = std::sin(lat);
+  const double cl = std::cos(lat);
+  const double n = a / std::sqrt(1.0 - e2 * sl * sl);
+  ex = (n + alt) * cl * std::cos(lon);
+  ey = (n + alt) * cl * std::sin(lon);
+  ez = (n * (1.0 - e2) + alt) * sl;
+}
+
+// ECEF metres -> geodetic (lat/lon in degrees, altitude in metres). Closed-form
+// (Bowring); accurate to well under a millimetre for near-surface points.
+inline void ecef_to_geodetic(
+  double ex, double ey, double ez, double & lat_deg, double & lon_deg, double & alt)
+{
+  constexpr double a = 6378137.0;
+  constexpr double f = 1.0 / 298.257223563;
+  const double b = a * (1.0 - f);
+  const double e2 = f * (2.0 - f);
+  const double ep2 = (a * a - b * b) / (b * b);
+  const double p = std::sqrt(ex * ex + ey * ey);
+  const double th = std::atan2(ez * a, p * b);
+  const double st = std::sin(th);
+  const double ct = std::cos(th);
+  const double lat = std::atan2(
+    ez + ep2 * b * st * st * st, p - e2 * a * ct * ct * ct);
+  const double sl = std::sin(lat);
+  const double n = a / std::sqrt(1.0 - e2 * sl * sl);
+  lon_deg = std::atan2(ey, ex) * 180.0 / M_PI;
+  lat_deg = lat * 180.0 / M_PI;
+  alt = (std::abs(std::cos(lat)) > 1e-12) ? (p / std::cos(lat) - n) : (std::abs(ez) - b);
+}
+
 }  // namespace marine_perception_tools
 
 #endif  // SIDESCAN_GEOMETRY_HPP_

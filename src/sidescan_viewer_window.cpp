@@ -433,8 +433,27 @@ void SidescanViewerWindow::onContactMarked(const QRectF & map_rect)
   const double head = std::clamp(static_cast<double>(scrub_->value()), 0.0,
     session_ ? session_->totalDistance() : 0.0);
   const double stamp_s = session_ ? session_->timeAtDistance(head) : 0.0;
-  contact_store_.add(
-    make_box_contact(pts, id.toStdString(), "sidescan", "bizzy/map", stamp_s));
+  auto contact = make_box_contact(pts, id.toStdString(), "sidescan", "bizzy/map", stamp_s);
+
+  // Resolve geo_pose (lat/lon) from the contact's map-frame centroid when the bag
+  // carried an earth->map reference; leave it unresolved (NaN) otherwise.
+  double lat = 0.0;
+  double lon = 0.0;
+  double alt = 0.0;
+  if (session_ && session_->mapToGeo(
+      contact.kinematics.pose.pose.position.x,
+      contact.kinematics.pose.pose.position.y, lat, lon, alt))
+  {
+    contact.geo_pose.position.latitude = lat;
+    contact.geo_pose.position.longitude = lon;
+    contact.geo_pose.position.altitude = alt;
+    // Orientation unknown for a point pick: all-zero quaternion per Contact.msg.
+    contact.geo_pose.orientation.x = 0.0;
+    contact.geo_pose.orientation.y = 0.0;
+    contact.geo_pose.orientation.z = 0.0;
+    contact.geo_pose.orientation.w = 0.0;
+  }
+  contact_store_.add(contact);
   refreshContacts();
 }
 

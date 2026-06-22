@@ -274,9 +274,20 @@ SidescanBagSession::SidescanBagSession(
             s.yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w);
             base_table.push_back(s);
             last_sample_s = sample_t;
-            if (!has_geo_reference_) {
-              has_geo_reference_ =
-                tf_buffer_->canTransform(opts.geo_frame, opts.world_frame, tp);
+            if (!has_geo_reference_ &&
+              tf_buffer_->canTransform(opts.geo_frame, opts.world_frame, tp))
+            {
+              // Capture earth<-world (ECEF translation + rotation) for mapToGeo().
+              const auto g =
+                tf_buffer_->lookupTransform(opts.geo_frame, opts.world_frame, tp);
+              geo_tx_ = g.transform.translation.x;
+              geo_ty_ = g.transform.translation.y;
+              geo_tz_ = g.transform.translation.z;
+              geo_qx_ = g.transform.rotation.x;
+              geo_qy_ = g.transform.rotation.y;
+              geo_qz_ = g.transform.rotation.z;
+              geo_qw_ = g.transform.rotation.w;
+              has_geo_reference_ = true;
             }
           } catch (const tf2::TransformException &) {
             // Chain not resolvable at this time yet; retry on the next cadence tick.
@@ -428,6 +439,29 @@ std::size_t SidescanBagSession::channelCount(SidescanChannel ch) const
     }
   }
   return n;
+}
+
+bool SidescanBagSession::mapToGeo(
+  double x, double y, double & lat_deg, double & lon_deg, double & alt) const
+{
+  if (!has_geo_reference_) {return false;}
+  // Rotate the map point (x, y, 0) by the earth<-world quaternion and translate to
+  // ECEF, then convert to geodetic.
+  const double qx = geo_qx_;
+  const double qy = geo_qy_;
+  const double qz = geo_qz_;
+  const double qw = geo_qw_;
+  const double r00 = 1.0 - 2.0 * (qy * qy + qz * qz);
+  const double r01 = 2.0 * (qx * qy - qz * qw);
+  const double r10 = 2.0 * (qx * qy + qz * qw);
+  const double r11 = 1.0 - 2.0 * (qx * qx + qz * qz);
+  const double r20 = 2.0 * (qx * qz - qy * qw);
+  const double r21 = 2.0 * (qy * qz + qx * qw);
+  const double ex = geo_tx_ + r00 * x + r01 * y;
+  const double ey = geo_ty_ + r10 * x + r11 * y;
+  const double ez = geo_tz_ + r20 * x + r21 * y;
+  ecef_to_geodetic(ex, ey, ez, lat_deg, lon_deg, alt);
+  return true;
 }
 
 double SidescanBagSession::timeAtDistance(double dist_m) const
