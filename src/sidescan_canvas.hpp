@@ -17,12 +17,25 @@
 
 #include <QImage>
 #include <QPointF>
+#include <QRectF>
+#include <QString>
+#include <QVector>
 #include <QWidget>
 
 #include <vector>
 
 namespace marine_perception_tools
 {
+
+// A contact to draw on the map: centre + box extent (map metres) + label.
+struct ContactMarker
+{
+  double x = 0.0;
+  double y = 0.0;
+  double w = 0.0;
+  double h = 0.0;
+  QString id;
+};
 
 // North-up 2D map view in the bizzy/map ENU plane (metres). Displays a rendered
 // coverage image (painted swath) at its true map position, a boat track polyline,
@@ -53,11 +66,23 @@ public:
   // Fit the current coverage extent (or track) into the widget.
   void resetView();
 
+  // In mark mode, left-drag draws a contact box (instead of panning) and emits
+  // boxMarked() on release.
+  void setMarkMode(bool on);
+
+  // Contacts to overlay (map metres). Drawn wherever they fall in the current view.
+  void setContacts(const QVector<ContactMarker> & contacts);
+
+signals:
+  // A contact box was drawn, in map coordinates (metres).
+  void boxMarked(const QRectF & map_rect);
+
 protected:
   void paintEvent(QPaintEvent * event) override;
   void wheelEvent(QWheelEvent * event) override;
   void mousePressEvent(QMouseEvent * event) override;
   void mouseMoveEvent(QMouseEvent * event) override;
+  void mouseReleaseEvent(QMouseEvent * event) override;
 
 private:
   QPointF mapToScreen(double mx, double my) const;
@@ -77,6 +102,12 @@ private:
   QPointF center_map_{0.0, 0.0};  // map point shown at the widget centre
 
   QPoint last_drag_pos_;
+
+  bool mark_mode_ = false;
+  bool marking_ = false;        // mid box-drag
+  QPoint mark_start_;           // screen px
+  QPoint mark_cur_;             // screen px
+  QVector<ContactMarker> contacts_;
 };
 
 }  // namespace marine_perception_tools

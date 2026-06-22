@@ -24,6 +24,7 @@
 #include <memory>
 #include <string>
 
+#include "contact_store.hpp"
 #include "sidescan_bag_session.hpp"
 
 class QLabel;
@@ -31,6 +32,9 @@ class QSlider;
 class QDoubleSpinBox;
 class QSpinBox;
 class QProgressBar;
+class QPushButton;
+class QListWidget;
+class QRectF;
 
 namespace marine_perception_tools
 {
@@ -90,8 +94,12 @@ private slots:
   void onGridSpacingChanged(double metres);
   void onWindowLengthChanged(double metres);
   void onMaxPingsChanged(int max_pings);
+  void onContactMarked(const QRectF & map_rect);
+  void onSaveContacts();
+  void onLoadContacts();
 
 private:
+  void refreshContacts();   // push the store to the map overlay + the list
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
   // if a render is in flight, just flag a pending one and re-launch on finish
   // with the latest scrub position.
@@ -108,7 +116,12 @@ private:
   QSpinBox * max_pings_spin_ = nullptr;
   QLabel * status_ = nullptr;
   QProgressBar * progress_ = nullptr;
+  QPushButton * mark_button_ = nullptr;
+  QListWidget * contact_list_ = nullptr;
   SidescanWaterfall * waterfall_ = nullptr;
+
+  ContactStore contact_store_;
+  int contact_counter_ = 0;
 
   QFutureWatcher<SidescanLoadResult> load_watcher_;
   QFutureWatcher<SidescanRenderResult> render_watcher_;

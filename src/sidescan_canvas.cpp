@@ -67,6 +67,18 @@ void SidescanCanvas::setCenter(double map_x, double map_y)
   update();
 }
 
+void SidescanCanvas::setMarkMode(bool on)
+{
+  mark_mode_ = on;
+  setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
+}
+
+void SidescanCanvas::setContacts(const QVector<ContactMarker> & contacts)
+{
+  contacts_ = contacts;
+  update();
+}
+
 QPointF SidescanCanvas::mapToScreen(double mx, double my) const
 {
   // North-up: +x east -> right, +y north -> up (screen y grows downward).
@@ -177,6 +189,33 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     }
     painter.drawPolyline(poly);
   }
+
+  // Contact markers (map-anchored), drawn wherever they fall in the current view.
+  if (!contacts_.empty()) {
+    QPen pen(QColor(255, 210, 60));
+    pen.setWidthF(1.5);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    for (const auto & c : contacts_) {
+      const QPointF nw = mapToScreen(c.x - 0.5 * c.w, c.y + 0.5 * c.h);
+      const double wpx = std::max(6.0, c.w * px_per_m_);
+      const double hpx = std::max(6.0, c.h * px_per_m_);
+      const QRectF r(nw, QSizeF(wpx, hpx));
+      painter.drawRect(r);
+      if (!c.id.isEmpty()) {
+        painter.drawText(QPointF(r.left(), r.top() - 2), c.id);
+      }
+    }
+  }
+
+  // Rubber-band box while drawing a contact.
+  if (marking_) {
+    QPen pen(QColor(255, 210, 60));
+    pen.setStyle(Qt::DashLine);
+    painter.setPen(pen);
+    painter.setBrush(QColor(255, 210, 60, 40));
+    painter.drawRect(QRectF(mark_start_, mark_cur_).normalized());
+  }
 }
 
 void SidescanCanvas::wheelEvent(QWheelEvent * event)
@@ -195,16 +234,41 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
 
 void SidescanCanvas::mousePressEvent(QMouseEvent * event)
 {
-  if (event->button() == Qt::LeftButton) {last_drag_pos_ = event->pos();}
+  if (event->button() != Qt::LeftButton) {return;}
+  if (mark_mode_) {
+    marking_ = true;
+    mark_start_ = event->pos();
+    mark_cur_ = event->pos();
+    update();
+  } else {
+    last_drag_pos_ = event->pos();
+  }
 }
 
 void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
 {
   if (!(event->buttons() & Qt::LeftButton)) {return;}
+  if (marking_) {
+    mark_cur_ = event->pos();
+    update();
+    return;
+  }
   const QPoint delta = event->pos() - last_drag_pos_;
   last_drag_pos_ = event->pos();
   center_map_ += QPointF(-delta.x() / px_per_m_, delta.y() / px_per_m_);
   update();
+}
+
+void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
+{
+  if (event->button() != Qt::LeftButton || !marking_) {return;}
+  marking_ = false;
+  const QPointF a = screenToMap(mark_start_.x(), mark_start_.y());
+  const QPointF b = screenToMap(event->pos().x(), event->pos().y());
+  update();
+  // Ignore a click with no drag (no extent).
+  if (std::abs(a.x() - b.x()) < 1e-6 && std::abs(a.y() - b.y()) < 1e-6) {return;}
+  emit boxMarked(QRectF(a, b).normalized());
 }
 
 }  // namespace marine_perception_tools

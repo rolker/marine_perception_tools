@@ -14,16 +14,20 @@
 
 #include "sidescan_viewer_window.hpp"
 
+#include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
+#include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPointF>
 #include <QProgressBar>
+#include <QPushButton>
+#include <QRectF>
 #include <QSlider>
 #include <QSpinBox>
 #include <QSplitter>
@@ -39,8 +43,10 @@
 #include <utility>
 #include <vector>
 
+#include "contact_store.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
+#include "marine_interfaces/msg/contact.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
 #include "sidescan_waterfall.hpp"
@@ -247,6 +253,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   crow->addWidget(window_spin_);
   crow->addWidget(new QLabel("Max:", this));
   crow->addWidget(max_pings_spin_);
+  mark_button_ = new QPushButton("Mark contact", this);
+  mark_button_->setCheckable(true);
+  mark_button_->setToolTip("Toggle marking: drag a box around a target on the map.");
+  crow->addWidget(mark_button_);
   crow->addWidget(progress_);
 
   // Geo map (left) beside the uncorrected waterfall (right), user-resizable.
@@ -264,9 +274,18 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   col->addWidget(status_);
   setCentralWidget(central);
 
+  // Target-list dock (right): one row per contact, click to recentre the map.
+  contact_list_ = new QListWidget(this);
+  auto * dock = new QDockWidget("Contacts", this);
+  dock->setWidget(contact_list_);
+  addDockWidget(Qt::RightDockWidgetArea, dock);
+
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
   file_menu->addAction("&Fit View", this, [this]() {canvas_->resetView();});
+  file_menu->addSeparator();
+  file_menu->addAction("&Load Contacts…", this, &SidescanViewerWindow::onLoadContacts);
+  file_menu->addAction("&Save Contacts…", this, &SidescanViewerWindow::onSaveContacts);
   file_menu->addSeparator();
   file_menu->addAction("E&xit", this, &QWidget::close);
 
@@ -281,6 +300,16 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onWindowLengthChanged);
   connect(max_pings_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
     this, &SidescanViewerWindow::onMaxPingsChanged);
+  connect(mark_button_, &QPushButton::toggled, this,
+    [this](bool on) {canvas_->setMarkMode(on);});
+  connect(canvas_, &SidescanCanvas::boxMarked,
+    this, &SidescanViewerWindow::onContactMarked);
+  connect(contact_list_, &QListWidget::currentRowChanged, this, [this](int row) {
+      if (row >= 0 && row < static_cast<int>(contact_store_.contacts().size())) {
+        const auto & k = contact_store_.contacts()[row].kinematics.pose.pose.position;
+        canvas_->setCenter(k.x, k.y);
+      }
+    });
 
   canvas_->setGridSpacing(grid_spin_->value());
   resize(1100, 760);
@@ -375,6 +404,62 @@ void SidescanViewerWindow::onMaxPingsChanged(int max_pings)
 {
   max_window_pings_ = max_pings;
   requestRender();
+}
+
+void SidescanViewerWindow::onContactMarked(const QRectF & map_rect)
+{
+  std::vector<MapPoint> pts{
+    {map_rect.left(), map_rect.top()},
+    {map_rect.right(), map_rect.bottom()}};
+  const QString id = QString("T-%1").arg(++contact_counter_, 3, 10, QChar('0'));
+  contact_store_.add(
+    make_box_contact(pts, id.toStdString(), "sidescan", "bizzy/map", 0.0));
+  refreshContacts();
+}
+
+void SidescanViewerWindow::onSaveContacts()
+{
+  const QString path = QFileDialog::getSaveFileName(
+    this, "Save contacts", QString(), "Contact store (*.cdr)");
+  if (path.isEmpty()) {return;}
+  if (!contact_store_.save(path.toStdString())) {
+    QMessageBox::warning(this, "Save failed", "Could not write " + path);
+  }
+}
+
+void SidescanViewerWindow::onLoadContacts()
+{
+  const QString path = QFileDialog::getOpenFileName(
+    this, "Load contacts", QString(), "Contact store (*.cdr)");
+  if (path.isEmpty()) {return;}
+  if (!contact_store_.load(path.toStdString())) {
+    QMessageBox::warning(this, "Load failed", "Could not read " + path);
+    return;
+  }
+  contact_counter_ = std::max(contact_counter_, static_cast<int>(contact_store_.size()));
+  refreshContacts();
+}
+
+void SidescanViewerWindow::refreshContacts()
+{
+  QVector<ContactMarker> markers;
+  markers.reserve(static_cast<int>(contact_store_.size()));
+  contact_list_->clear();
+  for (const auto & c : contact_store_.contacts()) {
+    const auto & p = c.kinematics.pose.pose.position;
+    ContactMarker m;
+    m.x = p.x;
+    m.y = p.y;
+    m.w = c.shape.dimensions.x;
+    m.h = c.shape.dimensions.y;
+    m.id = QString::fromStdString(c.id);
+    markers.push_back(m);
+    contact_list_->addItem(QString("%1   %2 x %3 m   (%4, %5)")
+      .arg(m.id)
+      .arg(m.w, 0, 'f', 1).arg(m.h, 0, 'f', 1)
+      .arg(p.x, 0, 'f', 1).arg(p.y, 0, 'f', 1));
+  }
+  canvas_->setContacts(markers);
 }
 
 void SidescanViewerWindow::updateScrubStep()
