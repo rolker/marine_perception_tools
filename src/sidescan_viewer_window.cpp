@@ -25,6 +25,7 @@
 #include <QPointF>
 #include <QProgressBar>
 #include <QSlider>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QString>
 #include <QtConcurrent>
@@ -219,6 +220,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   window_spin_->setValue(window_len_m_);
   window_spin_->setSuffix(" m");
 
+  max_pings_spin_ = new QSpinBox(this);
+  max_pings_spin_->setRange(50, 50000);
+  max_pings_spin_->setValue(max_window_pings_);
+  max_pings_spin_->setSuffix(" pings");
+  max_pings_spin_->setToolTip(
+    "Max pings rendered per window (stationary cap). Raise if a long window is "
+    "truncated; lower to keep a stopped boat from piling up.");
+
   status_ = new QLabel("Open a bag to begin (File → Open Bag).", this);
 
   // Indeterminate "busy" bar shown only while a bag loads off-thread.
@@ -236,6 +245,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   crow->addWidget(grid_spin_);
   crow->addWidget(new QLabel("Window:", this));
   crow->addWidget(window_spin_);
+  crow->addWidget(new QLabel("Max:", this));
+  crow->addWidget(max_pings_spin_);
   crow->addWidget(progress_);
 
   // Geo map (left) beside the uncorrected waterfall (right), user-resizable.
@@ -268,6 +279,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onGridSpacingChanged);
   connect(window_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, &SidescanViewerWindow::onWindowLengthChanged);
+  connect(max_pings_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
+    this, &SidescanViewerWindow::onMaxPingsChanged);
 
   canvas_->setGridSpacing(grid_spin_->value());
   resize(1100, 760);
@@ -320,10 +333,14 @@ void SidescanViewerWindow::onLoadFinished()
   canvas_->setTrack(track);
   canvas_->resetView();  // fit to the track now; coverage fills in asynchronously
 
+  // Slider units are metres of along-track distance, so the arrow-key step can be
+  // an exact fraction of the window.
   scrub_->setEnabled(true);
   scrub_->blockSignals(true);
-  scrub_->setValue(scrub_->minimum());  // start at the beginning of the track
+  scrub_->setRange(0, std::max(1, static_cast<int>(std::lround(session_->totalDistance()))));
+  scrub_->setValue(0);  // start at the beginning of the track
   scrub_->blockSignals(false);
+  updateScrubStep();
   requestRender();
 
   status_->setText(QString(
@@ -350,7 +367,22 @@ void SidescanViewerWindow::onGridSpacingChanged(double metres)
 void SidescanViewerWindow::onWindowLengthChanged(double metres)
 {
   window_len_m_ = metres;
+  updateScrubStep();
   requestRender();
+}
+
+void SidescanViewerWindow::onMaxPingsChanged(int max_pings)
+{
+  max_window_pings_ = max_pings;
+  requestRender();
+}
+
+void SidescanViewerWindow::updateScrubStep()
+{
+  // Slider units are metres: arrow keys step 20% of the window, PageUp/Down a full
+  // window.
+  scrub_->setSingleStep(std::max(1, static_cast<int>(std::lround(0.2 * window_len_m_))));
+  scrub_->setPageStep(std::max(1, static_cast<int>(std::lround(window_len_m_))));
 }
 
 void SidescanViewerWindow::requestRender()
@@ -363,10 +395,7 @@ void SidescanViewerWindow::requestRender()
     return;
   }
   const double total = session_->totalDistance();
-  const double frac = (scrub_->maximum() > 0) ?
-    static_cast<double>(scrub_->value()) / scrub_->maximum() :
-    0.0;
-  const double head = frac * total;
+  const double head = std::clamp(static_cast<double>(scrub_->value()), 0.0, total);
   const DistanceWindow win = distance_window(head, window_len_m_, total);
 
   rendering_ = true;

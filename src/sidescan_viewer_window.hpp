@@ -29,6 +29,7 @@
 class QLabel;
 class QSlider;
 class QDoubleSpinBox;
+class QSpinBox;
 class QProgressBar;
 
 namespace marine_perception_tools
@@ -88,6 +89,7 @@ private slots:
   void onScrubChanged();
   void onGridSpacingChanged(double metres);
   void onWindowLengthChanged(double metres);
+  void onMaxPingsChanged(int max_pings);
 
 private:
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
@@ -95,10 +97,15 @@ private:
   // with the latest scrub position.
   void requestRender();
 
+  // Set the scrub slider's arrow-key step to 20% of the window and the page step
+  // to a full window (slider units are metres).
+  void updateScrubStep();
+
   SidescanCanvas * canvas_ = nullptr;
   QSlider * scrub_ = nullptr;
   QDoubleSpinBox * grid_spin_ = nullptr;
   QDoubleSpinBox * window_spin_ = nullptr;
+  QSpinBox * max_pings_spin_ = nullptr;
   QLabel * status_ = nullptr;
   QProgressBar * progress_ = nullptr;
   SidescanWaterfall * waterfall_ = nullptr;
