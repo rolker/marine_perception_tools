@@ -14,7 +14,6 @@
 
 #include "sidescan_viewer_window.hpp"
 
-#include <QApplication>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -26,6 +25,7 @@
 #include <QPointF>
 #include <QSlider>
 #include <QString>
+#include <QtConcurrent>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -117,6 +117,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   file_menu->addSeparator();
   file_menu->addAction("E&xit", this, &QWidget::close);
 
+  connect(&load_watcher_, &QFutureWatcher<SidescanLoadResult>::finished,
+    this, &SidescanViewerWindow::onLoadFinished);
   connect(scrub_, &QSlider::valueChanged, this, &SidescanViewerWindow::onScrubChanged);
   connect(grid_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, &SidescanViewerWindow::onGridSpacingChanged);
@@ -135,17 +137,32 @@ void SidescanViewerWindow::onOpenBag()
 
 void SidescanViewerWindow::openBag(const std::string & bag_uri)
 {
-  QApplication::setOverrideCursor(Qt::WaitCursor);
-  std::unique_ptr<SidescanBagSession> session;
-  try {
-    session = std::make_unique<SidescanBagSession>(bag_uri);
-  } catch (const std::exception & e) {
-    QApplication::restoreOverrideCursor();
-    QMessageBox::critical(this, "Open bag failed", e.what());
+  if (loading_) {return;}  // a load is already in flight
+  loading_ = true;
+  scrub_->setEnabled(false);
+  status_->setText(QString("Loading %1 …").arg(QString::fromStdString(bag_uri)));
+
+  // Read the bag off the UI thread so the window stays responsive (no WM
+  // "application not responding"). Errors are returned, not thrown across threads.
+  load_watcher_.setFuture(QtConcurrent::run([bag_uri]() -> SidescanLoadResult {
+      try {
+        return {std::make_shared<SidescanBagSession>(bag_uri), QString()};
+      } catch (const std::exception & e) {
+        return {nullptr, QString::fromStdString(e.what())};
+      }
+      }));
+}
+
+void SidescanViewerWindow::onLoadFinished()
+{
+  loading_ = false;
+  const SidescanLoadResult result = load_watcher_.result();
+  if (!result.session) {
+    status_->setText("Open a bag to begin (File → Open Bag).");
+    QMessageBox::critical(this, "Open bag failed", result.error);
     return;
   }
-  session_ = std::move(session);
-  QApplication::restoreOverrideCursor();
+  session_ = result.session;
 
   // Boat track from every ping with a resolved pose (stamp-ordered).
   std::vector<QPointF> track;

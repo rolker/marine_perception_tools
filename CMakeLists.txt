@@ -105,7 +105,8 @@ add_executable(sidescan_target_viewer
 )
 target_link_libraries(sidescan_target_viewer
   sidescan_core
-  Qt${QT_VERSION_MAJOR}::Widgets)
+  Qt${QT_VERSION_MAJOR}::Widgets
+  Qt${QT_VERSION_MAJOR}::Concurrent)
 
 install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}

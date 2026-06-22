@@ -15,7 +15,9 @@
 #ifndef SIDESCAN_VIEWER_WINDOW_HPP_
 #define SIDESCAN_VIEWER_WINDOW_HPP_
 
+#include <QFutureWatcher>
 #include <QMainWindow>
+#include <QString>
 
 #include <memory>
 #include <string>
@@ -30,6 +32,14 @@ namespace marine_perception_tools
 {
 
 class SidescanCanvas;
+
+// Result of an off-thread bag load: either a session or an error message. Copyable
+// (shared_ptr + QString) so it can ride through QFuture/QFutureWatcher.
+struct SidescanLoadResult
+{
+  std::shared_ptr<SidescanBagSession> session;
+  QString error;
+};
 
 // Offline sidescan viewer main window: File->Open a bag, then scrub along
 // distance travelled. A rolling ~window of pings is painted (quality-wins) into a
@@ -48,6 +58,7 @@ public:
 
 private slots:
   void onOpenBag();
+  void onLoadFinished();
   void onScrubChanged();
   void onGridSpacingChanged(double metres);
   void onWindowLengthChanged(double metres);
@@ -61,7 +72,10 @@ private:
   QDoubleSpinBox * window_spin_ = nullptr;
   QLabel * status_ = nullptr;
 
-  std::unique_ptr<SidescanBagSession> session_;
+  QFutureWatcher<SidescanLoadResult> load_watcher_;
+  bool loading_ = false;
+
+  std::shared_ptr<SidescanBagSession> session_;
   double window_len_m_ = 100.0;
   double resolution_m_ = 0.25;
   int max_window_pings_ = 600;   // stationary cap
