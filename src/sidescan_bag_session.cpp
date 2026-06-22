@@ -19,6 +19,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -140,6 +142,17 @@ SidescanBagSession::SidescanBagSession(
   const std::string & bag_uri, const SidescanBagOptions & opts)
 : bag_uri_(bag_uri)
 {
+  // Optional load profiling: set SIDESCAN_PROFILE=1 to print per-phase timings to
+  // stderr. Quiet by default.
+  const bool profile = std::getenv("SIDESCAN_PROFILE") != nullptr;
+  const auto t_start = std::chrono::steady_clock::now();
+  auto prof = [profile, t_start](const char * label) {
+      if (!profile) {return;}
+      const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_start).count();
+      std::fprintf(stderr, "[profile] %-22s %8.0f ms\n", label, ms);
+    };
+
   // ---- Pass 1: bounds, TF cache, channel presence. ----
   rosbag2_cpp::Reader reader;
   reader.open(bag_uri);
@@ -178,6 +191,8 @@ SidescanBagSession::SidescanBagSession(
       }
     }
   }
+
+  prof("pass1 tf cache");
 
   // ---- Pass 2: read pings, decode samples. Pose is resolved afterwards, once
   // the whole TF cache is populated. ----
@@ -242,6 +257,8 @@ SidescanBagSession::SidescanBagSession(
     pings_.begin(), pings_.end(),
     [](const SidescanPing & a, const SidescanPing & b) {return a.stamp_s < b.stamp_s;});
 
+  prof("pass2 read pings");
+
   // ---- Resolve per-ping sensor pose + along-track distance. ----
   bool have_prev_base = false;
   double prev_bx = 0.0;
@@ -284,6 +301,8 @@ SidescanBagSession::SidescanBagSession(
     ping.cumulative_distance_m = cumulative;
   }
   total_distance_m_ = cumulative;
+
+  prof("pose+distance resolve");
 
   // ---- Assign height-above-bottom from the nearest nadir sample in time. ----
   // Prefer the driver's bottom-tracked nadir_depth Range; only if that topic is
@@ -328,12 +347,15 @@ SidescanBagSession::SidescanBagSession(
     }
   }
 
+  prof("altitude assign");
+
   // ---- Geo-export readiness: earth -> world resolves at the mid-recording stamp. ----
   if (!pings_.empty()) {
     const auto mid = tf2::TimePoint(std::chrono::nanoseconds(
         static_cast<int64_t>(pings_[pings_.size() / 2].stamp_s * 1e9)));
     has_geo_reference_ = tf_buffer_->canTransform(opts.geo_frame, opts.world_frame, mid);
   }
+  prof("geo + done");
 }
 
 SidescanBagSession::~SidescanBagSession() = default;
