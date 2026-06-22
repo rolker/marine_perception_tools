@@ -145,6 +145,16 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
   grayscale render (marine_colormap shader later). **Remaining:** visual tuning →
   contact marking + Contact store + cross-pass overlay (PR3).
 
+- **Windowed re-read landed (memory bound).** Replaced the all-samples-in-RAM index
+  with a lightweight index (stamp/distance/pose/geometry, no samples) + `readWindow()`
+  that re-reads only the current distance window's samples from the bag via
+  `Reader::seek` (matched back to the index by exact header-stamp ns). **Peak RSS on the
+  real bag 416 MB → 57 MB.** Sample dtype confirmed **uint16** (2035 samples, beam 1).
+  Down-channel fallback altitude is computed transiently during the scan (no samples
+  stored). Caveat: window scan pads ±3 s for recv-vs-header skew (fine for lake latency;
+  deep-water >3 s would need a larger pad). Per-scrub bag read is synchronous on the UI
+  thread (small window, ~capped 600 pings) — async if it ever feels laggy.
+
 ## Estimated Scope
 
 Multiple PRs (stacked). PR1 = scaffold + ingest + projection (core, tested). PR2 = map

@@ -15,6 +15,7 @@
 #include "sidescan_bag_session.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 #include "marine_acoustic_msgs/msg/raw_sonar_image.hpp"
@@ -32,6 +34,8 @@
 #include "tf2/buffer_core.h"
 #include "tf2/time.h"
 #include "tf2_msgs/msg/tf_message.hpp"
+
+#include "distance_buffer_policy.hpp"
 
 namespace marine_perception_tools
 {
@@ -134,6 +138,7 @@ std::vector<float> extract_beam0(
 
 SidescanBagSession::SidescanBagSession(
   const std::string & bag_uri, const SidescanBagOptions & opts)
+: bag_uri_(bag_uri)
 {
   // ---- Pass 1: bounds, TF cache, channel presence. ----
   rosbag2_cpp::Reader reader;
@@ -182,8 +187,11 @@ SidescanBagSession::SidescanBagSession(
   }
 
   // The driver's bottom-tracked nadir depth (stamp_s, height-above-bottom m),
-  // collected in bag order, the authoritative altitude source.
+  // collected in bag order, the authoritative altitude source. `down_estimates`
+  // is the amplitude-derived fallback (stamp_s, altitude), computed transiently
+  // here from the down channel so no sample data needs to be retained.
   std::vector<std::pair<double, double>> nadir_depths;
+  std::vector<std::pair<double, double>> down_estimates;
 
   rosbag2_cpp::Reader reader2;
   reader2.open(bag_uri);
@@ -206,13 +214,24 @@ SidescanBagSession::SidescanBagSession(
       SidescanPing ping;
       ping.channel = ch_it->second;
       ping.stamp_s = img.header.stamp.sec + img.header.stamp.nanosec * 1e-9;
+      ping.stamp_ns = static_cast<int64_t>(img.header.stamp.sec) * 1000000000LL +
+        img.header.stamp.nanosec;
       ping.sound_speed = img.ping_info.sound_speed;
       ping.sample_rate = img.sample_rate;
-      ping.amplitudes = extract_beam0(img.image, img.samples_per_beam);
+      ping.samples_per_beam = img.samples_per_beam;
       ping.geometry.sample0 = img.sample0;
       ping.geometry.metres_per_sample =
         slant_metres_per_sample(img.ping_info.sound_speed, img.sample_rate);
       ping.geometry.lateral_sign = channel_lateral_sign(ping.channel);
+
+      // Down channel: derive a fallback altitude now (transient — no samples kept).
+      if (ping.channel == SidescanChannel::Down) {
+        const auto amps = extract_beam0(img.image, img.samples_per_beam);
+        const double alt = estimate_altitude_from_nadir(
+          amps, ping.geometry.sample0, ping.geometry.metres_per_sample,
+          opts.altitude_threshold_frac);
+        if (std::isfinite(alt)) {down_estimates.emplace_back(ping.stamp_s, alt);}
+      }
       pings_.push_back(std::move(ping));
     } catch (const std::exception &) {
       ++decode_errors_;
@@ -280,12 +299,9 @@ SidescanBagSession::SidescanBagSession(
       nadir.push_back({t, range});
     }
   } else {
-    for (const auto & ping : pings_) {
-      if (ping.channel != SidescanChannel::Down) {continue;}
-      const double alt = estimate_altitude_from_nadir(
-        ping.amplitudes, ping.geometry.sample0, ping.geometry.metres_per_sample,
-        opts.altitude_threshold_frac);
-      if (std::isfinite(alt)) {nadir.push_back({ping.stamp_s, alt});}
+    nadir.reserve(down_estimates.size());
+    for (const auto & [t, alt] : down_estimates) {
+      nadir.push_back({t, alt});
     }
   }
   std::stable_sort(
@@ -344,6 +360,84 @@ std::size_t SidescanBagSession::channelCount(SidescanChannel ch) const
     }
   }
   return n;
+}
+
+std::vector<WindowPing> SidescanBagSession::readWindow(
+  double dist_lo, double dist_hi, int max_pings, bool include_down) const
+{
+  const double hi = (dist_hi < 0.0) ? total_distance_m_ : dist_hi;
+
+  // 1. Select paintable index entries in the distance window (channel-filtered).
+  std::vector<const SidescanPing *> sel;
+  for (const auto & p : pings_) {
+    if (p.cumulative_distance_m < dist_lo || p.cumulative_distance_m > hi) {continue;}
+    if (!p.has_pose) {continue;}
+    if (p.channel == SidescanChannel::Down && !include_down) {continue;}
+    sel.push_back(&p);
+  }
+  if (sel.empty()) {return {};}
+
+  // 2. Stationary cap: keep the most recent (the list is along-track ordered).
+  const int from = stationary_keep_from(static_cast<int>(sel.size()), max_pings);
+  sel.erase(sel.begin(), sel.begin() + from);
+
+  // 3. Result slots + a (stamp_ns -> per-channel slot) lookup + the stamp span.
+  std::vector<WindowPing> out(sel.size());
+  std::unordered_map<int64_t, std::array<int, kNumSidescanChannels>> slot;
+  int64_t t_lo = std::numeric_limits<int64_t>::max();
+  int64_t t_hi = std::numeric_limits<int64_t>::min();
+  for (std::size_t i = 0; i < sel.size(); ++i) {
+    const SidescanPing * p = sel[i];
+    out[i].channel = p->channel;
+    out[i].geometry = p->geometry;
+    out[i].cumulative_distance_m = p->cumulative_distance_m;
+    auto res = slot.try_emplace(
+      p->stamp_ns, std::array<int, kNumSidescanChannels>{-1, -1, -1});
+    res.first->second[static_cast<int>(p->channel)] = static_cast<int>(i);
+    t_lo = std::min(t_lo, p->stamp_ns);
+    t_hi = std::max(t_hi, p->stamp_ns);
+  }
+
+  // 4. Re-read sample data over the stamp span (padded for recv-vs-header skew).
+  std::map<std::string, SidescanChannel> topic_to_channel;
+  for (int c = 0; c < kNumSidescanChannels; ++c) {
+    topic_to_channel[kSidescanTopics[c]] = static_cast<SidescanChannel>(c);
+  }
+  constexpr int64_t kPadNs = 3000000000LL;  // 3 s
+  rosbag2_cpp::Reader reader;
+  reader.open(bag_uri_);
+  try {
+    reader.seek(static_cast<rcutils_time_point_value_t>(t_lo - kPadNs));
+  } catch (const std::exception &) {
+    // seek unsupported on this storage -> fall back to a sequential scan.
+  }
+  while (reader.has_next()) {
+    auto bag_msg = reader.read_next();
+    if (bag_msg->recv_timestamp > t_hi + kPadNs) {break;}
+    auto ch_it = topic_to_channel.find(bag_msg->topic_name);
+    if (ch_it == topic_to_channel.end()) {continue;}
+    if (ch_it->second == SidescanChannel::Down && !include_down) {continue;}
+    try {
+      auto img = deserialize<marine_acoustic_msgs::msg::RawSonarImage>(bag_msg);
+      const int64_t sns = static_cast<int64_t>(img.header.stamp.sec) * 1000000000LL +
+        img.header.stamp.nanosec;
+      auto it = slot.find(sns);
+      if (it == slot.end()) {continue;}
+      const int idx = it->second[static_cast<int>(ch_it->second)];
+      if (idx < 0) {continue;}
+      out[idx].amplitudes = extract_beam0(img.image, img.samples_per_beam);
+    } catch (const std::exception &) {
+      // skip an unreadable message
+    }
+  }
+
+  // 5. Drop entries whose samples weren't read (unreadable / outside the scan).
+  out.erase(
+    std::remove_if(
+      out.begin(), out.end(),
+      [](const WindowPing & w) {return w.amplitudes.empty();}),
+    out.end());
+  return out;
 }
 
 }  // namespace marine_perception_tools

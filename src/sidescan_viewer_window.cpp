@@ -47,7 +47,7 @@ namespace
 
 // Maximum slant range (≈ far ground range) of a ping's last sample, used to pad
 // the swath bounding box.
-double ping_max_range(const SidescanPing & p)
+double ping_max_range(const WindowPing & p)
 {
   if (p.amplitudes.empty() || p.geometry.metres_per_sample <= 0.0) {return 0.0;}
   return slant_range_at(p.amplitudes.size(), p.geometry.sample0, p.geometry.metres_per_sample);
@@ -213,17 +213,10 @@ void SidescanViewerWindow::renderCurrentWindow()
   const double head = frac * total;
   const DistanceWindow win = distance_window(head, window_len_m_, total);
 
-  // Window pings: port + starboard, with a resolved pose and samples to paint.
-  std::vector<const SidescanPing *> all = session_->window(win.lo, win.hi);
-  std::vector<const SidescanPing *> paint;
-  for (const auto * p : all) {
-    if (!p->has_pose || p->amplitudes.empty()) {continue;}
-    if (p->channel == SidescanChannel::Down) {continue;}
-    paint.push_back(p);
-  }
-  // Stationary cap: keep the most recent pings (window list is distance-ordered).
-  const int from = stationary_keep_from(static_cast<int>(paint.size()), max_window_pings_);
-  paint.erase(paint.begin(), paint.begin() + from);
+  // Re-read the window's port+stbd sample data from the bag (stationary-capped).
+  // The resident index holds no samples, so this bounds memory to the window.
+  const std::vector<WindowPing> paint =
+    session_->readWindow(win.lo, win.hi, max_window_pings_);
 
   if (paint.empty()) {
     canvas_->setCoverage(QImage(), 0.0, 0.0, resolution_m_);
@@ -231,17 +224,17 @@ void SidescanViewerWindow::renderCurrentWindow()
   }
 
   // Bounding box of the painted swath: sensor positions padded by max ground range.
-  double min_x = paint.front()->geometry.sensor_x;
+  double min_x = paint.front().geometry.sensor_x;
   double max_x = min_x;
-  double min_y = paint.front()->geometry.sensor_y;
+  double min_y = paint.front().geometry.sensor_y;
   double max_y = min_y;
   double pad = 0.0;
-  for (const auto * p : paint) {
-    min_x = std::min(min_x, p->geometry.sensor_x);
-    max_x = std::max(max_x, p->geometry.sensor_x);
-    min_y = std::min(min_y, p->geometry.sensor_y);
-    max_y = std::max(max_y, p->geometry.sensor_y);
-    pad = std::max(pad, ping_max_range(*p));
+  for (const auto & p : paint) {
+    min_x = std::min(min_x, p.geometry.sensor_x);
+    max_x = std::max(max_x, p.geometry.sensor_x);
+    min_y = std::min(min_y, p.geometry.sensor_y);
+    max_y = std::max(max_y, p.geometry.sensor_y);
+    pad = std::max(pad, ping_max_range(p));
   }
   min_x -= pad;
   max_x += pad;
@@ -256,8 +249,8 @@ void SidescanViewerWindow::renderCurrentWindow()
   h = std::clamp(h, 1, kMaxDim);
 
   CoverageRaster raster(min_x, min_y, resolution_m_, w, h);
-  for (const auto * p : paint) {
-    paint_ping(raster, p->geometry, p->amplitudes);
+  for (const auto & p : paint) {
+    paint_ping(raster, p.geometry, p.amplitudes);
   }
 
   canvas_->setCoverage(render_coverage(raster), min_x, min_y, resolution_m_);

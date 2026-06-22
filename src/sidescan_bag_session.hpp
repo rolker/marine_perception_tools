@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -51,22 +52,34 @@ inline constexpr std::array<const char *, kNumSidescanChannels> kSidescanSensorF
 inline constexpr const char * kNadirDepthTopic =
   "/bizzy/sensors/sidescan/garmin_sidescan/nadir_depth";
 
-// One ingested ping: its channel, time, the along-track distance of the boat when
-// it was transmitted, the world-plane geometry needed to project it (pose +
-// acoustic scale + resolved altitude), and the beam-0 sample amplitudes
-// normalized to [0, 1]. `has_pose` is false when TF could not resolve the sensor
-// pose at the ping stamp (the ping is kept for the timeline but cannot be
-// painted).
+// One ping's lightweight index entry: channel, time, the along-track distance of
+// the boat when it was transmitted, and the world-plane geometry needed to
+// project it (pose + acoustic scale + resolved altitude). The sample data is NOT
+// held here — it is re-read per window by readWindow(), so the resident index
+// stays small regardless of bag length. `has_pose` is false when TF could not
+// resolve the sensor pose at the ping stamp (kept for the timeline, unpaintable).
 struct SidescanPing
 {
   SidescanChannel channel = SidescanChannel::Port;
   double stamp_s = 0.0;
+  int64_t stamp_ns = 0;             // exact header stamp, for windowed re-read matching
   double cumulative_distance_m = 0.0;
   bool has_pose = false;
   PingGeometry geometry;            // altitude filled from the nearest nadir ping
-  std::vector<float> amplitudes;    // beam-0 samples, normalized [0,1]
+  uint32_t samples_per_beam = 0;    // sample count (range extent without sample data)
   double sound_speed = 0.0;         // m/s (from ping_info; retained for display)
   double sample_rate = 0.0;         // Hz
+};
+
+// A ping together with its sample data, produced on demand by readWindow(): the
+// heavy part (beam-0 amplitudes, normalized [0,1]) is read from the bag for the
+// requested window only.
+struct WindowPing
+{
+  SidescanChannel channel = SidescanChannel::Port;
+  double cumulative_distance_m = 0.0;
+  PingGeometry geometry;
+  std::vector<float> amplitudes;
 };
 
 struct SidescanBagOptions
@@ -78,13 +91,13 @@ struct SidescanBagOptions
   double altitude_max_dt_s = 2.0;            // max time gap to trust a nadir depth
 };
 
-// Opens a sidescan bag once, builds the full TF cache, then reads every ping into
-// an in-memory index: each ping's sensor pose is resolved from TF in the world
-// frame, its samples decoded + normalized, the boat's along-track distance
-// accumulated from base_link, and its height-above-bottom taken from the nearest
-// nadir ping. `window()` then slices the index by along-track distance — the
-// distance-buffered re-read policy (the distance analogue of buffer_policy.hpp)
-// is a later milestone; PR1 builds the whole index and filters it.
+// Opens a sidescan bag once and builds a lightweight in-memory index: the full TF
+// cache, and per ping its channel, stamp, along-track distance (accumulated from
+// base_link), resolved sensor pose, and height-above-bottom (from the driver's
+// nadir_depth, or a transient amplitude estimate). The bulky sample data is NOT
+// resident — `readWindow()` re-reads just the requested distance window's samples
+// from the bag (via Reader::seek), so memory stays bounded by the window, not the
+// survey length. `window()` returns the lightweight index slice.
 //
 // Throws std::runtime_error if the bag has no sidescan ping topics at all.
 class SidescanBagSession
@@ -103,6 +116,14 @@ public:
   // Pings whose along-track distance lies in [dist_lo, dist_hi] (metres). A
   // negative dist_hi means "to the end of the track". Returned in index order.
   std::vector<const SidescanPing *> window(double dist_lo, double dist_hi) const;
+
+  // Paintable pings (port + starboard by default) whose along-track distance lies
+  // in [dist_lo, dist_hi], WITH their sample data read fresh from the bag. The
+  // resident index holds no samples, so this is what bounds memory to the window.
+  // `max_pings > 0` keeps only the most recent `max_pings` (stationary cap, so a
+  // stopped boat re-reads only a bounded set). Returned in along-track order.
+  std::vector<WindowPing> readWindow(
+    double dist_lo, double dist_hi, int max_pings = 0, bool include_down = false) const;
 
   // Total along-track distance of the recording (metres).
   double totalDistance() const {return total_distance_m_;}
@@ -125,6 +146,7 @@ public:
   std::size_t decodeErrors() const {return decode_errors_;}
 
 private:
+  std::string bag_uri_;
   std::vector<SidescanPing> pings_;
   std::unique_ptr<tf2::BufferCore> tf_buffer_;
   double total_distance_m_ = 0.0;

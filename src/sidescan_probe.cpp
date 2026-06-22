@@ -65,18 +65,18 @@ int main(int argc, char ** argv)
     std::printf("altitude source: %s\n",
       session.usedNadirDepth() ? "nadir_depth (driver)" : "amplitude estimator (fallback)");
 
-    // Project the middle sample of the first paintable port/starboard ping.
-    for (const auto & p : pings) {
-      if (!p.has_pose || p.amplitudes.empty() ||
-        p.channel == SidescanChannel::Down) {continue;}
+    // Re-read the first 50 m window's samples and project a sample, exercising
+    // the windowed read path end-to-end.
+    const auto win = session.readWindow(0.0, 50.0);
+    if (!win.empty()) {
+      const auto & p = win.front();
       const std::size_t mid = p.amplitudes.size() / 2;
       const auto gp = project_sample(p.geometry, mid);
       std::printf(
-        "sample probe: %s ping t=%.2fs samples=%zu sound_speed=%.1f "
-        "m/s alt=%.2f m\n  mid-sample[%zu] ground_range=%.2f m -> map (%.2f, %.2f) valid=%d\n",
-        channel_name(p.channel), p.stamp_s, p.amplitudes.size(), p.sound_speed,
+        "window read (first 50 m): %zu pings • %s ping samples=%zu alt=%.2f m\n"
+        "  mid-sample[%zu] ground_range=%.2f m -> map (%.2f, %.2f) valid=%d\n",
+        win.size(), channel_name(p.channel), p.amplitudes.size(),
         p.geometry.altitude, mid, gp.ground_range, gp.x, gp.y, gp.valid);
-      break;
     }
     return 0;
   } catch (const std::exception & e) {
