@@ -88,6 +88,7 @@ set(SIDESCAN_CORE_DEPS
 )
 add_library(sidescan_core
   src/sidescan_bag_session.cpp
+  src/coverage_raster.cpp
 )
 target_include_directories(sidescan_core PUBLIC src)
 ament_target_dependencies(sidescan_core ${SIDESCAN_CORE_DEPS})
@@ -116,6 +117,14 @@ if(BUILD_TESTING)
   # bag/Qt/ROS, so the test needs only the source include dir.
   ament_add_gtest(test_sidescan_geometry test/test_sidescan_geometry.cpp)
   target_include_directories(test_sidescan_geometry PRIVATE src)
+
+  # Pure rolling-distance scrub policy (distance_buffer_policy.hpp) — header-only.
+  ament_add_gtest(test_distance_buffer_policy test/test_distance_buffer_policy.cpp)
+  target_include_directories(test_distance_buffer_policy PRIVATE src)
+
+  # Coverage raster (quality-wins paint + coverage skip) — links sidescan_core.
+  ament_add_gtest(test_coverage_raster test/test_coverage_raster.cpp)
+  target_link_libraries(test_coverage_raster sidescan_core)
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()

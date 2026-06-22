@@ -56,7 +56,7 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
 | `src/sidescan_bag_session.{hpp,cpp}` | Distance-indexed `RawSonarImage`+nav reader |
 | `src/sidescan_projection.{hpp,cpp}` | Slant→ground, across-track→map-XY (pure) |
 | `src/distance_buffer_policy.hpp` | Distance analogue of `buffer_policy.hpp` |
-| `src/coverage_raster.{hpp,cpp}` | grid_map quality-wins paint + coverage skip |
+| `src/coverage_raster.{hpp,cpp}` | lean self-contained quality-wins raster + coverage skip (no grid_map) |
 | `src/contact_store.{hpp,cpp}` | `ContactArray` load/save + spatial index |
 | `src/sidescan_main_window.{hpp,cpp}`, `src/sidescan_viewer_main.cpp` | Qt app |
 | `test/test_*.cpp` | Core unit tests |
@@ -123,6 +123,17 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
   (3.62 m on the probe ping; 5.9–15.2 m across the bag). The amplitude estimator is
   retained as a fallback (with its 9 gtests) for bags/sonars lacking the topic.
   `SidescanBagSession::usedNadirDepth()` reports which path was taken.
+
+- **PR2 (in progress): Qt-free core landed.** `distance_buffer_policy.hpp` (rolling
+  distance window + stationary keep-cap; 6 gtests) and `coverage_raster.{hpp,cpp}`
+  (quality-wins paint, coverage tracking, `ping_covered_fraction` for skip-fully-covered,
+  `paint_ping`; 6 gtests). **Deviation:** used a lean self-contained raster instead of
+  `grid_map_core` — deterministic to unit-test, no Eigen-heavy dep in the test, and the
+  paint/quality-wins/coverage logic is the part we most want under test. Reversible if
+  we later want grid_map interop. Quality metric is a range proxy (`range_quality`),
+  a placeholder for a grazing-angle metric. **Remaining PR2:** the Qt canvas
+  (`QGraphicsView` map-frame render, measuring grid, zoom, distance scrubber wiring) —
+  needs the visual-verification loop.
 
 ## Estimated Scope
 
