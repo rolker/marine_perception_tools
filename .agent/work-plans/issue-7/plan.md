@@ -79,18 +79,20 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
 | Add app to this package | `package.xml`/CMake deps, README | Yes |
 | Produce `Contact` files | contact_manager #167 ingest seam | Follow-up (fast-follow) |
 
+## Decisions (resolved with Roland, 2026-06-21)
+
+- **GGGS descoped for v1.** Paint the swath into an in-app map-frame raster
+  (`grid_map_core`); use geodesy only at the export boundary (map-XY → lat/lon). No
+  GGGS/Web-Mercator tile stack for display. GGGS tile-store sharing is a fast-follow.
+- **Store format = CDR.** Serialize `ContactArray` as CDR (exact message fidelity,
+  closest to the contact_manager #167 seam).
+
 ## Open Questions
 
-- **GGGS scope:** v1 paints the swath into an in-app map-frame raster (`grid_map_core`)
-  and uses geodesy only at the export boundary — *not* the full GGGS/Web-Mercator tile
-  stack. OK to defer GGGS tile-store sharing to a fast-follow? (We'd agreed to "lean on
-  GGGS"; rendering in `map` frame makes the tile stack unnecessary for display.)
-- **Store format:** serialize `ContactArray` as CDR (exact msg fidelity, closest to
-  #167) vs YAML (human-editable). Lean CDR.
 - **Echogram (fast-follow):** `rqt_marine_sonar` has a C++ Qt echogram widget — reuse by
   extraction vs reimplement. Decide when we start that phase.
 - **`marine_acoustic_msgs`** is a rosdep (not a source package here) — confirm it's
-  present on the operator station build.
+  present on the operator station build (rqt sonar tools already use it, so likely yes).
 
 ## Estimated Scope
 
