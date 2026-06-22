@@ -90,8 +90,9 @@ QImage render_coverage(const CoverageRaster & r)
 // run newest-at-top (matching the live rqt plugin), so the channel lists are
 // reversed and both align at the newest (top) edge. No georeferencing or slant
 // correction — the raw stacked display.
-QImage build_waterfall(const std::vector<WindowPing> & pings)
+QImage build_waterfall(const std::vector<WindowPing> & pings, WaterfallIndex & index)
 {
+  index = WaterfallIndex{};
   std::vector<const WindowPing *> port;
   std::vector<const WindowPing *> stbd;
   for (const auto & p : pings) {
@@ -113,6 +114,19 @@ QImage build_waterfall(const std::vector<WindowPing> & pings)
   }
   const int width = static_cast<int>(pn + sn);
   if (width == 0) {return QImage();}
+
+  // Pixel->map index for waterfall marking (same newest-at-top row order).
+  index.pn = static_cast<int>(pn);
+  index.sn = static_cast<int>(sn);
+  index.rows = rows;
+  index.port_geo.reserve(port.size());
+  index.stbd_geo.reserve(stbd.size());
+  for (const auto * p : port) {
+    index.port_geo.push_back(p->geometry);
+  }
+  for (const auto * p : stbd) {
+    index.stbd_geo.push_back(p->geometry);
+  }
 
   QImage img(width, rows, QImage::Format_Grayscale8);
   img.fill(0);
@@ -158,7 +172,7 @@ SidescanRenderResult render_window(
 
   // Uncorrected waterfall + the window's track centre (for the follow-the-playhead
   // recentre) — both from the same pings, so map and waterfall stay in lockstep.
-  out.waterfall = build_waterfall(paint);
+  out.waterfall = build_waterfall(paint, out.waterfall_index);
   double cx = 0.0;
   double cy = 0.0;
   for (const auto & p : paint) {
@@ -300,9 +314,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onWindowLengthChanged);
   connect(max_pings_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
     this, &SidescanViewerWindow::onMaxPingsChanged);
-  connect(mark_button_, &QPushButton::toggled, this,
-    [this](bool on) {canvas_->setMarkMode(on);});
+  connect(mark_button_, &QPushButton::toggled, this, [this](bool on) {
+      canvas_->setMarkMode(on);
+      waterfall_->setMarkMode(on);
+    });
   connect(canvas_, &SidescanCanvas::boxMarked,
+    this, &SidescanViewerWindow::onContactMarked);
+  connect(waterfall_, &SidescanWaterfall::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
   connect(contact_list_, &QListWidget::currentRowChanged, this, [this](int row) {
       if (row >= 0 && row < static_cast<int>(contact_store_.contacts().size())) {
@@ -412,8 +430,11 @@ void SidescanViewerWindow::onContactMarked(const QRectF & map_rect)
     {map_rect.left(), map_rect.top()},
     {map_rect.right(), map_rect.bottom()}};
   const QString id = QString("T-%1").arg(++contact_counter_, 3, 10, QChar('0'));
+  const double head = std::clamp(static_cast<double>(scrub_->value()), 0.0,
+    session_ ? session_->totalDistance() : 0.0);
+  const double stamp_s = session_ ? session_->timeAtDistance(head) : 0.0;
   contact_store_.add(
-    make_box_contact(pts, id.toStdString(), "sidescan", "bizzy/map", 0.0));
+    make_box_contact(pts, id.toStdString(), "sidescan", "bizzy/map", stamp_s));
   refreshContacts();
 }
 
@@ -499,6 +520,7 @@ void SidescanViewerWindow::onRenderFinished()
   const SidescanRenderResult r = render_watcher_.result();
   canvas_->setCoverage(r.image, r.origin_x, r.origin_y, r.res_m);
   waterfall_->setImage(r.waterfall);
+  waterfall_->setIndex(r.waterfall_index);
   if (r.has_center) {canvas_->setCenter(r.center_x, r.center_y);}
   status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted")
     .arg(r.head_m, 0, 'f', 1)

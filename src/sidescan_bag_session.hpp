@@ -130,6 +130,10 @@ public:
   // Total along-track distance of the recording (metres).
   double totalDistance() const {return total_distance_m_;}
 
+  // Bag time (stamp, seconds) of the ping nearest the given along-track distance —
+  // used to stamp a marked contact with its real observation time. 0 if empty.
+  double timeAtDistance(double dist_m) const;
+
   std::size_t channelCount(SidescanChannel ch) const;
   std::size_t posesResolved() const {return poses_resolved_;}
   std::size_t posesSkipped() const {return poses_skipped_;}

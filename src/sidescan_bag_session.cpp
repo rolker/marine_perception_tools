@@ -430,6 +430,16 @@ std::size_t SidescanBagSession::channelCount(SidescanChannel ch) const
   return n;
 }
 
+double SidescanBagSession::timeAtDistance(double dist_m) const
+{
+  if (pings_.empty()) {return 0.0;}
+  // pings_ are stamp-sorted with non-decreasing cumulative_distance_m.
+  const auto it = std::lower_bound(
+    pings_.begin(), pings_.end(), dist_m,
+    [](const SidescanPing & p, double d) {return p.cumulative_distance_m < d;});
+  return (it == pings_.end()) ? pings_.back().stamp_s : it->stamp_s;
+}
+
 std::vector<WindowPing> SidescanBagSession::readWindow(
   double dist_lo, double dist_hi, int max_pings, bool include_down) const
 {

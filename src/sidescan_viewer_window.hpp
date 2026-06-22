@@ -26,6 +26,7 @@
 
 #include "contact_store.hpp"
 #include "sidescan_bag_session.hpp"
+#include "sidescan_waterfall.hpp"
 
 class QLabel;
 class QSlider;
@@ -40,7 +41,6 @@ namespace marine_perception_tools
 {
 
 class SidescanCanvas;
-class SidescanWaterfall;
 
 // Result of an off-thread bag load: either a session or an error message. Copyable
 // (shared_ptr + QString) so it can ride through QFuture/QFutureWatcher.
@@ -58,6 +58,7 @@ struct SidescanRenderResult
   bool ok = false;
   QImage image;          // georeferenced coverage (map frame)
   QImage waterfall;      // uncorrected slant-range waterfall of the same window
+  WaterfallIndex waterfall_index;  // pixel->map mapping for waterfall marking
   double origin_x = 0.0;
   double origin_y = 0.0;
   double res_m = 0.25;
