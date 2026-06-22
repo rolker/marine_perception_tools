@@ -52,3 +52,24 @@ issue: 7
 
 ### Open questions
 - [ ] PR2 must tune nadir altitude auto-detect (probe showed implausible ~0.1 m — near-field ringing beats min_gate=1; safe-degrades to flat). Visually verifiable once rendering lands.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-22
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+**Verdict**: approved (all must-fixes addressed in-branch)
+
+**Branch**: feature/issue-7 at `072ea19`
+**Mode**: pre-push
+**Depth**: Standard (reason: ~770 LOC new subsystem, cross-layer ROS/TF)
+**Must-fix**: 2 → fixed | **Suggestions**: several (key ones fixed)
+**Round**: 1 | **Ship**: recommended — no open must-fix after fixes; tests green
+**Specialists**: static (clean, pre-run), governance + plan-drift (lead), 2 Claude adversarial passes (Lens A logic, Lens B systemic). Copilot off (default + quota suspended).
+
+### Findings
+- [x] (must-fix) `is_bigendian` ignored → silent garbage on big-endian bag; byte-swap added — `sidescan_bag_session.cpp:normalize_beam0`
+- [x] (must-fix) one corrupt message aborted whole load; per-message try/catch + decodeErrors() — `sidescan_bag_session.cpp` pass1/pass2
+- [x] (suggestion) nearest-nadir altitude had no staleness cap; added altitude_max_dt_s=2s — `sidescan_bag_session.cpp`
+- [x] (suggestion) ground_range NaN/Inf guard + 2 gtests — `sidescan_geometry.hpp`
+- [x] (verify) sample_rate top-level + beam-major layout — confirmed correct against .msg, no change
+- [ ] (suggestion, → PR2) unbounded in-RAM ping index (distance-buffer milestone); single-stamp canTransform geo signal; amplitude-estimator min_gate (fallback only)
