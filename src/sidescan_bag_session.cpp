@@ -1,0 +1,287 @@
+// Copyright 2026 Roland Arsenault
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "sidescan_bag_session.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <map>
+#include <stdexcept>
+#include <utility>
+
+#include "marine_acoustic_msgs/msg/raw_sonar_image.hpp"
+#include "rclcpp/serialization.hpp"
+#include "rclcpp/serialized_message.hpp"
+#include "rosbag2_cpp/reader.hpp"
+#include "tf2/buffer_core.h"
+#include "tf2/time.h"
+#include "tf2_msgs/msg/tf_message.hpp"
+
+namespace marine_perception_tools
+{
+namespace
+{
+
+template<typename T>
+T deserialize(const rosbag2_storage::SerializedBagMessageSharedPtr & msg)
+{
+  rclcpp::SerializedMessage serialized(*msg->serialized_data);
+  T out;
+  rclcpp::Serialization<T>().deserialize_message(&serialized, &out);
+  return out;
+}
+
+// World-frame yaw (ENU, CCW from +x) from a transform quaternion.
+double yaw_from_quaternion(double x, double y, double z, double w)
+{
+  return std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
+}
+
+// Decode beam 0 of a RawSonarImage into amplitudes normalized to [0, 1]. The data
+// buffer holds `beam_count * samples_per_beam` elements of `dtype`, beam-major, so
+// beam 0 is the leading `samples_per_beam` elements. Integer types normalize by
+// their full-scale max; float types are passed through (already physical/relative)
+// and clamped to [0, 1]. Unknown dtypes yield an empty vector (ping kept, unpaintable).
+template<typename T>
+std::vector<float> normalize_beam0(const uint8_t * bytes, std::size_t n, double scale)
+{
+  std::vector<float> out(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    T v;
+    std::memcpy(&v, bytes + i * sizeof(T), sizeof(T));
+    out[i] = static_cast<float>(static_cast<double>(v) / scale);
+  }
+  return out;
+}
+
+std::vector<float> extract_beam0(
+  const marine_acoustic_msgs::msg::SonarImageData & img,
+  uint32_t samples_per_beam)
+{
+  using marine_acoustic_msgs::msg::SonarImageData;
+  const std::size_t n = samples_per_beam;
+  if (n == 0) {return {};}
+  std::size_t elem_size = 0;
+  switch (img.dtype) {
+    case SonarImageData::DTYPE_UINT8: elem_size = 1; break;
+    case SonarImageData::DTYPE_INT8: elem_size = 1; break;
+    case SonarImageData::DTYPE_UINT16: elem_size = 2; break;
+    case SonarImageData::DTYPE_INT16: elem_size = 2; break;
+    case SonarImageData::DTYPE_UINT32: elem_size = 4; break;
+    case SonarImageData::DTYPE_INT32: elem_size = 4; break;
+    case SonarImageData::DTYPE_FLOAT32: elem_size = 4; break;
+    case SonarImageData::DTYPE_FLOAT64: elem_size = 8; break;
+    default: return {};  // unsupported (incl. 64-bit ints) — leave unpaintable
+  }
+  if (img.data.size() < n * elem_size) {return {};}
+  const uint8_t * b = img.data.data();
+  std::vector<float> out;
+  switch (img.dtype) {
+    case SonarImageData::DTYPE_UINT8: out = normalize_beam0<uint8_t>(b, n, 255.0); break;
+    case SonarImageData::DTYPE_INT8: out = normalize_beam0<int8_t>(b, n, 127.0); break;
+    case SonarImageData::DTYPE_UINT16: out = normalize_beam0<uint16_t>(b, n, 65535.0); break;
+    case SonarImageData::DTYPE_INT16: out = normalize_beam0<int16_t>(b, n, 32767.0); break;
+    case SonarImageData::DTYPE_UINT32: out = normalize_beam0<uint32_t>(b, n, 4294967295.0); break;
+    case SonarImageData::DTYPE_INT32: out = normalize_beam0<int32_t>(b, n, 2147483647.0); break;
+    case SonarImageData::DTYPE_FLOAT32: out = normalize_beam0<float>(b, n, 1.0); break;
+    case SonarImageData::DTYPE_FLOAT64: out = normalize_beam0<double>(b, n, 1.0); break;
+    default: return {};
+  }
+  for (float & v : out) {
+    v = std::clamp(v, 0.0f, 1.0f);
+  }
+  return out;
+}
+
+}  // namespace
+
+SidescanBagSession::SidescanBagSession(
+  const std::string & bag_uri, const SidescanBagOptions & opts)
+{
+  // ---- Pass 1: bounds, TF cache, channel presence. ----
+  rosbag2_cpp::Reader reader;
+  reader.open(bag_uri);
+  const auto & meta = reader.get_metadata();
+  const double duration_s = std::chrono::duration_cast<std::chrono::duration<double>>(
+    meta.duration).count();
+  tf_buffer_ = std::make_unique<tf2::BufferCore>(tf2::durationFromSec(duration_s + 60.0));
+
+  std::map<std::string, std::size_t> counts;
+  for (const auto & t : meta.topics_with_message_count) {
+    counts[t.topic_metadata.name] = t.message_count;
+  }
+  bool any_channel = false;
+  for (int c = 0; c < kNumSidescanChannels; ++c) {
+    auto it = counts.find(kSidescanTopics[c]);
+    if (it != counts.end() && it->second > 0) {any_channel = true;}
+  }
+  if (!any_channel) {
+    throw std::runtime_error(
+      "bag has no Garmin sidescan ping topics (sonar_image_{port,starboard,down})");
+  }
+
+  while (reader.has_next()) {
+    auto bag_msg = reader.read_next();
+    const std::string & topic = bag_msg->topic_name;
+    if (topic == "/tf" || topic == "/tf_static") {
+      auto tfm = deserialize<tf2_msgs::msg::TFMessage>(bag_msg);
+      const bool is_static = (topic == "/tf_static");
+      for (const auto & tr : tfm.transforms) {
+        tf_buffer_->setTransform(tr, "bag", is_static);
+      }
+    }
+  }
+
+  // ---- Pass 2: read pings, decode samples. Pose is resolved afterwards, once
+  // the whole TF cache is populated. ----
+  std::map<std::string, SidescanChannel> topic_to_channel;
+  for (int c = 0; c < kNumSidescanChannels; ++c) {
+    topic_to_channel[kSidescanTopics[c]] = static_cast<SidescanChannel>(c);
+  }
+
+  rosbag2_cpp::Reader reader2;
+  reader2.open(bag_uri);
+  while (reader2.has_next()) {
+    auto bag_msg = reader2.read_next();
+    auto ch_it = topic_to_channel.find(bag_msg->topic_name);
+    if (ch_it == topic_to_channel.end()) {continue;}
+
+    auto img = deserialize<marine_acoustic_msgs::msg::RawSonarImage>(bag_msg);
+    SidescanPing ping;
+    ping.channel = ch_it->second;
+    ping.stamp_s = img.header.stamp.sec + img.header.stamp.nanosec * 1e-9;
+    ping.sound_speed = img.ping_info.sound_speed;
+    ping.sample_rate = img.sample_rate;
+    ping.amplitudes = extract_beam0(img.image, img.samples_per_beam);
+    ping.geometry.sample0 = img.sample0;
+    ping.geometry.metres_per_sample =
+      slant_metres_per_sample(img.ping_info.sound_speed, img.sample_rate);
+    ping.geometry.lateral_sign = channel_lateral_sign(ping.channel);
+    pings_.push_back(std::move(ping));
+  }
+
+  std::stable_sort(
+    pings_.begin(), pings_.end(),
+    [](const SidescanPing & a, const SidescanPing & b) {return a.stamp_s < b.stamp_s;});
+
+  // ---- Resolve per-ping sensor pose + along-track distance. ----
+  bool have_prev_base = false;
+  double prev_bx = 0.0;
+  double prev_by = 0.0;
+  double cumulative = 0.0;
+  for (auto & ping : pings_) {
+    const auto stamp = tf2::TimePoint(
+      std::chrono::nanoseconds(static_cast<int64_t>(ping.stamp_s * 1e9)));
+    const std::string sensor_frame =
+      kSidescanSensorFrames[static_cast<int>(ping.channel)];
+
+    // Sensor pose (projection origin) in the world plane.
+    try {
+      const auto tf = tf_buffer_->lookupTransform(opts.world_frame, sensor_frame, stamp);
+      const auto & t = tf.transform.translation;
+      const auto & q = tf.transform.rotation;
+      ping.geometry.sensor_x = t.x;
+      ping.geometry.sensor_y = t.y;
+      ping.geometry.yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w);
+      ping.has_pose = true;
+      ++poses_resolved_;
+    } catch (const tf2::TransformException &) {
+      ++poses_skipped_;
+    }
+
+    // Along-track distance from the boat (base_link), shared across channels.
+    try {
+      const auto tf = tf_buffer_->lookupTransform(opts.world_frame, opts.base_frame, stamp);
+      const double bx = tf.transform.translation.x;
+      const double by = tf.transform.translation.y;
+      if (have_prev_base) {
+        cumulative += std::hypot(bx - prev_bx, by - prev_by);
+      }
+      prev_bx = bx;
+      prev_by = by;
+      have_prev_base = true;
+    } catch (const tf2::TransformException &) {
+      // No base pose at this stamp — carry the running distance forward unchanged.
+    }
+    ping.cumulative_distance_m = cumulative;
+  }
+  total_distance_m_ = cumulative;
+
+  // ---- Assign height-above-bottom from the nearest nadir ping. ----
+  struct NadirAlt {double stamp_s; double altitude;};
+  std::vector<NadirAlt> nadir;
+  for (const auto & ping : pings_) {
+    if (ping.channel != SidescanChannel::Down) {continue;}
+    const double alt = estimate_altitude_from_nadir(
+      ping.amplitudes, ping.geometry.sample0, ping.geometry.metres_per_sample,
+      opts.altitude_threshold_frac);
+    if (std::isfinite(alt)) {nadir.push_back({ping.stamp_s, alt});}
+  }
+  if (!nadir.empty()) {
+    for (auto & ping : pings_) {
+      // Nearest nadir ping in time (nadir is in stamp order — same source order).
+      auto it = std::lower_bound(
+        nadir.begin(), nadir.end(), ping.stamp_s,
+        [](const NadirAlt & na, double s) {return na.stamp_s < s;});
+      double best = nadir.front().altitude;
+      double best_dt = std::numeric_limits<double>::max();
+      for (auto cand : {it == nadir.begin() ? it : std::prev(it),
+          it == nadir.end() ? std::prev(it) : it})
+      {
+        const double dt = std::abs(cand->stamp_s - ping.stamp_s);
+        if (dt < best_dt) {best_dt = dt; best = cand->altitude;}
+      }
+      ping.geometry.altitude = best;
+    }
+  }
+
+  // ---- Geo-export readiness: earth -> world resolves at the mid-recording stamp. ----
+  if (!pings_.empty()) {
+    const auto mid = tf2::TimePoint(std::chrono::nanoseconds(
+        static_cast<int64_t>(pings_[pings_.size() / 2].stamp_s * 1e9)));
+    has_geo_reference_ = tf_buffer_->canTransform(opts.geo_frame, opts.world_frame, mid);
+  }
+}
+
+SidescanBagSession::~SidescanBagSession() = default;
+
+std::vector<const SidescanPing *> SidescanBagSession::window(
+  double dist_lo, double dist_hi) const
+{
+  const double hi = (dist_hi < 0.0) ? total_distance_m_ : dist_hi;
+  std::vector<const SidescanPing *> out;
+  for (const auto & ping : pings_) {
+    if (ping.cumulative_distance_m >= dist_lo && ping.cumulative_distance_m <= hi) {
+      out.push_back(&ping);
+    }
+  }
+  return out;
+}
+
+std::size_t SidescanBagSession::channelCount(SidescanChannel ch) const
+{
+  std::size_t n = 0;
+  for (const auto & ping : pings_) {
+    if (ping.channel == ch) {
+      ++n;
+    }
+  }
+  return n;
+}
+
+}  // namespace marine_perception_tools

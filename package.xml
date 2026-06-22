@@ -18,6 +18,7 @@
   <depend>sea_surface_segmentation</depend>
   <depend>grid_map_core</depend>
   <depend>image_geometry</depend>
+  <depend>marine_acoustic_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>ffmpeg_encoder_decoder</depend>
   <depend>ffmpeg_image_transport_msgs</depend>

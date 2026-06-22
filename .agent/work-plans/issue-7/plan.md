@@ -107,6 +107,19 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
 - **`earth → bizzy/map` availability:** present in these bags? PR1 ingest verifies; if
   absent, geo_pose export needs a datum fallback (lake datum 52.3 m WGS84 known).
 
+## Implementation Notes
+
+- **PR1 landed** (`sidescan_core`): `sidescan_geometry.hpp` (pure, 9 gtests), `SidescanBagSession`
+  ingest, `sidescan_probe` CLI. Verified on `bizzyboat_sonar/2026-06-18T19-39-06+00-00`:
+  48 551 pings (port/stbd/down balanced), 676 m track, `earth→bizzy/map` available,
+  ~24% of pings have no TF pose at their stamp (early-bag localization warm-up; pings
+  retained but unpaintable — expected).
+- **Known tuning item (→ PR2):** nadir altitude auto-detect (`estimate_altitude_from_nadir`)
+  fired at ~0.1 m on the real bag — near-field/transmit ringing beats the default
+  `min_gate=1`. Safe-degrades (altitude≈0 → ground≈slant, flat). Tune the gate/threshold
+  in PR2 where the rendered bottom makes it visually checkable; consider a min-altitude
+  floor or a persistence test on the nadir return.
+
 ## Estimated Scope
 
 Multiple PRs (stacked). PR1 = scaffold + ingest + projection (core, tested). PR2 = map
