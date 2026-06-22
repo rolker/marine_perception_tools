@@ -27,7 +27,8 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
    cumulative along-track distance; windowed read **by distance** (not time). Verify
    `earth → bizzy/map` presence on scan (geo-export readiness).
 3. **Projection (pure, unit-tested)** — per-ping sensor pose in `bizzy/map` from TF;
-   nadir-channel first-return → altitude; slant→ground-range; across-track sample →
+   altitude from the driver's `nadir_depth` (`sensor_msgs/Range`), amplitude
+   first-return estimator as fallback; slant→ground-range; across-track sample →
    `bizzy/map` XY.
 4. **Swath render + coverage** — paint port+starboard ground-range samples into an
    in-app `bizzy/map`-frame raster (`grid_map_core`); **quality-wins** per cell
@@ -97,8 +98,10 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
   `earth → bizzy/map` — PR1 ingest verifies its presence; datum fallback if absent.
 - **`marine_acoustic_msgs` confirmed** installed at `/opt/ros/jazzy` (binary dep) —
   PR1 compiles. Add as `<depend>`.
-- **Down channel = nadir altitude only** (first-return → height-above-bottom); port +
-  starboard are the painted swath. (Resolves the down-look ambiguity.)
+- **Altitude = driver `nadir_depth` (`sensor_msgs/Range`)** — the Garmin driver's
+  bottom-tracked height-above-bottom, the authoritative source (verified 5.9–15.2 m on
+  the real bag); the down-channel amplitude first-return estimator is a fallback only.
+  Port + starboard are the painted swath. (Resolves the down-look ambiguity.)
 
 ## Open Questions
 
@@ -114,11 +117,12 @@ policy) maps to a distance-windowed analogue; `cv_qt.hpp` for `cv::Mat`→`QImag
   48 551 pings (port/stbd/down balanced), 676 m track, `earth→bizzy/map` available,
   ~24% of pings have no TF pose at their stamp (early-bag localization warm-up; pings
   retained but unpaintable — expected).
-- **Known tuning item (→ PR2):** nadir altitude auto-detect (`estimate_altitude_from_nadir`)
-  fired at ~0.1 m on the real bag — near-field/transmit ringing beats the default
-  `min_gate=1`. Safe-degrades (altitude≈0 → ground≈slant, flat). Tune the gate/threshold
-  in PR2 where the rendered bottom makes it visually checkable; consider a min-altitude
-  floor or a persistence test on the nadir return.
+- **Altitude source switched to the driver's `nadir_depth` Range** (Roland's call): the
+  amplitude estimator fired at an implausible ~0.1 m (near-field ringing) on the real
+  bag, whereas `nadir_depth` gives the driver's bottom-tracked depth directly
+  (3.62 m on the probe ping; 5.9–15.2 m across the bag). The amplitude estimator is
+  retained as a fallback (with its 9 gtests) for bags/sonars lacking the topic.
+  `SidescanBagSession::usedNadirDepth()` reports which path was taken.
 
 ## Estimated Scope
 

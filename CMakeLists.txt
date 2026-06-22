@@ -82,6 +82,7 @@ set(SIDESCAN_CORE_DEPS
   marine_acoustic_msgs
   rclcpp
   rosbag2_cpp
+  sensor_msgs
   tf2
   tf2_msgs
 )

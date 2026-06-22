@@ -61,6 +61,8 @@ int main(int argc, char ** argv)
       session.posesResolved(), session.posesSkipped());
     std::printf("geo-reference (earth->world): %s\n",
       session.hasGeoReference() ? "available" : "ABSENT (datum fallback needed)");
+    std::printf("altitude source: %s\n",
+      session.usedNadirDepth() ? "nadir_depth (driver)" : "amplitude estimator (fallback)");
 
     // Project the middle sample of the first paintable port/starboard ping.
     for (const auto & p : pings) {

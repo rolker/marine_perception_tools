@@ -28,6 +28,7 @@
 #include "rclcpp/serialization.hpp"
 #include "rclcpp/serialized_message.hpp"
 #include "rosbag2_cpp/reader.hpp"
+#include "sensor_msgs/msg/range.hpp"
 #include "tf2/buffer_core.h"
 #include "tf2/time.h"
 #include "tf2_msgs/msg/tf_message.hpp"
@@ -154,10 +155,22 @@ SidescanBagSession::SidescanBagSession(
     topic_to_channel[kSidescanTopics[c]] = static_cast<SidescanChannel>(c);
   }
 
+  // The driver's bottom-tracked nadir depth (stamp_s, height-above-bottom m),
+  // collected in bag order, the authoritative altitude source.
+  std::vector<std::pair<double, double>> nadir_depths;
+
   rosbag2_cpp::Reader reader2;
   reader2.open(bag_uri);
   while (reader2.has_next()) {
     auto bag_msg = reader2.read_next();
+    if (bag_msg->topic_name == kNadirDepthTopic) {
+      auto rng = deserialize<sensor_msgs::msg::Range>(bag_msg);
+      if (std::isfinite(rng.range)) {
+        const double t = rng.header.stamp.sec + rng.header.stamp.nanosec * 1e-9;
+        nadir_depths.emplace_back(t, static_cast<double>(rng.range));
+      }
+      continue;
+    }
     auto ch_it = topic_to_channel.find(bag_msg->topic_name);
     if (ch_it == topic_to_channel.end()) {continue;}
 
@@ -222,16 +235,31 @@ SidescanBagSession::SidescanBagSession(
   }
   total_distance_m_ = cumulative;
 
-  // ---- Assign height-above-bottom from the nearest nadir ping. ----
+  // ---- Assign height-above-bottom from the nearest nadir sample in time. ----
+  // Prefer the driver's bottom-tracked nadir_depth Range; only if that topic is
+  // absent fall back to detecting the first bottom return in the down channel's
+  // raw amplitudes (fragile near the transmit/near-field ringing — see
+  // estimate_altitude_from_nadir).
   struct NadirAlt {double stamp_s; double altitude;};
   std::vector<NadirAlt> nadir;
-  for (const auto & ping : pings_) {
-    if (ping.channel != SidescanChannel::Down) {continue;}
-    const double alt = estimate_altitude_from_nadir(
-      ping.amplitudes, ping.geometry.sample0, ping.geometry.metres_per_sample,
-      opts.altitude_threshold_frac);
-    if (std::isfinite(alt)) {nadir.push_back({ping.stamp_s, alt});}
+  if (!nadir_depths.empty()) {
+    used_nadir_depth_ = true;
+    nadir.reserve(nadir_depths.size());
+    for (const auto & [t, range] : nadir_depths) {
+      nadir.push_back({t, range});
+    }
+  } else {
+    for (const auto & ping : pings_) {
+      if (ping.channel != SidescanChannel::Down) {continue;}
+      const double alt = estimate_altitude_from_nadir(
+        ping.amplitudes, ping.geometry.sample0, ping.geometry.metres_per_sample,
+        opts.altitude_threshold_frac);
+      if (std::isfinite(alt)) {nadir.push_back({ping.stamp_s, alt});}
+    }
   }
+  std::stable_sort(
+    nadir.begin(), nadir.end(),
+    [](const NadirAlt & a, const NadirAlt & b) {return a.stamp_s < b.stamp_s;});
   if (!nadir.empty()) {
     for (auto & ping : pings_) {
       // Nearest nadir ping in time (nadir is in stamp order — same source order).

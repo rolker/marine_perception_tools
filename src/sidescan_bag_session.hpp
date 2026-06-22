@@ -44,6 +44,13 @@ inline constexpr std::array<const char *, kNumSidescanChannels> kSidescanSensorF
   "bizzy/garmin_sidescan_starboard",
   "bizzy/garmin_sidescan_down"};
 
+// The Garmin driver's bottom-tracked nadir depth (sensor_msgs/Range, height above
+// bottom). This is the authoritative altitude source; the amplitude-based
+// estimator (sidescan_geometry.hpp) is only a fallback for bags/sonars that do
+// not publish it.
+inline constexpr const char * kNadirDepthTopic =
+  "/bizzy/sensors/sidescan/garmin_sidescan/nadir_depth";
+
 // One ingested ping: its channel, time, the along-track distance of the boat when
 // it was transmitted, the world-plane geometry needed to project it (pose +
 // acoustic scale + resolved altitude), and the beam-0 sample amplitudes
@@ -107,6 +114,11 @@ public:
   // be exported to geographic coordinates without a datum fallback.
   bool hasGeoReference() const {return has_geo_reference_;}
 
+  // True when ping altitudes came from the driver's nadir_depth Range topic;
+  // false means the amplitude-based estimator fallback was used (or no altitude
+  // source was available at all).
+  bool usedNadirDepth() const {return used_nadir_depth_;}
+
 private:
   std::vector<SidescanPing> pings_;
   std::unique_ptr<tf2::BufferCore> tf_buffer_;
@@ -114,6 +126,7 @@ private:
   std::size_t poses_resolved_ = 0;
   std::size_t poses_skipped_ = 0;
   bool has_geo_reference_ = false;
+  bool used_nadir_depth_ = false;
 };
 
 }  // namespace marine_perception_tools
