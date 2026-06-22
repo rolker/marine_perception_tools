@@ -16,8 +16,10 @@ find_package(cv_bridge REQUIRED)
 find_package(grid_map_core REQUIRED)
 find_package(ffmpeg_encoder_decoder REQUIRED)
 find_package(ffmpeg_image_transport_msgs REQUIRED)
+find_package(geographic_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(marine_acoustic_msgs REQUIRED)
+find_package(marine_interfaces REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -79,7 +81,9 @@ target_link_libraries(sea_surface_tuner
 # display, mirroring the tuner_core split.
 set(SIDESCAN_CORE_DEPS
   builtin_interfaces
+  geographic_msgs
   marine_acoustic_msgs
+  marine_interfaces
   rclcpp
   rosbag2_cpp
   sensor_msgs
@@ -89,6 +93,7 @@ set(SIDESCAN_CORE_DEPS
 add_library(sidescan_core
   src/sidescan_bag_session.cpp
   src/coverage_raster.cpp
+  src/contact_store.cpp
 )
 target_include_directories(sidescan_core PUBLIC src)
 ament_target_dependencies(sidescan_core ${SIDESCAN_CORE_DEPS})
@@ -137,6 +142,11 @@ if(BUILD_TESTING)
   # Coverage raster (quality-wins paint + coverage skip) — links sidescan_core.
   ament_add_gtest(test_coverage_raster test/test_coverage_raster.cpp)
   target_link_libraries(test_coverage_raster sidescan_core)
+
+  # Contact store (box->Contact, in-box query, CDR round-trip) — links sidescan_core.
+  ament_add_gtest(test_contact_store test/test_contact_store.cpp)
+  target_link_libraries(test_contact_store sidescan_core)
+  ament_target_dependencies(test_contact_store marine_interfaces)
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
