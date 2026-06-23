@@ -57,6 +57,7 @@ struct SidescanLoadResult
 struct SidescanRenderResult
 {
   bool ok = false;
+  uint64_t epoch = 0;    // session epoch this render was computed for (stale-drop)
   QImage image;          // georeferenced coverage (map frame)
   QImage waterfall;      // uncorrected slant-range waterfall of the same window
   WaterfallIndex waterfall_index;  // pixel->map mapping for waterfall marking
@@ -84,6 +85,7 @@ class SidescanViewerWindow : public QMainWindow
 
 public:
   explicit SidescanViewerWindow(QWidget * parent = nullptr);
+  ~SidescanViewerWindow() override;
 
   // Open a bag directly (e.g. from a CLI argument).
   void openBag(const std::string & bag_uri);
@@ -134,6 +136,7 @@ private:
 
   std::shared_ptr<SidescanBagSession> session_;
   double window_len_m_ = 100.0;
+  uint64_t session_epoch_ = 0;   // bumped on each loaded bag; stale renders are dropped
   int max_window_pings_ = 600;   // stationary cap; also sets raster res = window / this
 };
 

@@ -410,6 +410,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   resize(1100, 760);
 }
 
+SidescanViewerWindow::~SidescanViewerWindow()
+{
+  // Don't let a worker outlive the widgets it would signal: wait for any in-flight
+  // load/render to finish before the members tear down.
+  if (load_watcher_.isRunning()) {load_watcher_.waitForFinished();}
+  if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
+}
+
 void SidescanViewerWindow::onOpenBag()
 {
   const QString dir = QFileDialog::getExistingDirectory(this, "Open ROS 2 bag directory");
@@ -448,6 +456,7 @@ void SidescanViewerWindow::onLoadFinished()
     return;
   }
   session_ = result.session;
+  ++session_epoch_;   // any render in flight for the previous bag is now stale
 
   // Boat track from every ping with a resolved pose (stamp-ordered).
   std::vector<QPointF> track;
@@ -606,10 +615,18 @@ void SidescanViewerWindow::requestRender()
   const int max_pings = max_window_pings_;
   const double res = window_len_m_ / static_cast<double>(std::max(1, max_window_pings_));
   const int palette = palette_combo_ ? palette_combo_->currentIndex() : 0;
+  const uint64_t epoch = session_epoch_;
   render_watcher_.setFuture(QtConcurrent::run(
-      [session, head, total, win, max_pings, res, palette]() {
-        return render_window(
-          session, head, total, win.lo, win.hi, max_pings, res, palette);
+      [session, head, total, win, max_pings, res, palette, epoch]() {
+        SidescanRenderResult r;
+        try {
+          r = render_window(
+            session, head, total, win.lo, win.hi, max_pings, res, palette);
+        } catch (const std::exception &) {
+          r.ok = false;   // e.g. the bag became unreadable mid-session
+        }
+        r.epoch = epoch;
+        return r;
       }));
 }
 
@@ -617,6 +634,28 @@ void SidescanViewerWindow::onRenderFinished()
 {
   rendering_ = false;
   const SidescanRenderResult r = render_watcher_.result();
+
+  // Drop a render computed for a previous bag (epoch mismatch) so it never flashes
+  // stale coverage or leaves the waterfall index on the wrong geometry.
+  if (r.epoch != session_epoch_) {
+    if (render_pending_) {
+      render_pending_ = false;
+      requestRender();
+    }
+    return;
+  }
+
+  if (!r.ok) {
+    // The render worker hit an exception (e.g. the bag became unreadable); keep the
+    // last good view rather than crashing or clearing.
+    status_->setText("Render failed (bag unreadable?) — showing the last view.");
+    if (render_pending_) {
+      render_pending_ = false;
+      requestRender();
+    }
+    return;
+  }
+
   canvas_->setCoverage(r.image, r.origin_x, r.origin_y, r.res_m);
   waterfall_->setImage(r.waterfall);
   waterfall_->setIndex(r.waterfall_index);
