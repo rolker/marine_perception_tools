@@ -33,9 +33,10 @@ marine_interfaces::msg::Contact make_box_contact(
 {
   marine_interfaces::msg::Contact c;
   c.header.frame_id = frame;
-  c.header.stamp.sec = static_cast<int32_t>(stamp_s);
+  const double t = std::max(0.0, stamp_s);   // guard negative -> nanosec wraparound
+  c.header.stamp.sec = static_cast<int32_t>(t);
   c.header.stamp.nanosec =
-    static_cast<uint32_t>((stamp_s - static_cast<double>(c.header.stamp.sec)) * 1e9);
+    static_cast<uint32_t>((t - static_cast<double>(c.header.stamp.sec)) * 1e9);
   c.id = id;
   c.source = source;
   c.existence_probability = 1.0f;            // human-drawn
