@@ -304,10 +304,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   max_pings_spin_ = new QSpinBox(this);
   max_pings_spin_->setRange(50, 50000);
   max_pings_spin_->setValue(max_window_pings_);
+  max_pings_spin_->setSingleStep(10);
   max_pings_spin_->setSuffix(" pings");
   max_pings_spin_->setToolTip(
-    "Max pings rendered per window (stationary cap). Raise if a long window is "
-    "truncated; lower to keep a stopped boat from piling up.");
+    "Max pings rendered per window (stationary cap). Also sets the map raster "
+    "resolution = window / this, so raising it for a slow (dense-ping) survey "
+    "both renders more pings and refines the map.");
 
   status_ = new QLabel("Open a bag to begin (File → Open Bag).", this);
 
@@ -338,7 +340,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   for (const auto & name : marine_colormap::palette_names()) {
     palette_combo_->addItem(QString::fromStdString(name));
   }
-  if (const auto vi = marine_colormap::palette_index("viridis")) {
+  if (const auto vi = marine_colormap::palette_index("bronze")) {
     palette_combo_->setCurrentIndex(static_cast<int>(*vi));
   }
   crow->addWidget(new QLabel("Palette:", this));
@@ -602,7 +604,7 @@ void SidescanViewerWindow::requestRender()
   rendering_ = true;
   auto session = session_;  // keep alive for the worker
   const int max_pings = max_window_pings_;
-  const double res = resolution_m_;
+  const double res = window_len_m_ / static_cast<double>(std::max(1, max_window_pings_));
   const int palette = palette_combo_ ? palette_combo_->currentIndex() : 0;
   render_watcher_.setFuture(QtConcurrent::run(
       [session, head, total, win, max_pings, res, palette]() {

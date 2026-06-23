@@ -134,8 +134,7 @@ private:
 
   std::shared_ptr<SidescanBagSession> session_;
   double window_len_m_ = 100.0;
-  double resolution_m_ = 0.25;
-  int max_window_pings_ = 600;   // stationary cap
+  int max_window_pings_ = 600;   // stationary cap; also sets raster res = window / this
 };
 
 }  // namespace marine_perception_tools
