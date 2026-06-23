@@ -150,55 +150,91 @@ void SidescanWaterfall::paintEvent(QPaintEvent * event)
   // distance on y). Smooth only vertically would be ideal; keep it simple.
   painter.drawImage(rect(), image_);
 
-  // Overlay contacts at every ping/sample pixel that ensonified each one (the
-  // inverse of project_sample: a contact at map (cx,cy) lands on a ping whose
-  // across-track line passes near it, at the sample matching its ground range).
+  // Box each contact at its closest-approach (apex) sample, with the id label. On a
+  // slant-range waterfall a fixed target's echo traces a hyperbola; its apex (minimum
+  // slant, the abeam ping) is where the target actually sits, so a box there reads
+  // like the map box. We box once per continuous run of rows that ensonify the target,
+  // so a target seen on two passes (e.g. after a turn) gets one box per pass.
   const int img_w = index_.pn + index_.sn;
   if (!contacts_.empty() && index_.rows > 0 && img_w > 0) {
     const double sx = static_cast<double>(width()) / img_w;
     const double sy = static_cast<double>(height()) / index_.rows;
-    constexpr double kAlongTol = 1.0;   // metres; "on this ping's line"
-    QPen pen(QColor(255, 210, 60));
-    pen.setWidthF(1.5);
-    painter.setPen(pen);
-    painter.setBrush(Qt::NoBrush);
+    const QColor mark_color(255, 0, 255);   // magenta: reads on every palette
 
-    auto mark = [&](const PingGeometry & g, int row, bool is_port, double cx, double cy) {
-        if (g.metres_per_sample <= 0.0) {return;}
+    // Data-array sample index of map point (cx,cy) on this ping (full slant range),
+    // or -1 if the target is on the other channel's side / scale unknown.
+    auto sample_at = [](const PingGeometry & g, double cx, double cy) -> int {
+        if (g.metres_per_sample <= 0.0) {return -1;}
         const double dx = cx - g.sensor_x;
         const double dy = cy - g.sensor_y;
         const double along = dx * std::cos(g.yaw) + dy * std::sin(g.yaw);
-        if (std::abs(along) > kAlongTol) {return;}
         const double across =
           (dx * -std::sin(g.yaw) + dy * std::cos(g.yaw)) * g.lateral_sign;
-        if (across <= 0.0) {return;}
+        if (across <= 0.0) {return -1;}   // target is on the other channel's side
         const double alt = (g.altitude > 0.0) ? g.altitude : 0.0;
-        const double slant = std::sqrt(across * across + alt * alt);
-        const int i = static_cast<int>(slant / g.metres_per_sample - g.sample0 + 0.5);
-        const int max_i = is_port ? index_.pn : index_.sn;
-        if (i < 0 || i >= max_i) {return;}
-        const int col = is_port ? (index_.pn - 1 - i) : (index_.pn + i);
-        painter.drawEllipse(QPointF((col + 0.5) * sx, (row + 0.5) * sy), 3.0, 3.0);
+        const double horiz = std::sqrt(along * along + across * across);
+        const double slant = std::sqrt(horiz * horiz + alt * alt);
+        return static_cast<int>(slant / g.metres_per_sample - g.sample0 + 0.5);
       };
 
     for (const auto & c : contacts_) {
-      for (int r = 0; r < index_.rows; ++r) {
-        if (r < static_cast<int>(index_.port_geo.size())) {
-          mark(index_.port_geo[r], r, true, c.x, c.y);
-        }
-        if (r < static_cast<int>(index_.stbd_geo.size())) {
-          mark(index_.stbd_geo[r], r, false, c.x, c.y);
-        }
-      }
+      const double footprint = 0.5 * std::max(static_cast<double>(c.w),
+          static_cast<double>(c.h));
+
+      // Walk a channel's rows; within each maximal run of ensonifying rows, box the
+      // minimum-slant (closest) sample and label it.
+      auto draw_passes = [&](const std::vector<PingGeometry> & geos, bool is_port) {
+          const int max_i = is_port ? index_.pn : index_.sn;
+          const int n = std::min(static_cast<int>(geos.size()), index_.rows);
+          bool in_run = false;
+          int best_i = 0;
+          int best_row = -1;
+          double best_mps = 0.0;
+          auto flush = [&]() {
+              if (best_row < 0) {return;}
+              const int col = is_port ? (index_.pn - 1 - best_i) : (index_.pn + best_i);
+              const double cxp = (col + 0.5) * sx;
+              const double cyp = (best_row + 0.5) * sy;
+              const double half_cols = (best_mps > 0.0) ? (footprint / best_mps) : 0.0;
+              const double hw = std::max(6.0, half_cols * sx);
+              const double hh = std::max(5.0, 3.0 * sy);
+              QPen pen(mark_color);
+              pen.setWidthF(2.0);
+              painter.setPen(pen);
+              painter.setBrush(Qt::NoBrush);
+              painter.drawRect(QRectF(cxp - hw, cyp - hh, 2.0 * hw, 2.0 * hh));
+              painter.drawText(QPointF(cxp + hw + 3.0, cyp - hh), c.id);
+            };
+          for (int r = 0; r < n; ++r) {
+            const int i = sample_at(geos[r], c.x, c.y);
+            const bool valid = (i >= 0 && i < max_i);
+            if (valid) {
+              if (!in_run || i < best_i) {
+                best_i = i;
+                best_row = r;
+                best_mps = geos[r].metres_per_sample;
+              }
+              in_run = true;
+            } else if (in_run) {
+              flush();
+              in_run = false;
+              best_row = -1;
+            }
+          }
+          if (in_run) {flush();}
+        };
+
+      draw_passes(index_.port_geo, true);
+      draw_passes(index_.stbd_geo, false);
     }
   }
 
   // Rubber-band box while drawing a contact.
   if (marking_) {
-    QPen pen(QColor(255, 210, 60));
+    QPen pen(QColor(255, 0, 255));
     pen.setStyle(Qt::DashLine);
     painter.setPen(pen);
-    painter.setBrush(QColor(255, 210, 60, 40));
+    painter.setBrush(QColor(255, 0, 255, 40));
     painter.drawRect(QRectF(mark_start_, mark_cur_).normalized());
   }
 }

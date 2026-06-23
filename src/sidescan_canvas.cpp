@@ -192,7 +192,7 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
 
   // Contact markers (map-anchored), drawn wherever they fall in the current view.
   if (!contacts_.empty()) {
-    QPen pen(QColor(255, 210, 60));
+    QPen pen(QColor(255, 0, 255));
     pen.setWidthF(1.5);
     painter.setPen(pen);
     painter.setBrush(Qt::NoBrush);
@@ -210,10 +210,10 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
 
   // Rubber-band box while drawing a contact.
   if (marking_) {
-    QPen pen(QColor(255, 210, 60));
+    QPen pen(QColor(255, 0, 255));
     pen.setStyle(Qt::DashLine);
     painter.setPen(pen);
-    painter.setBrush(QColor(255, 210, 60, 40));
+    painter.setBrush(QColor(255, 0, 255, 40));
     painter.drawRect(QRectF(mark_start_, mark_cur_).normalized());
   }
 }
