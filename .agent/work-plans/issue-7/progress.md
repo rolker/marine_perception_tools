@@ -73,3 +73,24 @@ issue: 7
 - [x] (suggestion) ground_range NaN/Inf guard + 2 gtests — `sidescan_geometry.hpp`
 - [x] (verify) sample_rate top-level + beam-major layout — confirmed correct against .msg, no change
 - [ ] (suggestion, → PR2) unbounded in-RAM ping index (distance-buffer milestone); single-stamp canTransform geo signal; amplitude-estimator min_gate (fallback only)
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-23 06:38 -0400
+**By**: Claude Code Agent (Claude Opus 4.8)
+**Verdict**: changes-requested
+**Branch**: feature/issue-7 at `3d1c1fd`
+**Mode**: pre-push
+**Depth**: Deep (reason: 3812-line new Qt app + core + tests, concurrency + geometry)
+**Must-fix**: 2 | **Suggestions**: 6
+**Round**: 2 | **Ship**: continue — two confirmed must-fix on the render/error path
+
+### Findings
+- [ ] (must-fix) Render worker unguarded: reader.open throw in readWindow crosses QtConcurrent boundary -> result() rethrows on GUI thread -> terminate; onRenderFinished also ignores r.ok — `sidescan_bag_session.cpp:520` / `sidescan_viewer_window.cpp:609,616`
+- [ ] (must-fix) Stale render applied with no session/generation token -> old-bag flash + waterfall index on wrong geometry (mislocated mark) — `sidescan_viewer_window.cpp:614`
+- [ ] (suggestion) No destructor/closeEvent waitForFinished() on watchers (defensive quit-during-load) — `sidescan_viewer_window.cpp`
+- [ ] (suggestion) readWindow slot map: two same-channel pings sharing header stamp_ns overwrite slot, one ping silently dropped — `sidescan_bag_session.cpp:506`
+- [ ] (suggestion) readWindow break keys on recv_timestamp vs header-stamp window+3s pad; clock skew can drop in-range ping — `sidescan_bag_session.cpp:528`
+- [ ] (suggestion) make_box_contact negative stamp_s -> nanosec wrap; clamp defensively — `contact_store.cpp:36`
+- [ ] (suggestion) package.xml description/exports omit new executables; unused heavy tuner deps (OpenCV/cv_bridge/ffmpeg/grid_map_core) — `package.xml`
+- [ ] (suggestion) interp_base_pose dead it==begin() branch bypasses max_gap guard if line-85 check loosened — `sidescan_bag_session.cpp:86`
