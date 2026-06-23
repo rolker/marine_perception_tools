@@ -16,7 +16,11 @@ find_package(cv_bridge REQUIRED)
 find_package(grid_map_core REQUIRED)
 find_package(ffmpeg_encoder_decoder REQUIRED)
 find_package(ffmpeg_image_transport_msgs REQUIRED)
+find_package(geographic_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
+find_package(marine_acoustic_msgs REQUIRED)
+find_package(marine_colormap REQUIRED)
+find_package(marine_interfaces REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -72,7 +76,47 @@ target_link_libraries(sea_surface_tuner
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Concurrent)
 
-install(TARGETS sea_surface_tuner
+# Sidescan viewer core (no Qt): bag ingest + pure projection geometry for the
+# offline georeferenced sidescan viewer / target tracker (issue #7). Kept Qt-free
+# and separate from tuner_core so the projection math is unit-tested without a
+# display, mirroring the tuner_core split.
+set(SIDESCAN_CORE_DEPS
+  builtin_interfaces
+  geographic_msgs
+  marine_acoustic_msgs
+  marine_interfaces
+  rclcpp
+  rosbag2_cpp
+  sensor_msgs
+  tf2
+  tf2_msgs
+)
+add_library(sidescan_core
+  src/sidescan_bag_session.cpp
+  src/coverage_raster.cpp
+  src/contact_store.cpp
+)
+target_include_directories(sidescan_core PUBLIC src)
+ament_target_dependencies(sidescan_core ${SIDESCAN_CORE_DEPS})
+
+# Headless ingest verification (the sidescan analogue of --probe).
+add_executable(sidescan_probe src/sidescan_probe.cpp)
+target_link_libraries(sidescan_probe sidescan_core)
+
+# Qt app: offline georeferenced sidescan viewer + target tracker (issue #7).
+add_executable(sidescan_target_viewer
+  src/sidescan_viewer_main.cpp
+  src/sidescan_viewer_window.cpp
+  src/sidescan_canvas.cpp
+  src/sidescan_waterfall.cpp
+)
+target_link_libraries(sidescan_target_viewer
+  sidescan_core
+  Qt${QT_VERSION_MAJOR}::Widgets
+  Qt${QT_VERSION_MAJOR}::Concurrent)
+ament_target_dependencies(sidescan_target_viewer marine_colormap)
+
+install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -87,6 +131,24 @@ if(BUILD_TESTING)
   # the test needs only the source include dir.
   ament_add_gtest(test_buffer_policy test/test_buffer_policy.cpp)
   target_include_directories(test_buffer_policy PRIVATE src)
+
+  # Pure sidescan projection geometry (sidescan_geometry.hpp) — header-only, no
+  # bag/Qt/ROS, so the test needs only the source include dir.
+  ament_add_gtest(test_sidescan_geometry test/test_sidescan_geometry.cpp)
+  target_include_directories(test_sidescan_geometry PRIVATE src)
+
+  # Pure rolling-distance scrub policy (distance_buffer_policy.hpp) — header-only.
+  ament_add_gtest(test_distance_buffer_policy test/test_distance_buffer_policy.cpp)
+  target_include_directories(test_distance_buffer_policy PRIVATE src)
+
+  # Coverage raster (quality-wins paint + coverage skip) — links sidescan_core.
+  ament_add_gtest(test_coverage_raster test/test_coverage_raster.cpp)
+  target_link_libraries(test_coverage_raster sidescan_core)
+
+  # Contact store (box->Contact, in-box query, CDR round-trip) — links sidescan_core.
+  ament_add_gtest(test_contact_store test/test_contact_store.cpp)
+  target_link_libraries(test_contact_store sidescan_core)
+  ament_target_dependencies(test_contact_store marine_interfaces)
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()

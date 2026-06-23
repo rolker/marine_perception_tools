@@ -3,10 +3,12 @@
   <name>marine_perception_tools</name>
   <version>0.0.0</version>
   <description>
-    Operator-station tools for marine perception. Hosts sea_surface_tuner, an
+    Operator-station tools for marine perception. Hosts sea_surface_tuner (an
     offline C++/Qt application to replay recorded bags and tune the
-    segmentation-to-costmap marking against them. Lives in ui_ws (operator
-    station only) so its Qt dependency stays off the boat-side host.
+    segmentation-to-costmap marking against them) and sidescan_target_viewer (an
+    offline georeferenced sidescan viewer + manual target tracker, with the
+    sidescan_probe CLI). Lives in ui_ws (operator station only) so its Qt
+    dependency stays off the boat-side host.
   </description>
 
   <maintainer email="roland@ccom.unh.edu">Roland Arsenault</maintainer>
@@ -18,6 +20,10 @@
   <depend>sea_surface_segmentation</depend>
   <depend>grid_map_core</depend>
   <depend>image_geometry</depend>
+  <depend>marine_acoustic_msgs</depend>
+  <depend>marine_interfaces</depend>
+  <depend>marine_colormap</depend>
+  <depend>geographic_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>ffmpeg_encoder_decoder</depend>
   <depend>ffmpeg_image_transport_msgs</depend>

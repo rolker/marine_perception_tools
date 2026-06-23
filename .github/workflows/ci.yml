@@ -50,6 +50,23 @@ jobs:
           https://github.com/rolker/unh_marine_perception.git
           ../ws/src/unh_marine_perception
 
+      # marine_colormap is a source sibling (not in rosdep): the sidescan viewer
+      # uses its shared colormap library/shaders. Clone it so the build resolves.
+      - name: Clone marine_colormap source dependency
+        run: >
+          git clone --depth 1 -b jazzy
+          https://github.com/rolker/marine_colormap.git
+          ../ws/src/marine_colormap
+
+      # marine_interfaces (Contact.msg) is a package inside the unh_marine_autonomy
+      # repo, not published to rosdep. Clone the repo and keep only that package so
+      # CI doesn't pull the heavy transitive deps of its sibling packages.
+      - name: Clone marine_interfaces source dependency
+        run: |
+          git clone --depth 1 -b jazzy \
+            https://github.com/rolker/unh_marine_autonomy.git /tmp/uma
+          mv /tmp/uma/marine_interfaces ../ws/src/marine_interfaces
+
       - name: Install ROS dependencies
         working-directory: ../ws
         run: >
