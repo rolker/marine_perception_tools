@@ -86,11 +86,13 @@ issue: 7
 **Round**: 2 | **Ship**: continue — two confirmed must-fix on the render/error path
 
 ### Findings
-- [ ] (must-fix) Render worker unguarded: reader.open throw in readWindow crosses QtConcurrent boundary -> result() rethrows on GUI thread -> terminate; onRenderFinished also ignores r.ok — `sidescan_bag_session.cpp:520` / `sidescan_viewer_window.cpp:609,616`
-- [ ] (must-fix) Stale render applied with no session/generation token -> old-bag flash + waterfall index on wrong geometry (mislocated mark) — `sidescan_viewer_window.cpp:614`
-- [ ] (suggestion) No destructor/closeEvent waitForFinished() on watchers (defensive quit-during-load) — `sidescan_viewer_window.cpp`
-- [ ] (suggestion) readWindow slot map: two same-channel pings sharing header stamp_ns overwrite slot, one ping silently dropped — `sidescan_bag_session.cpp:506`
-- [ ] (suggestion) readWindow break keys on recv_timestamp vs header-stamp window+3s pad; clock skew can drop in-range ping — `sidescan_bag_session.cpp:528`
-- [ ] (suggestion) make_box_contact negative stamp_s -> nanosec wrap; clamp defensively — `contact_store.cpp:36`
-- [ ] (suggestion) package.xml description/exports omit new executables; unused heavy tuner deps (OpenCV/cv_bridge/ffmpeg/grid_map_core) — `package.xml`
-- [ ] (suggestion) interp_base_pose dead it==begin() branch bypasses max_gap guard if line-85 check loosened — `sidescan_bag_session.cpp:86`
+- [x] (must-fix) Render worker unguarded: reader.open throw in readWindow crosses QtConcurrent boundary -> result() rethrows on GUI thread -> terminate; onRenderFinished also ignores r.ok — `sidescan_bag_session.cpp:520` / `sidescan_viewer_window.cpp:609,616` — FIXED 8925325 (try/catch -> ok=false; onRenderFinished checks r.ok)
+- [x] (must-fix) Stale render applied with no session/generation token -> old-bag flash + waterfall index on wrong geometry (mislocated mark) — `sidescan_viewer_window.cpp:614` — FIXED 8925325 (session_epoch_ stamped + stale-drop)
+- [x] (suggestion) No destructor/closeEvent waitForFinished() on watchers (defensive quit-during-load) — `sidescan_viewer_window.cpp` — FIXED 8925325 (~SidescanViewerWindow waits both watchers)
+- [ ] (suggestion, deferred) readWindow slot map: two same-channel pings sharing header stamp_ns overwrite slot, one ping silently dropped — `sidescan_bag_session.cpp:506` — data-dependent; follow-up
+- [ ] (suggestion, deferred) readWindow break keys on recv_timestamp vs header-stamp window+3s pad; clock skew can drop in-range ping — `sidescan_bag_session.cpp:528` — follow-up
+- [x] (suggestion) make_box_contact negative stamp_s -> nanosec wrap; clamp defensively — `contact_store.cpp:36` — FIXED 3fe85dd
+- [x] (suggestion) package.xml description omits new executables — `package.xml` — FIXED 3fe85dd (description). Unused heavy tuner deps left as-is (pre-existing, shared with sea_surface_tuner)
+- [ ] (suggestion, deferred) interp_base_pose dead it==begin() branch bypasses max_gap guard if line-85 check loosened — `sidescan_bag_session.cpp:86` — trivial; follow-up
+
+**Resolution (2026-06-23):** both must-fix + 3 of 6 suggestions addressed (commits 8925325, 3fe85dd); build clean, 206 tests pass. 3 low-impact suggestions deferred as follow-ups. Ship: ready.
