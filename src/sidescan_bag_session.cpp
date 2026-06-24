@@ -28,7 +28,9 @@
 #include <unordered_map>
 #include <utility>
 
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "marine_acoustic_msgs/msg/raw_sonar_image.hpp"
+#include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "rclcpp/serialization.hpp"
 #include "rclcpp/serialized_message.hpp"
 #include "rosbag2_cpp/reader.hpp"
@@ -101,6 +103,45 @@ bool interp_base_pose(
   out.yaw = a.yaw + dyaw * f;
   out.cumdist = a.cumdist + (b.cumdist - a.cumdist) * f;
   return true;
+}
+
+// Look up target<-source at `stamp`, falling back to the latest available
+// transform on an extrapolation throw (mirrors cube::DetectionsProjector). Used
+// to capture the full world<-m3 transform for each detections ping during the
+// load pass, while the bounded TF cache still brackets that stamp.
+bool lookup_at_or_latest(
+  const tf2::BufferCore & tf, const std::string & target, const std::string & source,
+  const tf2::TimePoint & stamp, geometry_msgs::msg::TransformStamped & out)
+{
+  try {
+    out = tf.lookupTransform(target, source, stamp);
+    return true;
+  } catch (const tf2::ExtrapolationException &) {
+    try {
+      out = tf.lookupTransform(target, source, tf2::TimePointZero);
+      return true;
+    } catch (const tf2::TransformException &) {
+      return false;
+    }
+  } catch (const tf2::TransformException &) {
+    return false;
+  }
+}
+
+// Rotate vector v by quaternion q (q assumed normalized): v' = v + 2 q_w (u x v)
+// + 2 u x (u x v), with u = q.xyz. Used to lift sensor-frame soundings to world.
+void rotate_by_quat(
+  double qx, double qy, double qz, double qw,
+  double vx, double vy, double vz, double & ox, double & oy, double & oz)
+{
+  // t = 2 * (u x v)
+  const double tx = 2.0 * (qy * vz - qz * vy);
+  const double ty = 2.0 * (qz * vx - qx * vz);
+  const double tz = 2.0 * (qx * vy - qy * vx);
+  // v' = v + qw * t + u x t
+  ox = vx + qw * tx + (qy * tz - qz * ty);
+  oy = vy + qw * ty + (qz * tx - qx * tz);
+  oz = vz + qw * tz + (qx * ty - qy * tx);
 }
 
 // True when this host is big-endian (runtime check; std::endian is C++20).
@@ -303,6 +344,32 @@ SidescanBagSession::SidescanBagSession(
         }
         continue;
       }
+      if (topic == kMbesDetectionsTopic) {
+        // Index the ping (no samples) + capture world<-m3 now, while the bounded
+        // TF cache still brackets this stamp. Cumulative distance is assigned in
+        // the post-pass loop (needs the accumulated base-table distances).
+        auto det = deserialize<marine_acoustic_msgs::msg::SonarDetections>(bag_msg);
+        MbesPing mp;
+        mp.stamp_s = det.header.stamp.sec + det.header.stamp.nanosec * 1e-9;
+        mp.stamp_ns = static_cast<int64_t>(det.header.stamp.sec) * 1000000000LL +
+          det.header.stamp.nanosec;
+        const std::string src =
+          det.header.frame_id.empty() ? std::string("bizzy/m3") : det.header.frame_id;
+        const auto tp = tf2::TimePoint(std::chrono::nanoseconds(mp.stamp_ns));
+        geometry_msgs::msg::TransformStamped tf;
+        if (lookup_at_or_latest(*tf_buffer_, opts.world_frame, src, tp, tf)) {
+          mp.tx = tf.transform.translation.x;
+          mp.ty = tf.transform.translation.y;
+          mp.tz = tf.transform.translation.z;
+          mp.qx = tf.transform.rotation.x;
+          mp.qy = tf.transform.rotation.y;
+          mp.qz = tf.transform.rotation.z;
+          mp.qw = tf.transform.rotation.w;
+          mp.has_pose = true;  // distance still pending (post-pass)
+        }
+        mbes_pings_.push_back(mp);
+        continue;
+      }
       auto ch_it = topic_to_channel.find(topic);
       if (ch_it == topic_to_channel.end()) {continue;}
 
@@ -364,6 +431,21 @@ SidescanBagSession::SidescanBagSession(
       ++poses_skipped_;
     }
   }
+
+  // M3 detection pings already carry the world<-m3 transform (captured in-pass);
+  // assign their along-track distance from the same base table so one scrub drives
+  // both. A ping with no transform or no distance mapping is left unscrubable.
+  for (auto & mp : mbes_pings_) {
+    BasePoseSample bp;
+    if (mp.has_pose && interp_base_pose(base_table, mp.stamp_s, opts.pose_max_gap_s, bp)) {
+      mp.cumulative_distance_m = bp.cumdist;
+    } else {
+      mp.has_pose = false;
+    }
+  }
+  std::stable_sort(
+    mbes_pings_.begin(), mbes_pings_.end(),
+    [](const MbesPing & a, const MbesPing & b) {return a.stamp_s < b.stamp_s;});
 
   prof("pose+distance resolve");
 
@@ -548,6 +630,87 @@ std::vector<WindowPing> SidescanBagSession::readWindow(
     std::remove_if(
       out.begin(), out.end(),
       [](const WindowPing & w) {return w.amplitudes.empty();}),
+    out.end());
+  return out;
+}
+
+std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
+  double dist_lo, double dist_hi, int max_pings) const
+{
+  const double hi = (dist_hi < 0.0) ? total_distance_m_ : dist_hi;
+
+  // 1. Select scrubbable detection pings in the distance window.
+  std::vector<const MbesPing *> sel;
+  for (const auto & p : mbes_pings_) {
+    if (!p.has_pose) {continue;}
+    if (p.cumulative_distance_m < dist_lo || p.cumulative_distance_m > hi) {continue;}
+    sel.push_back(&p);
+  }
+  if (sel.empty()) {return {};}
+
+  // 2. Stationary cap (same policy as readWindow).
+  const int from = stationary_keep_from(static_cast<int>(sel.size()), max_pings);
+  sel.erase(sel.begin(), sel.begin() + from);
+
+  // 3. Result slots keyed by stamp + the stamp span to re-read.
+  std::vector<MbesWindowPing> out(sel.size());
+  std::unordered_map<int64_t, int> slot;
+  int64_t t_lo = std::numeric_limits<int64_t>::max();
+  int64_t t_hi = std::numeric_limits<int64_t>::min();
+  for (std::size_t i = 0; i < sel.size(); ++i) {
+    out[i].cumulative_distance_m = sel[i]->cumulative_distance_m;
+    slot.emplace(sel[i]->stamp_ns, static_cast<int>(i));
+    t_lo = std::min(t_lo, sel[i]->stamp_ns);
+    t_hi = std::max(t_hi, sel[i]->stamp_ns);
+  }
+
+  // 4. Re-read detections over the stamp span; project each to sensor-frame
+  // soundings and lift to the world frame with the ping's captured transform.
+  constexpr int64_t kPadNs = 3000000000LL;  // 3 s
+  rosbag2_cpp::Reader reader;
+  reader.open(bag_uri_);
+  try {
+    reader.seek(static_cast<rcutils_time_point_value_t>(t_lo - kPadNs));
+  } catch (const std::exception &) {
+    // seek unsupported -> sequential scan
+  }
+  while (reader.has_next()) {
+    auto bag_msg = reader.read_next();
+    if (bag_msg->recv_timestamp > t_hi + kPadNs) {break;}
+    if (bag_msg->topic_name != kMbesDetectionsTopic) {continue;}
+    try {
+      auto det = deserialize<marine_acoustic_msgs::msg::SonarDetections>(bag_msg);
+      const int64_t sns = static_cast<int64_t>(det.header.stamp.sec) * 1000000000LL +
+        det.header.stamp.nanosec;
+      auto it = slot.find(sns);
+      if (it == slot.end()) {continue;}
+      const int idx = it->second;
+      const MbesPing * p = sel[idx];
+      out[idx].intensities.assign(det.intensities.begin(), det.intensities.end());
+      const std::vector<MbesSounding> sensor = project_detections(det);
+      out[idx].world_soundings.reserve(sensor.size());
+      for (const auto & s : sensor) {
+        double rx = 0.0;
+        double ry = 0.0;
+        double rz = 0.0;
+        rotate_by_quat(p->qx, p->qy, p->qz, p->qw, s.x, s.y, s.z, rx, ry, rz);
+        MbesSounding w;
+        w.x = p->tx + rx;
+        w.y = p->ty + ry;
+        w.z = p->tz + rz;
+        w.intensity = s.intensity;
+        out[idx].world_soundings.push_back(w);
+      }
+    } catch (const std::exception &) {
+      // skip an unreadable message
+    }
+  }
+
+  // 5. Drop pings whose message wasn't found in the scan (no per-beam data read).
+  out.erase(
+    std::remove_if(
+      out.begin(), out.end(),
+      [](const MbesWindowPing & w) {return w.intensities.empty();}),
     out.end());
   return out;
 }

@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "mbes_geometry.hpp"
 #include "sidescan_geometry.hpp"
 
 // Forward-declared so the persistent TF cache stays out of TUs that only consume
@@ -47,6 +48,12 @@ inline constexpr std::array<const char *, kNumSidescanChannels> kSidescanTopics{
 // not publish it.
 inline constexpr const char * kNadirDepthTopic =
   "/bizzy/sensors/sidescan/garmin_sidescan/nadir_depth";
+
+// The M3 multibeam detections topic (marine_acoustic_msgs/SonarDetections, frame
+// bizzy/m3). The bag carries detections only (no soundings cloud), so the viewer
+// projects soundings itself via mbes_geometry.hpp. Optional: a bag without it
+// still loads (sidescan-only).
+inline constexpr const char * kMbesDetectionsTopic = "/bizzy/sensors/m3/detections";
 
 // One ping's lightweight index entry: channel, time, the along-track distance of
 // the boat when it was transmitted, and the world-plane geometry needed to
@@ -76,6 +83,34 @@ struct WindowPing
   double cumulative_distance_m = 0.0;
   PingGeometry geometry;
   std::vector<float> amplitudes;
+};
+
+// One M3 detections ping's lightweight index entry: stamp, along-track distance
+// (shared scrub axis), and the full world<-m3 transform captured at the ping
+// stamp during the load pass (translation + quaternion, so soundings lift to the
+// world frame at read time with no TF). Full 3D — unlike the planar sidescan
+// pose, this carries the sensor roll/pitch/z that bathymetry needs. Sample data
+// is NOT held; readMbesWindow() re-reads the window. `has_pose` is false when the
+// transform or the distance mapping could not be resolved (unscrubable).
+struct MbesPing
+{
+  double stamp_s = 0.0;
+  int64_t stamp_ns = 0;
+  double cumulative_distance_m = 0.0;
+  bool has_pose = false;
+  double tx = 0.0, ty = 0.0, tz = 0.0;            // world<-m3 translation (m)
+  double qx = 0.0, qy = 0.0, qz = 0.0, qw = 1.0;  // world<-m3 rotation
+};
+
+// An M3 ping's window data: the raw per-beam backscatter (for the backscatter
+// waterfall, across-track = beam index) and the valid-detection soundings already
+// lifted to the WORLD frame (MbesSounding x/y/z in world metres, for the 3D
+// cloud). Produced on demand by readMbesWindow().
+struct MbesWindowPing
+{
+  double cumulative_distance_m = 0.0;
+  std::vector<float> intensities;             // per-beam dB (waterfall row)
+  std::vector<MbesSounding> world_soundings;  // valid beams, WORLD frame + dB
 };
 
 struct SidescanBagOptions
@@ -127,6 +162,18 @@ public:
   std::vector<WindowPing> readWindow(
     double dist_lo, double dist_hi, int max_pings = 0, bool include_down = false) const;
 
+  // All M3 detection pings, ordered by stamp, with cumulative distance assigned
+  // (empty when the bag had no detections topic).
+  const std::vector<MbesPing> & mbesPings() const {return mbes_pings_;}
+
+  // M3 detection pings whose along-track distance lies in [dist_lo, dist_hi],
+  // with sample data read fresh and projected: per ping the raw per-beam
+  // backscatter (waterfall) + the valid soundings in the WORLD frame (3D cloud).
+  // Shares the sidescan distance axis, so one scrub drives both. `max_pings > 0`
+  // applies the same stationary cap as readWindow.
+  std::vector<MbesWindowPing> readMbesWindow(
+    double dist_lo, double dist_hi, int max_pings = 0) const;
+
   // Total along-track distance of the recording (metres).
   double totalDistance() const {return total_distance_m_;}
 
@@ -159,6 +206,7 @@ public:
 private:
   std::string bag_uri_;
   std::vector<SidescanPing> pings_;
+  std::vector<MbesPing> mbes_pings_;
   std::unique_ptr<tf2::BufferCore> tf_buffer_;
   double total_distance_m_ = 0.0;
   std::size_t poses_resolved_ = 0;

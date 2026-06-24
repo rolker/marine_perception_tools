@@ -80,6 +80,26 @@ int main(int argc, char ** argv)
         p.geometry.altitude, mid, gp.ground_range, gp.x, gp.y, gp.valid);
     }
 
+    // M3 multibeam: index count + a windowed read exercising the project + lift.
+    std::printf("mbes detections: %zu pings indexed\n", session.mbesPings().size());
+    const auto mwin = session.readMbesWindow(0.0, 50.0, 600);
+    if (!mwin.empty()) {
+      std::size_t soundings = 0;
+      for (const auto & mp : mwin) {
+        soundings += mp.world_soundings.size();
+      }
+      const auto & m0 = mwin.front();
+      std::printf(
+        "mbes window read (first 50 m): %zu pings • %zu soundings • beams/ping=%zu\n",
+        mwin.size(), soundings, m0.intensities.size());
+      if (!m0.world_soundings.empty()) {
+        const auto & s = m0.world_soundings.front();
+        std::printf(
+          "  first sounding world=(%.2f, %.2f, %.2f) dB=%.1f\n",
+          s.x, s.y, s.z, static_cast<double>(s.intensity));
+      }
+    }
+
     // Time a window read at each end of the track — this is the per-scrub cost on
     // the UI thread. An end-of-track read that is far slower than a start read
     // means seek() is not repositioning (it falls back to a scan from the start).
