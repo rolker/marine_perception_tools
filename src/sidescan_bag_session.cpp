@@ -715,4 +715,69 @@ std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
   return out;
 }
 
+std::vector<marine_acoustic_msgs::msg::RawSonarImage> SidescanBagSession::readDownImages(
+  double dist_lo, double dist_hi, int max_pings) const
+{
+  const double hi = (dist_hi < 0.0) ? total_distance_m_ : dist_hi;
+
+  // 1. Select scrubbable down-channel pings in the window (along-track order).
+  std::vector<const SidescanPing *> sel;
+  for (const auto & p : pings_) {
+    if (p.channel != SidescanChannel::Down || !p.has_pose) {continue;}
+    if (p.cumulative_distance_m < dist_lo || p.cumulative_distance_m > hi) {continue;}
+    sel.push_back(&p);
+  }
+  if (sel.empty()) {return {};}
+
+  const int from = stationary_keep_from(static_cast<int>(sel.size()), max_pings);
+  sel.erase(sel.begin(), sel.begin() + from);
+
+  // 2. Result slots keyed by stamp + the stamp span to re-read.
+  std::vector<marine_acoustic_msgs::msg::RawSonarImage> out(sel.size());
+  std::vector<bool> filled(sel.size(), false);
+  std::unordered_map<int64_t, int> slot;
+  int64_t t_lo = std::numeric_limits<int64_t>::max();
+  int64_t t_hi = std::numeric_limits<int64_t>::min();
+  for (std::size_t i = 0; i < sel.size(); ++i) {
+    slot.emplace(sel[i]->stamp_ns, static_cast<int>(i));
+    t_lo = std::min(t_lo, sel[i]->stamp_ns);
+    t_hi = std::max(t_hi, sel[i]->stamp_ns);
+  }
+
+  // 3. Re-read the down-channel images over the stamp span (raw, undecoded).
+  constexpr int64_t kPadNs = 3000000000LL;  // 3 s
+  rosbag2_cpp::Reader reader;
+  reader.open(bag_uri_);
+  try {
+    reader.seek(static_cast<rcutils_time_point_value_t>(t_lo - kPadNs));
+  } catch (const std::exception &) {
+    // seek unsupported -> sequential scan
+  }
+  const std::string down_topic = kSidescanTopics[static_cast<int>(SidescanChannel::Down)];
+  while (reader.has_next()) {
+    auto bag_msg = reader.read_next();
+    if (bag_msg->recv_timestamp > t_hi + kPadNs) {break;}
+    if (bag_msg->topic_name != down_topic) {continue;}
+    try {
+      auto img = deserialize<marine_acoustic_msgs::msg::RawSonarImage>(bag_msg);
+      const int64_t sns = static_cast<int64_t>(img.header.stamp.sec) * 1000000000LL +
+        img.header.stamp.nanosec;
+      auto it = slot.find(sns);
+      if (it == slot.end()) {continue;}
+      out[it->second] = std::move(img);
+      filled[it->second] = true;
+    } catch (const std::exception &) {
+      // skip an unreadable message
+    }
+  }
+
+  // 4. Drop slots whose image wasn't read, preserving along-track order.
+  std::vector<marine_acoustic_msgs::msg::RawSonarImage> result;
+  result.reserve(out.size());
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    if (filled[i]) {result.push_back(std::move(out[i]));}
+  }
+  return result;
+}
+
 }  // namespace marine_perception_tools

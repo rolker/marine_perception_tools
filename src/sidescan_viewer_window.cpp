@@ -52,6 +52,7 @@
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
 #include "marine_interfaces/msg/contact.hpp"
+#include "marine_sonar_widgets/echogram_widget.hpp"
 #include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
@@ -266,6 +267,9 @@ SidescanRenderResult render_window(
     out.mbes_backscatter_rows.push_back(std::move(row));
   }
 
+  // Down-channel water-column pings (raw) for the echogram, same window.
+  out.down_images = session->readDownImages(win_lo, win_hi, max_pings);
+
   double min_x = paint.front().geometry.sensor_x;
   double max_x = min_x;
   double min_y = paint.front().geometry.sensor_y;
@@ -423,6 +427,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   auto * mbes_wf_dock = new QDockWidget("MBES Backscatter", this);
   mbes_wf_dock->setWidget(mbes_waterfall_);
   addDockWidget(Qt::RightDockWidgetArea, mbes_wf_dock);
+
+  // Water-column echogram dock (shared lib EchogramWidget): the down-channel pings
+  // of the current window as a depth-vs-distance curtain.
+  echogram_ = new marine_sonar_widgets::EchogramWidget(this);
+  auto * echo_dock = new QDockWidget("Water Column", this);
+  echo_dock->setWidget(echogram_);
+  addDockWidget(Qt::RightDockWidgetArea, echo_dock);
 
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
@@ -726,6 +737,12 @@ void SidescanViewerWindow::onRenderFinished()
   mbes_waterfall_->clear();
   for (const auto & row : r.mbes_backscatter_rows) {
     mbes_waterfall_->add_row(row);
+  }
+  // Echogram has no clear(); sizing history to the window count makes the new
+  // pings evict the previous window's, so the curtain shows just this window.
+  if (!r.down_images.empty()) {
+    echogram_->setHistory(static_cast<int>(r.down_images.size()));
+    echogram_->addPings(r.down_images);
   }
   if (r.has_center) {canvas_->setCenter(r.center_x, r.center_y);}
   status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted")

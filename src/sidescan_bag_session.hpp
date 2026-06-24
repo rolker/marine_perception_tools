@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 
+#include "marine_acoustic_msgs/msg/raw_sonar_image.hpp"
+
 #include "mbes_geometry.hpp"
 #include "sidescan_geometry.hpp"
 
@@ -172,6 +174,12 @@ public:
   // Shares the sidescan distance axis, so one scrub drives both. `max_pings > 0`
   // applies the same stationary cap as readWindow.
   std::vector<MbesWindowPing> readMbesWindow(
+    double dist_lo, double dist_hi, int max_pings = 0) const;
+
+  // The down-channel (water-column) pings in [dist_lo, dist_hi] as raw
+  // RawSonarImage messages, in along-track order, for the echogram pane. Re-read
+  // from the bag like readWindow; `max_pings > 0` applies the stationary cap.
+  std::vector<marine_acoustic_msgs::msg::RawSonarImage> readDownImages(
     double dist_lo, double dist_hi, int max_pings = 0) const;
 
   // Total along-track distance of the recording (metres).
