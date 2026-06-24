@@ -168,10 +168,22 @@ std::vector<marine_sonar_widgets::WaterfallRow> build_sidescan_rows(
   out.reserve(rows);
 
   // Build one single-side row: raw samples + this side's slant range + altitude.
+  // The data array starts at acoustic sample `sample0` (the sonar's near-range
+  // gate), so element 0 sits at slant range sample0*mps, not 0. The lib widget maps
+  // a row linearly from range 0, so prepend `sample0` empty (water-column) samples
+  // to align index 0 with range 0 — keeping the display scale and the pixel->map
+  // marking true to slant range (mirrors slant_range_at()'s sample0 offset, which
+  // the retired SidescanWaterfall honored in its marking). The gate is clamped to
+  // the sample count so a corrupt sample0 can't blow up the allocation.
   auto side_row = [](const WindowPing * p) -> std::optional<WaterfallRow> {
       if (p == nullptr) {return std::nullopt;}
       WaterfallRow w;
-      w.intensities = p->amplitudes;
+      const std::size_t gate = std::min<std::size_t>(
+        p->geometry.sample0, p->amplitudes.size());
+      w.intensities.reserve(gate + p->amplitudes.size());
+      w.intensities.assign(gate, 0.0f);
+      w.intensities.insert(
+        w.intensities.end(), p->amplitudes.begin(), p->amplitudes.end());
       w.range_max = ping_max_range(*p);
       w.altitude = (p->geometry.altitude > 0.0) ? p->geometry.altitude : 0.0;
       return w;
@@ -769,8 +781,15 @@ void SidescanViewerWindow::onRenderFinished()
   for (const auto & row : r.sidescan_rows) {
     waterfall_->add_row(row);
   }
-  cloud_->setColorMap(palette_combo_->currentIndex());
+  cloud_->setColorMap(palette_combo_ ? palette_combo_->currentIndex() : 0);
   cloud_->setPoints(r.mbes_soundings);
+  // Size the MBES backscatter scrollback to the window too (same reason as the
+  // sidescan pane): the lib's default 200-row history is smaller than a dense
+  // detections window, so without this the oldest MBES pings are evicted and the
+  // backscatter pane falls out of lockstep with the other panes on the same scrub.
+  if (!r.mbes_backscatter_rows.empty()) {
+    mbes_waterfall_->set_history(r.mbes_backscatter_rows.size());
+  }
   mbes_waterfall_->clear();
   for (const auto & row : r.mbes_backscatter_rows) {
     mbes_waterfall_->add_row(row);
