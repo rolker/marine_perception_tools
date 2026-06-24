@@ -52,6 +52,7 @@
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
 #include "marine_interfaces/msg/contact.hpp"
+#include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
@@ -253,9 +254,16 @@ SidescanRenderResult render_window(
     n_soundings += mp.world_soundings.size();
   }
   out.mbes_soundings.reserve(n_soundings);
+  out.mbes_backscatter_rows.reserve(mwin.size());
   for (const auto & mp : mwin) {
     out.mbes_soundings.insert(
       out.mbes_soundings.end(), mp.world_soundings.begin(), mp.world_soundings.end());
+    // Backscatter waterfall row: the per-beam dB fan, centred (beam index is the
+    // across-track axis; non-metric so no slant/ground range lines).
+    marine_sonar_widgets::WaterfallRow row;
+    row.intensities = mp.intensities;
+    row.nadir_index = mp.intensities.size() / 2;
+    out.mbes_backscatter_rows.push_back(std::move(row));
   }
 
   double min_x = paint.front().geometry.sensor_x;
@@ -406,6 +414,15 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   auto * cloud_dock = new QDockWidget("MBES 3D", this);
   cloud_dock->setWidget(cloud_panel);
   addDockWidget(Qt::RightDockWidgetArea, cloud_dock);
+
+  // MBES backscatter waterfall dock (shared lib WaterfallWidget): one row per
+  // detection ping, the 224/234-beam dB fan across-track, newest at top.
+  mbes_waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
+  mbes_waterfall_->set_color_map(marine_sonar_widgets::ColorMapType::Bronze);
+  mbes_waterfall_->set_range_lines(false);   // beam-index axis, not metric range
+  auto * mbes_wf_dock = new QDockWidget("MBES Backscatter", this);
+  mbes_wf_dock->setWidget(mbes_waterfall_);
+  addDockWidget(Qt::RightDockWidgetArea, mbes_wf_dock);
 
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
@@ -706,6 +723,10 @@ void SidescanViewerWindow::onRenderFinished()
   waterfall_->setIndex(r.waterfall_index);
   cloud_->setColorMap(palette_combo_->currentIndex());
   cloud_->setPoints(r.mbes_soundings);
+  mbes_waterfall_->clear();
+  for (const auto & row : r.mbes_backscatter_rows) {
+    mbes_waterfall_->add_row(row);
+  }
   if (r.has_center) {canvas_->setCenter(r.center_x, r.center_y);}
   status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted")
     .arg(r.head_m, 0, 'f', 1)

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "contact_store.hpp"
+#include "marine_sonar_widgets/waterfall_model.hpp"
 #include "sidescan_bag_session.hpp"
 #include "sidescan_waterfall.hpp"
 
@@ -44,6 +45,12 @@ namespace marine_perception_tools
 
 class SidescanCanvas;
 class PointCloudView;
+}  // namespace marine_perception_tools
+
+namespace marine_sonar_widgets {class WaterfallWidget;}
+
+namespace marine_perception_tools
+{
 
 // Result of an off-thread bag load: either a session or an error message. Copyable
 // (shared_ptr + QString) so it can ride through QFuture/QFutureWatcher.
@@ -64,6 +71,7 @@ struct SidescanRenderResult
   QImage waterfall;      // uncorrected slant-range waterfall of the same window
   WaterfallIndex waterfall_index;  // pixel->map mapping for waterfall marking
   std::vector<MbesSounding> mbes_soundings;  // window's M3 soundings, world frame
+  std::vector<marine_sonar_widgets::WaterfallRow> mbes_backscatter_rows;  // per-ping dB
   double origin_x = 0.0;
   double origin_y = 0.0;
   double res_m = 0.25;
@@ -130,6 +138,7 @@ private:
   PointCloudView * cloud_ = nullptr;
   QComboBox * cloud_color_combo_ = nullptr;
   QDoubleSpinBox * zexag_spin_ = nullptr;
+  marine_sonar_widgets::WaterfallWidget * mbes_waterfall_ = nullptr;
 
   ContactStore contact_store_;
   int contact_counter_ = 0;
