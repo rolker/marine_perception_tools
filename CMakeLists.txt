@@ -21,6 +21,7 @@ find_package(image_geometry REQUIRED)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(marine_colormap REQUIRED)
 find_package(marine_interfaces REQUIRED)
+find_package(marine_sonar_widgets REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -38,7 +39,9 @@ find_package(OpenCV REQUIRED)
 set(QT_VERSION_MAJOR 5)
 # Concurrent: background window loads (QtConcurrent::run + QFutureWatcher) keep
 # the GUI responsive while a multi-second window reload/warm-up runs.
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Concurrent)
+# Gui + OpenGL: the shared marine_sonar_widgets panes (WaterfallWidget,
+# EchogramWidget) and the new 3D point-cloud viewport are QOpenGLWidgets.
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Concurrent Gui OpenGL)
 set(CMAKE_AUTOMOC ON)
 
 # Headless core (no Qt): bag loading + the re-sim engine. Kept Qt-free so the
@@ -113,8 +116,10 @@ add_executable(sidescan_target_viewer
 target_link_libraries(sidescan_target_viewer
   sidescan_core
   Qt${QT_VERSION_MAJOR}::Widgets
-  Qt${QT_VERSION_MAJOR}::Concurrent)
-ament_target_dependencies(sidescan_target_viewer marine_colormap)
+  Qt${QT_VERSION_MAJOR}::Concurrent
+  Qt${QT_VERSION_MAJOR}::Gui
+  Qt${QT_VERSION_MAJOR}::OpenGL)
+ament_target_dependencies(sidescan_target_viewer marine_colormap marine_sonar_widgets)
 
 install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
