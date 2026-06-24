@@ -39,6 +39,7 @@ class QPushButton;
 class QListWidget;
 class QComboBox;
 class QRectF;
+class QCloseEvent;
 
 namespace marine_perception_tools
 {
@@ -101,6 +102,10 @@ public:
 
   // Open a bag directly (e.g. from a CLI argument).
   void openBag(const std::string & bag_uri);
+
+protected:
+  // Persist window geometry + dock layout on close (QSettings).
+  void closeEvent(QCloseEvent * event) override;
 
 private slots:
   void onOpenBag();

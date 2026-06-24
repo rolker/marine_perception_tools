@@ -26,9 +26,11 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPointF>
+#include <QCloseEvent>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRectF>
+#include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
 #include <QSplitter>
@@ -392,6 +394,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // Target-list dock (right): one row per contact, click to recentre the map.
   contact_list_ = new QListWidget(this);
   auto * dock = new QDockWidget("Contacts", this);
+  dock->setObjectName("dock_contacts");
   dock->setWidget(contact_list_);
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
@@ -416,6 +419,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   cloud_col->addLayout(cloud_ctrls);
   cloud_col->addWidget(cloud_, 1);
   auto * cloud_dock = new QDockWidget("MBES 3D", this);
+  cloud_dock->setObjectName("dock_mbes_3d");
   cloud_dock->setWidget(cloud_panel);
   addDockWidget(Qt::RightDockWidgetArea, cloud_dock);
 
@@ -425,6 +429,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   mbes_waterfall_->set_color_map(marine_sonar_widgets::ColorMapType::Bronze);
   mbes_waterfall_->set_range_lines(false);   // beam-index axis, not metric range
   auto * mbes_wf_dock = new QDockWidget("MBES Backscatter", this);
+  mbes_wf_dock->setObjectName("dock_mbes_backscatter");
   mbes_wf_dock->setWidget(mbes_waterfall_);
   addDockWidget(Qt::RightDockWidgetArea, mbes_wf_dock);
 
@@ -432,8 +437,16 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // of the current window as a depth-vs-distance curtain.
   echogram_ = new marine_sonar_widgets::EchogramWidget(this);
   auto * echo_dock = new QDockWidget("Water Column", this);
+  echo_dock->setObjectName("dock_water_column");
   echo_dock->setWidget(echogram_);
   addDockWidget(Qt::RightDockWidgetArea, echo_dock);
+  // Tab the MBES panes together by default so the right area isn't cramped; the
+  // operator can pull any out / float it to a second monitor, and the layout is
+  // persisted across runs (see closeEvent / the QSettings restore below).
+  tabifyDockWidget(cloud_dock, mbes_wf_dock);
+  tabifyDockWidget(mbes_wf_dock, echo_dock);
+  cloud_dock->raise();
+  setDockNestingEnabled(true);
 
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
@@ -481,6 +494,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   canvas_->setGridSpacing(grid_spin_->value());
   resize(1100, 760);
+
+  // Restore the operator's last window geometry + dock arrangement (panes have
+  // object names so restoreState can re-place/float them). No-op on first run.
+  QSettings settings("UNH-CCOM", "sidescan_target_viewer");
+  const QByteArray geom = settings.value("geometry").toByteArray();
+  const QByteArray state = settings.value("windowState").toByteArray();
+  if (!geom.isEmpty()) {restoreGeometry(geom);}
+  if (!state.isEmpty()) {restoreState(state);}
 }
 
 SidescanViewerWindow::~SidescanViewerWindow()
@@ -489,6 +510,16 @@ SidescanViewerWindow::~SidescanViewerWindow()
   // load/render to finish before the members tear down.
   if (load_watcher_.isRunning()) {load_watcher_.waitForFinished();}
   if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
+}
+
+void SidescanViewerWindow::closeEvent(QCloseEvent * event)
+{
+  // Persist the window geometry + dock layout so the operator's arrangement
+  // (including panes floated to a second monitor) survives a restart.
+  QSettings settings("UNH-CCOM", "sidescan_target_viewer");
+  settings.setValue("geometry", saveGeometry());
+  settings.setValue("windowState", saveState());
+  QMainWindow::closeEvent(event);
 }
 
 void SidescanViewerWindow::onOpenBag()
