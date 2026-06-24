@@ -52,6 +52,7 @@
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
 #include "marine_interfaces/msg/contact.hpp"
+#include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
 #include "sidescan_waterfall.hpp"
@@ -244,6 +245,19 @@ SidescanRenderResult render_window(
   out.center_y = cy / static_cast<double>(paint.size());
   out.has_center = true;
 
+  // MBES soundings for the same window (world frame), flattened for the 3D view.
+  // Shares the distance window so the cloud stays in lockstep with the scrub.
+  const std::vector<MbesWindowPing> mwin = session->readMbesWindow(win_lo, win_hi, max_pings);
+  std::size_t n_soundings = 0;
+  for (const auto & mp : mwin) {
+    n_soundings += mp.world_soundings.size();
+  }
+  out.mbes_soundings.reserve(n_soundings);
+  for (const auto & mp : mwin) {
+    out.mbes_soundings.insert(
+      out.mbes_soundings.end(), mp.world_soundings.begin(), mp.world_soundings.end());
+  }
+
   double min_x = paint.front().geometry.sensor_x;
   double max_x = min_x;
   double min_y = paint.front().geometry.sensor_y;
@@ -369,6 +383,30 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   dock->setWidget(contact_list_);
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
+  // MBES 3D point-cloud dock (right): orbit view of the window's soundings, with
+  // colour-mode + Z-exaggeration controls above it.
+  cloud_ = new PointCloudView(this);
+  cloud_color_combo_ = new QComboBox(this);
+  cloud_color_combo_->addItem("Depth");
+  cloud_color_combo_->addItem("Backscatter");
+  zexag_spin_ = new QDoubleSpinBox(this);
+  zexag_spin_->setRange(1.0, 20.0);
+  zexag_spin_->setSingleStep(0.5);
+  zexag_spin_->setValue(3.0);
+  zexag_spin_->setPrefix("Z× ");
+  auto * cloud_panel = new QWidget(this);
+  auto * cloud_col = new QVBoxLayout(cloud_panel);
+  auto * cloud_ctrls = new QHBoxLayout();
+  cloud_ctrls->addWidget(new QLabel("Colour:", this));
+  cloud_ctrls->addWidget(cloud_color_combo_);
+  cloud_ctrls->addWidget(zexag_spin_);
+  cloud_ctrls->addStretch(1);
+  cloud_col->addLayout(cloud_ctrls);
+  cloud_col->addWidget(cloud_, 1);
+  auto * cloud_dock = new QDockWidget("MBES 3D", this);
+  cloud_dock->setWidget(cloud_panel);
+  addDockWidget(Qt::RightDockWidgetArea, cloud_dock);
+
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
   file_menu->addAction("&Fit View", this, [this]() {canvas_->resetView();});
@@ -405,6 +443,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
         canvas_->setCenter(k.x, k.y);
       }
     });
+  connect(cloud_color_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int i) {
+      cloud_->setColorMode(
+        i == 1 ? PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
+    });
+  connect(zexag_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, [this](double z) {cloud_->setZExaggeration(static_cast<float>(z));});
 
   canvas_->setGridSpacing(grid_spin_->value());
   resize(1100, 760);
@@ -659,6 +704,8 @@ void SidescanViewerWindow::onRenderFinished()
   canvas_->setCoverage(r.image, r.origin_x, r.origin_y, r.res_m);
   waterfall_->setImage(r.waterfall);
   waterfall_->setIndex(r.waterfall_index);
+  cloud_->setColorMap(palette_combo_->currentIndex());
+  cloud_->setPoints(r.mbes_soundings);
   if (r.has_center) {canvas_->setCenter(r.center_x, r.center_y);}
   status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted")
     .arg(r.head_m, 0, 'f', 1)

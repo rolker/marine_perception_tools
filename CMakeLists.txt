@@ -112,6 +112,7 @@ add_executable(sidescan_target_viewer
   src/sidescan_viewer_window.cpp
   src/sidescan_canvas.cpp
   src/sidescan_waterfall.cpp
+  src/point_cloud_view.cpp
 )
 target_link_libraries(sidescan_target_viewer
   sidescan_core
@@ -160,6 +161,18 @@ if(BUILD_TESTING)
   ament_add_gtest(test_contact_store test/test_contact_store.cpp)
   target_link_libraries(test_contact_store sidescan_core)
   ament_target_dependencies(test_contact_store marine_interfaces)
+
+  # MBES 3D point-cloud viewport smoke test (offscreen GL; self-skips headless).
+  # Compiles the unit-under-test source directly + Qt OpenGL.
+  ament_add_gtest(test_point_cloud_view
+    test/test_point_cloud_view.cpp
+    src/point_cloud_view.cpp)
+  target_include_directories(test_point_cloud_view PRIVATE src)
+  ament_target_dependencies(test_point_cloud_view marine_acoustic_msgs marine_colormap)
+  target_link_libraries(test_point_cloud_view
+    Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::OpenGL)
+  set_tests_properties(test_point_cloud_view PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;LIBGL_ALWAYS_SOFTWARE=1")
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
