@@ -44,6 +44,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -59,7 +60,6 @@
 #include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
-#include "sidescan_waterfall.hpp"
 
 namespace marine_perception_tools
 {
@@ -141,70 +141,55 @@ QImage render_coverage(
   return img;
 }
 
-// The uncorrected slant-range waterfall for a window: one row per ping cycle,
-// port samples on the left (near range at centre, far range outward), starboard on
-// the right. Port/starboard pings are paired by index in along-track order. Rows
-// run newest-at-top (matching the live rqt plugin), so the channel lists are
-// reversed and both align at the newest (top) edge. No georeferencing or slant
-// correction — the raw stacked display.
-QImage build_waterfall(
-  const std::vector<WindowPing> & pings, WaterfallIndex & index,
-  const std::vector<marine_colormap::Rgba8> & lut, float lo, float hi)
+// Build the uncorrected slant-range sidescan rows for a window as shared-lib
+// WaterfallRows. Port and starboard pings are paired by along-track index into one
+// centered row (combine_rows: port reversed left of nadir, starboard right of it),
+// each side carrying its own slant range so the widget can scale/slant-correct, plus
+// the sensor's map pose so a marked pixel inverts back to map coordinates. Returned
+// oldest-first; the lib widget draws the newest row at the top (matching the live
+// rqt plugin) as rows are appended. No georeferencing or slant->ground correction
+// here — the widget does any correction at render time from range_max + altitude.
+std::vector<marine_sonar_widgets::WaterfallRow> build_sidescan_rows(
+  const std::vector<WindowPing> & pings)
 {
-  index = WaterfallIndex{};
+  using marine_sonar_widgets::WaterfallRow;
+  using marine_sonar_widgets::WorldPose;
   std::vector<const WindowPing *> port;
   std::vector<const WindowPing *> stbd;
   for (const auto & p : pings) {
     if (p.channel == SidescanChannel::Port) {
       port.push_back(&p);
-    } else if (p.channel == SidescanChannel::Starboard) {stbd.push_back(&p);}
-  }
-  std::reverse(port.begin(), port.end());   // newest first -> top row
-  std::reverse(stbd.begin(), stbd.end());
-  const int rows = static_cast<int>(std::max(port.size(), stbd.size()));
-  if (rows == 0) {return QImage();}
-  std::size_t pn = 0;
-  std::size_t sn = 0;
-  for (const auto * p : port) {
-    pn = std::max(pn, p->amplitudes.size());
-  }
-  for (const auto * p : stbd) {
-    sn = std::max(sn, p->amplitudes.size());
-  }
-  const int width = static_cast<int>(pn + sn);
-  if (width == 0) {return QImage();}
-
-  // Pixel->map index for waterfall marking (same newest-at-top row order).
-  index.pn = static_cast<int>(pn);
-  index.sn = static_cast<int>(sn);
-  index.rows = rows;
-  index.port_geo.reserve(port.size());
-  index.stbd_geo.reserve(stbd.size());
-  for (const auto * p : port) {
-    index.port_geo.push_back(p->geometry);
-  }
-  for (const auto * p : stbd) {
-    index.stbd_geo.push_back(p->geometry);
-  }
-
-  QImage img(width, rows, QImage::Format_ARGB32);
-  img.fill(qRgba(0, 0, 0, 255));
-  for (int r = 0; r < rows; ++r) {
-    QRgb * line = reinterpret_cast<QRgb *>(img.scanLine(r));
-    if (r < static_cast<int>(port.size())) {
-      const auto & a = port[r]->amplitudes;
-      for (std::size_t i = 0; i < a.size() && i < pn; ++i) {
-        line[pn - 1 - i] = lut_color(a[i], lut, lo, hi);  // near->centre, far->left
-      }
-    }
-    if (r < static_cast<int>(stbd.size())) {
-      const auto & a = stbd[r]->amplitudes;
-      for (std::size_t i = 0; i < a.size() && i < sn; ++i) {
-        line[pn + i] = lut_color(a[i], lut, lo, hi);       // near->centre, far->right
-      }
+    } else if (p.channel == SidescanChannel::Starboard) {
+      stbd.push_back(&p);
     }
   }
-  return img;
+  const std::size_t rows = std::max(port.size(), stbd.size());
+  std::vector<WaterfallRow> out;
+  out.reserve(rows);
+
+  // Build one single-side row: raw samples + this side's slant range + altitude.
+  auto side_row = [](const WindowPing * p) -> std::optional<WaterfallRow> {
+      if (p == nullptr) {return std::nullopt;}
+      WaterfallRow w;
+      w.intensities = p->amplitudes;
+      w.range_max = ping_max_range(*p);
+      w.altitude = (p->geometry.altitude > 0.0) ? p->geometry.altitude : 0.0;
+      return w;
+    };
+
+  for (std::size_t r = 0; r < rows; ++r) {
+    const WindowPing * pp = (r < port.size()) ? port[r] : nullptr;
+    const WindowPing * sp = (r < stbd.size()) ? stbd[r] : nullptr;
+    auto combined = marine_sonar_widgets::combine_rows(side_row(pp), side_row(sp));
+    if (!combined) {continue;}
+    // Port and starboard share the platform pose; take whichever side this row has.
+    const WindowPing * geom = (pp != nullptr) ? pp : sp;
+    combined->altitude = (geom->geometry.altitude > 0.0) ? geom->geometry.altitude : 0.0;
+    combined->world_pose = WorldPose{
+      geom->geometry.sensor_x, geom->geometry.sensor_y, geom->geometry.yaw};
+    out.push_back(std::move(*combined));
+  }
+  return out;
 }
 
 // Build the coverage render for a distance window on a worker thread (readWindow +
@@ -236,9 +221,10 @@ SidescanRenderResult render_window(
   const auto lut = marine_colormap::bake_lut(
     marine_colormap::palette(idx), marine_colormap::TransferParams{}, 256);
 
-  // Uncorrected waterfall + the window's track centre (for the follow-the-playhead
-  // recentre) — both from the same pings, so map and waterfall stay in lockstep.
-  out.waterfall = build_waterfall(paint, out.waterfall_index, lut, lo, hi);
+  // Uncorrected sidescan rows + the window's track centre (for the follow-the-
+  // playhead recentre) — both from the same pings, so map and waterfall stay in
+  // lockstep.
+  out.sidescan_rows = build_sidescan_rows(paint);
   double cx = 0.0;
   double cy = 0.0;
   for (const auto & p : paint) {
@@ -376,8 +362,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   crow->addWidget(progress_);
 
-  // Geo map (left) beside the uncorrected waterfall (right), user-resizable.
-  waterfall_ = new SidescanWaterfall(this);
+  // Geo map (left) beside the uncorrected slant-range sidescan waterfall (right),
+  // user-resizable. The shared-lib WaterfallWidget renders on the GPU and inverts a
+  // marked pixel to map coordinates from each row's pose; slant range (water column
+  // kept) matches the raw display analysts read, with across-track range gridlines.
+  waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
+  waterfall_->set_color_map(marine_sonar_widgets::ColorMapType::Bronze);
+  waterfall_->set_ground_range(false);   // raw slant range, not slant->ground
   auto * split = new QSplitter(Qt::Horizontal, this);
   split->addWidget(canvas_);
   split->addWidget(waterfall_);
@@ -476,7 +467,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     });
   connect(canvas_, &SidescanCanvas::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
-  connect(waterfall_, &SidescanWaterfall::boxMarked,
+  connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
   connect(contact_list_, &QListWidget::currentRowChanged, this, [this](int row) {
       if (row >= 0 && row < static_cast<int>(contact_store_.contacts().size())) {
@@ -674,6 +665,10 @@ void SidescanViewerWindow::refreshContacts()
 {
   QVector<ContactMarker> markers;
   markers.reserve(static_cast<int>(contact_store_.size()));
+  // Same contacts in the lib widget's map-frame box form, so the waterfall projects
+  // each onto every pass that ensonified it.
+  std::vector<marine_sonar_widgets::ContactBox> boxes;
+  boxes.reserve(contact_store_.size());
   contact_list_->clear();
   for (const auto & c : contact_store_.contacts()) {
     const auto & p = c.kinematics.pose.pose.position;
@@ -684,13 +679,15 @@ void SidescanViewerWindow::refreshContacts()
     m.h = c.shape.dimensions.y;
     m.id = QString::fromStdString(c.id);
     markers.push_back(m);
+    boxes.push_back(marine_sonar_widgets::ContactBox{
+        p.x, p.y, c.shape.dimensions.x, c.shape.dimensions.y, m.id});
     contact_list_->addItem(QString("%1   %2 x %3 m   (%4, %5)")
       .arg(m.id)
       .arg(m.w, 0, 'f', 1).arg(m.h, 0, 'f', 1)
       .arg(p.x, 0, 'f', 1).arg(p.y, 0, 'f', 1));
   }
   canvas_->setContacts(markers);
-  waterfall_->setContacts(markers);
+  waterfall_->setContacts(boxes);
 }
 
 void SidescanViewerWindow::updateScrubStep()
@@ -761,8 +758,17 @@ void SidescanViewerWindow::onRenderFinished()
   }
 
   canvas_->setCoverage(r.image, r.origin_x, r.origin_y, r.res_m);
-  waterfall_->setImage(r.waterfall);
-  waterfall_->setIndex(r.waterfall_index);
+  // Rebuild the sidescan waterfall for this window: size the scrollback to the
+  // window so none of its rows are evicted (the lib widget's default 200-row history
+  // is smaller than a dense window), then clear and append oldest-first so the newest
+  // ping scrolls to the top (matching the live plugin).
+  if (!r.sidescan_rows.empty()) {
+    waterfall_->set_history(r.sidescan_rows.size());
+  }
+  waterfall_->clear();
+  for (const auto & row : r.sidescan_rows) {
+    waterfall_->add_row(row);
+  }
   cloud_->setColorMap(palette_combo_->currentIndex());
   cloud_->setPoints(r.mbes_soundings);
   mbes_waterfall_->clear();

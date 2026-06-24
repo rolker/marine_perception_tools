@@ -28,7 +28,6 @@
 #include "contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
 #include "sidescan_bag_session.hpp"
-#include "sidescan_waterfall.hpp"
 
 class QLabel;
 class QSlider;
@@ -69,8 +68,10 @@ struct SidescanRenderResult
   bool ok = false;
   uint64_t epoch = 0;    // session epoch this render was computed for (stale-drop)
   QImage image;          // georeferenced coverage (map frame)
-  QImage waterfall;      // uncorrected slant-range waterfall of the same window
-  WaterfallIndex waterfall_index;  // pixel->map mapping for waterfall marking
+  // Uncorrected slant-range sidescan rows (shared-lib WaterfallWidget) for the same
+  // window: port/starboard combined, newest drawn at top, each carrying its map pose
+  // so the widget inverts a marked pixel back to map coordinates.
+  std::vector<marine_sonar_widgets::WaterfallRow> sidescan_rows;
   std::vector<MbesSounding> mbes_soundings;  // window's M3 soundings, world frame
   std::vector<marine_sonar_widgets::WaterfallRow> mbes_backscatter_rows;  // per-ping dB
   std::vector<marine_acoustic_msgs::msg::RawSonarImage> down_images;  // water-column pings
@@ -140,7 +141,7 @@ private:
   QPushButton * mark_button_ = nullptr;
   QListWidget * contact_list_ = nullptr;
   QComboBox * palette_combo_ = nullptr;
-  SidescanWaterfall * waterfall_ = nullptr;
+  marine_sonar_widgets::WaterfallWidget * waterfall_ = nullptr;
   PointCloudView * cloud_ = nullptr;
   QComboBox * cloud_color_combo_ = nullptr;
   QDoubleSpinBox * zexag_spin_ = nullptr;
