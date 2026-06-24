@@ -39,6 +39,7 @@ class QListWidget;
 class QComboBox;
 class QRectF;
 class QCloseEvent;
+class QSplitter;
 
 namespace marine_perception_tools
 {
@@ -105,8 +106,13 @@ public:
   void openBag(const std::string & bag_uri);
 
 protected:
-  // Persist window geometry + dock layout on close (QSettings).
+  // Persist window geometry + splitter sizes on close (QSettings).
   void closeEvent(QCloseEvent * event) override;
+
+  // Route scrub keys (Left/Right/PageUp/PageDown/Home/End) to the scrub slider from
+  // anywhere in the window, so scrubbing works without the slider holding focus —
+  // except while editing a control (spin box / combo / list / the slider itself).
+  bool eventFilter(QObject * obj, QEvent * event) override;
 
 private slots:
   void onOpenBag();
@@ -147,6 +153,20 @@ private:
   QDoubleSpinBox * zexag_spin_ = nullptr;
   marine_sonar_widgets::WaterfallWidget * mbes_waterfall_ = nullptr;
   marine_sonar_widgets::EchogramWidget * echogram_ = nullptr;
+
+  // Per-pane colormap selectors (the map keeps palette_combo_; the 3D cloud gets
+  // its own marine_colormap palette via cloud_palette_).
+  QComboBox * sidescan_cmap_ = nullptr;
+  QComboBox * mbes_cmap_ = nullptr;
+  QComboBox * echo_cmap_ = nullptr;
+  QComboBox * cloud_palette_ = nullptr;
+
+  // Nested resizable-pane layout: [contacts | map | 2x2 grid]; the grid is a
+  // vertical splitter of two horizontal rows. Held so their sizes persist (QSettings).
+  QSplitter * outer_split_ = nullptr;
+  QSplitter * grid_split_ = nullptr;
+  QSplitter * grid_top_split_ = nullptr;
+  QSplitter * grid_bot_split_ = nullptr;
 
   ContactStore contact_store_;
   int contact_counter_ = 0;

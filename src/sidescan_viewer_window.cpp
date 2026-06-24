@@ -14,13 +14,18 @@
 
 #include "sidescan_viewer_window.hpp"
 
+#include <QAbstractItemView>
+#include <QAbstractSpinBox>
+#include <QApplication>
 #include <QComboBox>
-#include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QEvent>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QImage>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
@@ -55,6 +60,7 @@
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
 #include "marine_interfaces/msg/contact.hpp"
+#include "marine_sonar_widgets/color_map.hpp"
 #include "marine_sonar_widgets/echogram_widget.hpp"
 #include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "point_cloud_view.hpp"
@@ -374,35 +380,25 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   crow->addWidget(progress_);
 
-  // Geo map (left) beside the uncorrected slant-range sidescan waterfall (right),
-  // user-resizable. The shared-lib WaterfallWidget renders on the GPU and inverts a
+  // --- Data view widgets ---------------------------------------------------
+  // Sidescan slant-range waterfall (shared-lib WaterfallWidget, GPU): inverts a
   // marked pixel to map coordinates from each row's pose; slant range (water column
   // kept) matches the raw display analysts read, with across-track range gridlines.
   waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
   waterfall_->set_color_map(marine_sonar_widgets::ColorMapType::Bronze);
   waterfall_->set_ground_range(false);   // raw slant range, not slant->ground
-  auto * split = new QSplitter(Qt::Horizontal, this);
-  split->addWidget(canvas_);
-  split->addWidget(waterfall_);
-  split->setStretchFactor(0, 3);
-  split->setStretchFactor(1, 1);
 
-  auto * central = new QWidget(this);
-  auto * col = new QVBoxLayout(central);
-  col->addWidget(split, 1);
-  col->addWidget(controls);
-  col->addWidget(status_);
-  setCentralWidget(central);
+  // MBES backscatter waterfall: one row per detection ping, the beam dB fan
+  // across-track (beam-index axis, no metric range lines), newest at top.
+  mbes_waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
+  mbes_waterfall_->set_color_map(marine_sonar_widgets::ColorMapType::Bronze);
+  mbes_waterfall_->set_range_lines(false);
 
-  // Target-list dock (right): one row per contact, click to recentre the map.
-  contact_list_ = new QListWidget(this);
-  auto * dock = new QDockWidget("Contacts", this);
-  dock->setObjectName("dock_contacts");
-  dock->setWidget(contact_list_);
-  addDockWidget(Qt::RightDockWidgetArea, dock);
+  // Water-column echogram: the down-channel pings as a depth-vs-distance curtain.
+  echogram_ = new marine_sonar_widgets::EchogramWidget(this);
 
-  // MBES 3D point-cloud dock (right): orbit view of the window's soundings, with
-  // colour-mode + Z-exaggeration controls above it.
+  // MBES 3D point cloud: orbit view of the window's soundings (colour mode +
+  // Z-exaggeration live).
   cloud_ = new PointCloudView(this);
   cloud_color_combo_ = new QComboBox(this);
   cloud_color_combo_->addItem("Depth");
@@ -412,44 +408,90 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   zexag_spin_->setSingleStep(0.5);
   zexag_spin_->setValue(3.0);
   zexag_spin_->setPrefix("Z× ");
-  auto * cloud_panel = new QWidget(this);
-  auto * cloud_col = new QVBoxLayout(cloud_panel);
-  auto * cloud_ctrls = new QHBoxLayout();
-  cloud_ctrls->addWidget(new QLabel("Colour:", this));
-  cloud_ctrls->addWidget(cloud_color_combo_);
-  cloud_ctrls->addWidget(zexag_spin_);
-  cloud_ctrls->addStretch(1);
-  cloud_col->addLayout(cloud_ctrls);
-  cloud_col->addWidget(cloud_, 1);
-  auto * cloud_dock = new QDockWidget("MBES 3D", this);
-  cloud_dock->setObjectName("dock_mbes_3d");
-  cloud_dock->setWidget(cloud_panel);
-  addDockWidget(Qt::RightDockWidgetArea, cloud_dock);
 
-  // MBES backscatter waterfall dock (shared lib WaterfallWidget): one row per
-  // detection ping, the 224/234-beam dB fan across-track, newest at top.
-  mbes_waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
-  mbes_waterfall_->set_color_map(marine_sonar_widgets::ColorMapType::Bronze);
-  mbes_waterfall_->set_range_lines(false);   // beam-index axis, not metric range
-  auto * mbes_wf_dock = new QDockWidget("MBES Backscatter", this);
-  mbes_wf_dock->setObjectName("dock_mbes_backscatter");
-  mbes_wf_dock->setWidget(mbes_waterfall_);
-  addDockWidget(Qt::RightDockWidgetArea, mbes_wf_dock);
+  // Per-pane colormap selectors. The waterfalls + echogram share the lib's three
+  // ColorMapType palettes; the 3D cloud uses the marine_colormap palettes (it
+  // colours by depth/backscatter value, not the lib's intensity ramp).
+  auto make_cmap_combo = [this]() {
+      auto * c = new QComboBox(this);
+      for (int i = 0; i < marine_sonar_widgets::kColorMapCount; ++i) {
+        c->addItem(marine_sonar_widgets::color_map_name(
+            marine_sonar_widgets::color_map_from_index(i)));
+      }
+      return c;
+    };
+  sidescan_cmap_ = make_cmap_combo();
+  sidescan_cmap_->setCurrentIndex(
+    marine_sonar_widgets::color_map_index(marine_sonar_widgets::ColorMapType::Bronze));
+  mbes_cmap_ = make_cmap_combo();
+  mbes_cmap_->setCurrentIndex(
+    marine_sonar_widgets::color_map_index(marine_sonar_widgets::ColorMapType::Bronze));
+  echo_cmap_ = make_cmap_combo();
+  cloud_palette_ = new QComboBox(this);
+  for (const auto & name : marine_colormap::palette_names()) {
+    cloud_palette_->addItem(QString::fromStdString(name));
+  }
+  if (const auto vi = marine_colormap::palette_index("bronze")) {
+    cloud_palette_->setCurrentIndex(static_cast<int>(*vi));
+    cloud_->setColorMap(static_cast<int>(*vi));
+  }
 
-  // Water-column echogram dock (shared lib EchogramWidget): the down-channel pings
-  // of the current window as a depth-vs-distance curtain.
-  echogram_ = new marine_sonar_widgets::EchogramWidget(this);
-  auto * echo_dock = new QDockWidget("Water Column", this);
-  echo_dock->setObjectName("dock_water_column");
-  echo_dock->setWidget(echogram_);
-  addDockWidget(Qt::RightDockWidgetArea, echo_dock);
-  // Tab the MBES panes together by default so the right area isn't cramped; the
-  // operator can pull any out / float it to a second monitor, and the layout is
-  // persisted across runs (see closeEvent / the QSettings restore below).
-  tabifyDockWidget(cloud_dock, mbes_wf_dock);
-  tabifyDockWidget(mbes_wf_dock, echo_dock);
-  cloud_dock->raise();
-  setDockNestingEnabled(true);
+  // Wrap a view in a titled panel with a small header row (title + per-pane controls).
+  auto make_pane = [this](
+    const QString & title, QWidget * view, const std::vector<QWidget *> & header) {
+      auto * panel = new QWidget(this);
+      auto * v = new QVBoxLayout(panel);
+      v->setContentsMargins(2, 2, 2, 2);
+      v->setSpacing(2);
+      auto * hdr = new QHBoxLayout();
+      hdr->addWidget(new QLabel(title, panel));
+      hdr->addStretch(1);
+      for (auto * w : header) {
+        hdr->addWidget(w);
+      }
+      v->addLayout(hdr);
+      v->addWidget(view, 1);
+      return panel;
+    };
+
+  auto * ss_pane = make_pane("Sidescan", waterfall_, {sidescan_cmap_});
+  auto * bs_pane = make_pane("MBES Backscatter", mbes_waterfall_, {mbes_cmap_});
+  auto * wc_pane = make_pane("Water Column", echogram_, {echo_cmap_});
+  auto * cloud_pane = make_pane(
+    "MBES 3D", cloud_, {cloud_color_combo_, zexag_spin_, cloud_palette_});
+
+  // 2x2 grid of the four sonar views, each pane independently resizable:
+  //   sidescan waterfall (UL) | MBES backscatter (UR)
+  //   MBES 3D            (LL) | water column     (LR)
+  grid_top_split_ = new QSplitter(Qt::Horizontal, this);
+  grid_top_split_->addWidget(ss_pane);
+  grid_top_split_->addWidget(bs_pane);
+  grid_bot_split_ = new QSplitter(Qt::Horizontal, this);
+  grid_bot_split_->addWidget(cloud_pane);
+  grid_bot_split_->addWidget(wc_pane);
+  grid_split_ = new QSplitter(Qt::Vertical, this);
+  grid_split_->addWidget(grid_top_split_);
+  grid_split_->addWidget(grid_bot_split_);
+
+  // Contacts list (left): one row per contact, click to recentre the map.
+  contact_list_ = new QListWidget(this);
+  auto * contacts_pane = make_pane("Contacts", contact_list_, {});
+
+  // Left-to-right: contacts | map | 2x2 grid, all resizable.
+  outer_split_ = new QSplitter(Qt::Horizontal, this);
+  outer_split_->addWidget(contacts_pane);
+  outer_split_->addWidget(canvas_);
+  outer_split_->addWidget(grid_split_);
+  outer_split_->setStretchFactor(0, 0);
+  outer_split_->setStretchFactor(1, 3);
+  outer_split_->setStretchFactor(2, 4);
+
+  auto * central = new QWidget(this);
+  auto * col = new QVBoxLayout(central);
+  col->addWidget(outer_split_, 1);
+  col->addWidget(controls);
+  col->addWidget(status_);
+  setCentralWidget(central);
 
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
@@ -495,16 +537,41 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(zexag_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, [this](double z) {cloud_->setZExaggeration(static_cast<float>(z));});
 
+  // Per-pane colormaps: each repaints/recolours live, no re-render needed.
+  connect(sidescan_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int i) {
+      waterfall_->set_color_map(marine_sonar_widgets::color_map_from_index(i));
+    });
+  connect(mbes_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int i) {
+      mbes_waterfall_->set_color_map(marine_sonar_widgets::color_map_from_index(i));
+    });
+  connect(echo_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int i) {echogram_->setColorMapIndex(i);});
+  connect(cloud_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int i) {cloud_->setColorMap(i);});
+
   canvas_->setGridSpacing(grid_spin_->value());
   resize(1100, 760);
 
-  // Restore the operator's last window geometry + dock arrangement (panes have
-  // object names so restoreState can re-place/float them). No-op on first run.
+  // Watch app-wide key presses so scrub keys work regardless of which pane has
+  // focus (handled in eventFilter; editing widgets keep their own key behaviour).
+  qApp->installEventFilter(this);
+
+  // Restore the operator's last window geometry + the resizable-pane splitter sizes.
+  // No-op on first run.
   QSettings settings("UNH-CCOM", "sidescan_target_viewer");
   const QByteArray geom = settings.value("geometry").toByteArray();
-  const QByteArray state = settings.value("windowState").toByteArray();
   if (!geom.isEmpty()) {restoreGeometry(geom);}
-  if (!state.isEmpty()) {restoreState(state);}
+  const auto restore_split = [&settings](QSplitter * s, const char * key) {
+      if (s == nullptr) {return;}
+      const QByteArray st = settings.value(key).toByteArray();
+      if (!st.isEmpty()) {s->restoreState(st);}
+    };
+  restore_split(outer_split_, "split_outer");
+  restore_split(grid_split_, "split_grid");
+  restore_split(grid_top_split_, "split_grid_top");
+  restore_split(grid_bot_split_, "split_grid_bot");
 }
 
 SidescanViewerWindow::~SidescanViewerWindow()
@@ -517,12 +584,50 @@ SidescanViewerWindow::~SidescanViewerWindow()
 
 void SidescanViewerWindow::closeEvent(QCloseEvent * event)
 {
-  // Persist the window geometry + dock layout so the operator's arrangement
-  // (including panes floated to a second monitor) survives a restart.
+  // Persist the window geometry + the resizable-pane splitter sizes so the
+  // operator's arrangement survives a restart.
   QSettings settings("UNH-CCOM", "sidescan_target_viewer");
   settings.setValue("geometry", saveGeometry());
-  settings.setValue("windowState", saveState());
+  if (outer_split_) {settings.setValue("split_outer", outer_split_->saveState());}
+  if (grid_split_) {settings.setValue("split_grid", grid_split_->saveState());}
+  if (grid_top_split_) {settings.setValue("split_grid_top", grid_top_split_->saveState());}
+  if (grid_bot_split_) {settings.setValue("split_grid_bot", grid_bot_split_->saveState());}
   QMainWindow::closeEvent(event);
+}
+
+bool SidescanViewerWindow::eventFilter(QObject * obj, QEvent * event)
+{
+  if (event->type() == QEvent::KeyPress && scrub_ != nullptr && scrub_->isEnabled()) {
+    // Don't steal navigation keys from widgets where they mean something else:
+    // editing a spin box / combo / text field, navigating the contact list, or the
+    // scrub slider itself (which already handles these keys when focused).
+    QWidget * fw = QApplication::focusWidget();
+    const bool editing =
+      qobject_cast<QAbstractSpinBox *>(fw) != nullptr ||
+      qobject_cast<QComboBox *>(fw) != nullptr ||
+      qobject_cast<QLineEdit *>(fw) != nullptr ||
+      qobject_cast<QAbstractItemView *>(fw) != nullptr ||
+      qobject_cast<QAbstractSlider *>(fw) != nullptr;
+    if (!editing) {
+      auto * ke = static_cast<QKeyEvent *>(event);
+      int v = scrub_->value();
+      bool handled = true;
+      switch (ke->key()) {
+        case Qt::Key_Left: v -= scrub_->singleStep(); break;
+        case Qt::Key_Right: v += scrub_->singleStep(); break;
+        case Qt::Key_PageUp: v += scrub_->pageStep(); break;
+        case Qt::Key_PageDown: v -= scrub_->pageStep(); break;
+        case Qt::Key_Home: v = scrub_->minimum(); break;
+        case Qt::Key_End: v = scrub_->maximum(); break;
+        default: handled = false; break;
+      }
+      if (handled) {
+        scrub_->setValue(std::clamp(v, scrub_->minimum(), scrub_->maximum()));
+        return true;   // consumed
+      }
+    }
+  }
+  return QMainWindow::eventFilter(obj, event);
 }
 
 void SidescanViewerWindow::onOpenBag()
@@ -781,7 +886,8 @@ void SidescanViewerWindow::onRenderFinished()
   for (const auto & row : r.sidescan_rows) {
     waterfall_->add_row(row);
   }
-  cloud_->setColorMap(palette_combo_ ? palette_combo_->currentIndex() : 0);
+  // The 3D cloud keeps its own palette (set in the ctor and via cloud_palette_);
+  // setPoints recolours with that stored palette, so no per-render setColorMap here.
   cloud_->setPoints(r.mbes_soundings);
   // Size the MBES backscatter scrollback to the window too (same reason as the
   // sidescan pane): the lib's default 200-row history is smaller than a dense
