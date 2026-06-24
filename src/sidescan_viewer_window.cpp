@@ -266,10 +266,13 @@ SidescanRenderResult render_window(
     out.mbes_soundings.insert(
       out.mbes_soundings.end(), mp.world_soundings.begin(), mp.world_soundings.end());
     // Backscatter waterfall row: the per-beam dB fan, centred (beam index is the
-    // across-track axis; non-metric so no slant/ground range lines).
+    // across-track axis; non-metric so no slant/ground range lines). The detections
+    // beam array runs opposite the sidescan/map "port on the left" sense, so reverse
+    // it for a consistent across-track orientation across panes. (Stage G replaces
+    // this beam-index row with a true across-track projection.)
     marine_sonar_widgets::WaterfallRow row;
-    row.intensities = mp.intensities;
-    row.nadir_index = mp.intensities.size() / 2;
+    row.intensities.assign(mp.intensities.rbegin(), mp.intensities.rend());
+    row.nadir_index = row.intensities.size() / 2;
     out.mbes_backscatter_rows.push_back(std::move(row));
   }
 
