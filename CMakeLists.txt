@@ -142,6 +142,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_sidescan_geometry test/test_sidescan_geometry.cpp)
   target_include_directories(test_sidescan_geometry PRIVATE src)
 
+  # Pure MBES (M3) beam geometry (mbes_geometry.hpp) — header-only; needs the
+  # source include dir + marine_acoustic_msgs for the SonarDetections message.
+  ament_add_gtest(test_mbes_geometry test/test_mbes_geometry.cpp)
+  target_include_directories(test_mbes_geometry PRIVATE src)
+  ament_target_dependencies(test_mbes_geometry marine_acoustic_msgs)
+
   # Pure rolling-distance scrub policy (distance_buffer_policy.hpp) — header-only.
   ament_add_gtest(test_distance_buffer_policy test/test_distance_buffer_policy.cpp)
   target_include_directories(test_distance_buffer_policy PRIVATE src)

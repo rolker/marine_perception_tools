@@ -10,6 +10,16 @@ jazzy + in the manifest.
 PR1/PR2/PR3 rhythm), one PR at the end. Each stage builds + tests green before the
 next. Reuse the shared widgets; the only genuinely new GUI piece is the 3D viewport.
 
+**Resequenced 2026-06-24 (Roland, mid-ops): MBES value first.** Stage 0 (lib dep)
+is done. Stage 1 (retire `SidescanWaterfall`) is a pure refactor with no new
+visible value and is **deferred to a later cleanup** — the msw#6 overlay merge
+removed its only blocker, so the MBES panes can be built on the lib widget
+without retiring `SidescanWaterfall` first. New order: **Stage 2 (MBES core) →
+3 (backscatter) → 4 (3D cloud) → 5 (echogram) → 6 (docks) → 1 (retire), last.**
+The new MBES backscatter/echogram panes use the lib `WaterfallWidget`/
+`EchogramWidget` directly; the existing sidescan pane keeps `SidescanWaterfall`
+until Stage 1.
+
 ## Ground truth (verified, not assumed)
 
 - **Detections** = `marine_acoustic_msgs/msg/SonarDetections` on
