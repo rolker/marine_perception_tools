@@ -47,9 +47,16 @@ public:
   enum class ColorMode { Depth, Backscatter };
 
   // Replace the displayed cloud with this window's world-frame soundings. Recentres
-  // on their centroid and reframes the camera distance from their extent.
+  // on their centroid so the cloud stays in view, but preserves the operator's
+  // zoom/orientation across scrubs — the camera distance is only auto-framed on the
+  // first cloud after a resetView() (new bag / Fit View), not on every update.
   void setPoints(const std::vector<MbesSounding> & world_soundings);
   void clear();
+
+  // Re-frame the camera (default orbit + auto distance) on the next setPoints. Call
+  // on a new bag or from a "Fit View" action; scrubbing does not call this, so the
+  // zoom set by the operator is kept.
+  void resetView();
 
   void setColorMode(ColorMode mode);
   void setZExaggeration(float z);          // >= 1; stretches depth
@@ -89,6 +96,7 @@ private:
   float elevation_deg_ = 35.0f;
   float distance_ = 10.0f;
   float zexag_ = 3.0f;
+  bool framed_ = false;            // true once the camera distance has been auto-framed
   ColorMode mode_ = ColorMode::Depth;
   int palette_index_ = 0;
   QPoint last_mouse_;

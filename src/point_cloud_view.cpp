@@ -124,7 +124,12 @@ void PointCloudView::setPoints(const std::vector<MbesSounding> & world_soundings
     max_r2 = std::max(max_r2, rx * rx + ry * ry + rz * rz);
   }
   radius_ = std::max(1.0f, std::sqrt(max_r2));
-  distance_ = radius_ * 2.5f;         // frame the whole cloud by default
+  // Frame the camera distance only once (first cloud after a resetView). On a scrub
+  // the cloud is recentred but the operator's zoom/orientation is preserved.
+  if (!framed_) {
+    distance_ = radius_ * 2.5f;       // frame the whole cloud
+    framed_ = true;
+  }
 
   rebuild_colors();
   buffers_dirty_ = true;
@@ -134,6 +139,17 @@ void PointCloudView::setPoints(const std::vector<MbesSounding> & world_soundings
 void PointCloudView::clear()
 {
   setPoints({});
+}
+
+void PointCloudView::resetView()
+{
+  // Restore the default orbit and re-arm auto-framing so the next setPoints frames
+  // the cloud. Used on a new bag / a Fit View action — not on a scrub.
+  azimuth_deg_ = 0.0f;
+  elevation_deg_ = 35.0f;
+  framed_ = false;
+  if (radius_ > 0.0f) {distance_ = radius_ * 2.5f;}
+  update();
 }
 
 void PointCloudView::setColorMode(ColorMode mode)

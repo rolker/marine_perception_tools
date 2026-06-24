@@ -495,7 +495,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
-  file_menu->addAction("&Fit View", this, [this]() {canvas_->resetView();});
+  file_menu->addAction("&Fit View", this, [this]() {
+      canvas_->resetView();
+      cloud_->resetView();
+    });
   file_menu->addSeparator();
   file_menu->addAction("&Load Contacts…", this, &SidescanViewerWindow::onLoadContacts);
   file_menu->addAction("&Save Contacts…", this, &SidescanViewerWindow::onSaveContacts);
@@ -677,6 +680,7 @@ void SidescanViewerWindow::onLoadFinished()
   }
   canvas_->setTrack(track);
   canvas_->resetView();  // fit to the track now; coverage fills in asynchronously
+  cloud_->resetView();   // re-frame the 3D for the new bag (scrubs then keep the zoom)
 
   // Slider units are metres of along-track distance, so the arrow-key step can be
   // an exact fraction of the window.
