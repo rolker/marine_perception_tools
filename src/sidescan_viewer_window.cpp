@@ -16,7 +16,9 @@
 
 #include <QAbstractItemView>
 #include <QAbstractSpinBox>
+#include <QAction>
 #include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QEvent>
@@ -664,6 +666,28 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
         canvas_->setCenter(k.x, k.y);
       }
     });
+  // Right-click a contact to copy its lat/lon (or the whole row) to the clipboard.
+  contact_list_->setContextMenuPolicy(Qt::CustomContextMenu);
+  connect(contact_list_, &QListWidget::customContextMenuRequested, this,
+    [this](const QPoint & pos) {
+      QListWidgetItem * item = contact_list_->itemAt(pos);
+      if (item == nullptr) {return;}
+      const int row = contact_list_->row(item);
+      if (row < 0 || row >= static_cast<int>(contact_store_.contacts().size())) {return;}
+      const auto & g = contact_store_.contacts()[row].geo_pose.position;
+      const bool has_geo = std::isfinite(g.latitude) && std::isfinite(g.longitude);
+      QMenu menu(this);
+      QAction * copy_ll = menu.addAction("Copy lat, lon");
+      copy_ll->setEnabled(has_geo);
+      QAction * copy_row = menu.addAction("Copy row");
+      QAction * chosen = menu.exec(contact_list_->viewport()->mapToGlobal(pos));
+      if (chosen == copy_ll && has_geo) {
+        QApplication::clipboard()->setText(
+          QString("%1, %2").arg(g.latitude, 0, 'f', 6).arg(g.longitude, 0, 'f', 6));
+      } else if (chosen == copy_row) {
+        QApplication::clipboard()->setText(item->text());
+      }
+    });
   connect(cloud_color_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int i) {
       cloud_->setColorMode(
@@ -1063,10 +1087,17 @@ void SidescanViewerWindow::refreshContacts()
     markers.push_back(m);
     boxes.push_back(marine_sonar_widgets::ContactBox{
         p.x, p.y, c.shape.dimensions.x, c.shape.dimensions.y, m.id});
-    contact_list_->addItem(QString("%1   %2 x %3 m   (%4, %5)")
+    // lat/lon in decimal degrees when the bag resolved a geo reference, else a marker.
+    const double lat = c.geo_pose.position.latitude;
+    const double lon = c.geo_pose.position.longitude;
+    const QString geo = (std::isfinite(lat) && std::isfinite(lon)) ?
+      QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6) :
+      QStringLiteral("no geo");
+    contact_list_->addItem(QString("%1   %2 x %3 m   (%4, %5)   %6")
       .arg(m.id)
       .arg(m.w, 0, 'f', 1).arg(m.h, 0, 'f', 1)
-      .arg(p.x, 0, 'f', 1).arg(p.y, 0, 'f', 1));
+      .arg(p.x, 0, 'f', 1).arg(p.y, 0, 'f', 1)
+      .arg(geo));
   }
   canvas_->setContacts(markers);
   waterfall_->setContacts(boxes);
