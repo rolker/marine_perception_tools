@@ -34,3 +34,34 @@ issue: 8
 ### Note
 Static analysis run via `colcon test` (ament_lint included): 228 tests, 0 failures.
 Two disjoint-lens Claude adversarial passes (Lens A logic / Lens B systemic); Copilot off (opt-in, suspended through June 2026).
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-25 07:40 -0400
+**By**: Claude Code Agent (Claude Opus 4.8)
+**Verdict**: approved
+
+**Branch**: feature/issue-8 at `e45f170`
+**Mode**: pre-push
+**Depth**: Deep (reason: 2617+/539- across 19 files, 22 commits; new threading model + GPU/GL)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 2 | **Ship**: recommended — threading model verified sound; remaining items are edge-case/throughput follow-ups
+
+Covers the work since the Round-1 review (layout, per-window colormaps, global keys, 3D
+fixes, colormap unification, G/M across-track backscatter + marking, H/J linked cursor +
+seek, F streaming index). Two disjoint-lens adversarial passes (logic / concurrency).
+
+### Findings
+- [ ] (suggestion) Per-pane stationary cap divergence: when a window exceeds max_pings (600), readWindow/readMbesWindow/readDownImages each trim oldest independently, so the panes can drift slightly out of along-track lockstep — `sidescan_bag_session.cpp` (only on dense/stationary >600-ping windows; documented limitation, follow-up: shared distance cutoff)
+- [ ] (suggestion) publishSnapshot deep-copies pings_/mbes_pings_ each ~1.5 s flush; cost grows toward the end of a long index — `buildIndex` (acceptable for a one-time load; follow-up: copy only the new tail or size-cap flush cadence)
+
+### Verified sound (no action)
+- F threading: no reader path touches the worker's mutable members; all accessors go through the immutable snapshot; publish→swap under snap_mutex_ is race/UAF/deadlock-free; cross-thread Q_EMIT indexProgress is safe (destructor waits index_watcher_ before ~QObject discards queued events); epoch guards correct for open-during-index; render worker captures the session shared_ptr.
+- F correctness: final pass recomputes cumdist + sort + altitude authoritatively → matches pre-streaming result (probe: 616,568 detections / 143,305 soundings-per-50m / 234 beams / z=46.85 / 19,473.7 m). MbesPing tf_ok vs has_pose two-stage semantics clean.
+- G: across-track sign = left-of-heading (port), nadir_index/range_max_port/stbd match the lib's WaterfallRow consumption; bin math + hold-fill + single-side handling correct.
+- H/J: echogram frac↔distance mapping monotonic/consistent; nearest/positionAtDistance correct; span>0 guards.
+- Boat arrow z (ENU z-up: max sounding z + lift floats above the cloud); paintGL depth-state reassert recovers the QPainter overlay's state before the depth clear; PointCloudView GL lifecycle guarded.
+
+### Note
+Static analysis run via colcon test (ament_lint): 228 tests, 0 failures. Copilot off (opt-in, suspended).
+Lib dependency merged: marine_sonar_widgets#9 (jazzy); viewer rebuilt against the merged lib (no overlay).
