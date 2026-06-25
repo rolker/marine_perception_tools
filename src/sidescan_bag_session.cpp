@@ -659,6 +659,11 @@ std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
   int64_t t_hi = std::numeric_limits<int64_t>::min();
   for (std::size_t i = 0; i < sel.size(); ++i) {
     out[i].cumulative_distance_m = sel[i]->cumulative_distance_m;
+    out[i].sensor_x = sel[i]->tx;
+    out[i].sensor_y = sel[i]->ty;
+    out[i].heading =
+      yaw_from_quaternion(sel[i]->qx, sel[i]->qy, sel[i]->qz, sel[i]->qw);
+    out[i].has_pose = sel[i]->has_pose;
     slot.emplace(sel[i]->stamp_ns, static_cast<int>(i));
     t_lo = std::min(t_lo, sel[i]->stamp_ns);
     t_hi = std::max(t_hi, sel[i]->stamp_ns);

@@ -209,6 +209,95 @@ std::vector<marine_sonar_widgets::WaterfallRow> build_sidescan_rows(
   return out;
 }
 
+// Project one MBES ping's per-beam backscatter onto a uniform across-track axis so
+// the pane is geometrically across-track (port on the left), the lib can draw metric
+// range lines, and a marked pixel inverts exactly to a map point via the sensor pose.
+// Each valid sounding's signed across-track ground distance (+ = port/left of the
+// sensor heading) is binned per side; the row is laid out port-far -> nadir ->
+// starboard-far with the side max ranges, matching the lib's WaterfallRow model.
+marine_sonar_widgets::WaterfallRow build_mbes_backscatter_row(const MbesWindowPing & mp)
+{
+  using marine_sonar_widgets::WaterfallRow;
+  using marine_sonar_widgets::WorldPose;
+  WaterfallRow row;
+  if (mp.world_soundings.empty()) {return row;}
+
+  // Left-of-heading unit vector (ENU): the across-track axis. + = port (left).
+  const double lhx = -std::sin(mp.heading);
+  const double lhy = std::cos(mp.heading);
+  struct AcrossSample {double across; float intensity;};
+  std::vector<AcrossSample> samples;
+  samples.reserve(mp.world_soundings.size());
+  double port_max = 0.0;
+  double stbd_max = 0.0;
+  for (const auto & s : mp.world_soundings) {
+    const double across = (s.x - mp.sensor_x) * lhx + (s.y - mp.sensor_y) * lhy;
+    samples.push_back({across, s.intensity});
+    if (across >= 0.0) {
+      port_max = std::max(port_max, across);
+    } else {
+      stbd_max = std::max(stbd_max, -across);
+    }
+  }
+
+  constexpr int kBins = 256;   // uniform across-track bins per side
+  const double res_p = (port_max > 0.0) ? port_max / kBins : 0.0;
+  const double res_s = (stbd_max > 0.0) ? stbd_max / kBins : 0.0;
+  std::vector<double> port_sum(kBins, 0.0);
+  std::vector<double> stbd_sum(kBins, 0.0);
+  std::vector<int> port_n(kBins, 0);
+  std::vector<int> stbd_n(kBins, 0);
+  for (const auto & a : samples) {
+    if (a.across >= 0.0 && res_p > 0.0) {
+      const int b = std::min(kBins - 1, static_cast<int>(a.across / res_p));
+      port_sum[b] += a.intensity;
+      ++port_n[b];
+    } else if (a.across < 0.0 && res_s > 0.0) {
+      const int b = std::min(kBins - 1, static_cast<int>(-a.across / res_s));
+      stbd_sum[b] += a.intensity;
+      ++stbd_n[b];
+    }
+  }
+  // Average per bin; fill empty bins by holding the previous (near->far) value so
+  // sparse far-range beams don't read as black stripes. Leading empties stay 0.
+  auto finish = [](const std::vector<double> & sum, const std::vector<int> & n) {
+      std::vector<float> v(n.size(), 0.0f);
+      float last = 0.0f;
+      for (std::size_t i = 0; i < n.size(); ++i) {
+        if (n[i] > 0) {
+          v[i] = static_cast<float>(sum[i] / n[i]);
+          last = v[i];
+        } else {
+          v[i] = last;
+        }
+      }
+      return v;
+    };
+  const std::vector<float> port = finish(port_sum, port_n);   // near(0) -> far
+  const std::vector<float> stbd = finish(stbd_sum, stbd_n);
+
+  // Layout: port reversed (far..near) then starboard (near..far); nadir at the join.
+  row.intensities.reserve((port_max > 0.0 ? kBins : 0) + (stbd_max > 0.0 ? kBins : 0));
+  if (port_max > 0.0) {
+    for (int i = kBins - 1; i >= 0; --i) {
+      row.intensities.push_back(port[i]);
+    }
+  }
+  row.nadir_index = row.intensities.size();
+  if (stbd_max > 0.0) {
+    for (int i = 0; i < kBins; ++i) {
+      row.intensities.push_back(stbd[i]);
+    }
+  }
+  row.range_max_port = port_max;
+  row.range_max_stbd = stbd_max;
+  row.range_max = std::max(port_max, stbd_max);
+  if (mp.has_pose) {
+    row.world_pose = WorldPose{mp.sensor_x, mp.sensor_y, mp.heading};
+  }
+  return row;
+}
+
 // Build the coverage render for a distance window on a worker thread (readWindow +
 // paint + rasterize + waterfall). Touches no widgets, so it is safe off the UI
 // thread; the caller applies the result on the UI thread.
@@ -264,15 +353,9 @@ SidescanRenderResult render_window(
   for (const auto & mp : mwin) {
     out.mbes_soundings.insert(
       out.mbes_soundings.end(), mp.world_soundings.begin(), mp.world_soundings.end());
-    // Backscatter waterfall row: the per-beam dB fan, centred (beam index is the
-    // across-track axis; non-metric so no slant/ground range lines). The detections
-    // beam array runs opposite the sidescan/map "port on the left" sense, so reverse
-    // it for a consistent across-track orientation across panes. (Stage G replaces
-    // this beam-index row with a true across-track projection.)
-    marine_sonar_widgets::WaterfallRow row;
-    row.intensities.assign(mp.intensities.rbegin(), mp.intensities.rend());
-    row.nadir_index = row.intensities.size() / 2;
-    out.mbes_backscatter_rows.push_back(std::move(row));
+    // Backscatter row: across-track-projected (metric, port on the left) so the pane
+    // shows true across-track range lines and a marked pixel inverts to a map point.
+    out.mbes_backscatter_rows.push_back(build_mbes_backscatter_row(mp));
   }
 
   // Down-channel water-column pings (raw) for the echogram, same window.
@@ -425,7 +508,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // MBES backscatter waterfall: one row per detection ping, the beam dB fan
   // across-track (beam-index axis, no metric range lines), newest at top.
   mbes_waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
-  mbes_waterfall_->set_range_lines(false);   // beam-index axis (palette set below)
+  // Across-track-projected: keep slant range (we already supply ground/across-track
+  // distances, so no further conversion) and draw across-track range lines.
+  mbes_waterfall_->set_ground_range(false);
+  mbes_waterfall_->set_range_lines(true);
 
   // Water-column echogram: the down-channel pings as a depth-vs-distance curtain.
   echogram_ = new marine_sonar_widgets::EchogramWidget(this);
@@ -562,10 +648,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(mark_button_, &QPushButton::toggled, this, [this](bool on) {
       canvas_->setMarkMode(on);
       waterfall_->setMarkMode(on);
+      mbes_waterfall_->setMarkMode(on);
     });
   connect(canvas_, &SidescanCanvas::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
   connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::boxMarked,
+    this, &SidescanViewerWindow::onContactMarked);
+  connect(mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
   connect(contact_list_, &QListWidget::currentRowChanged, this, [this](int row) {
       if (row >= 0 && row < static_cast<int>(contact_store_.contacts().size())) {
@@ -848,6 +937,7 @@ void SidescanViewerWindow::refreshContacts()
   }
   canvas_->setContacts(markers);
   waterfall_->setContacts(boxes);
+  mbes_waterfall_->setContacts(boxes);   // project contacts onto the backscatter pane too
 }
 
 void SidescanViewerWindow::updateScrubStep()

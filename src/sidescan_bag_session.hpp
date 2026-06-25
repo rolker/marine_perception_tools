@@ -111,6 +111,13 @@ struct MbesPing
 struct MbesWindowPing
 {
   double cumulative_distance_m = 0.0;
+  // M3 sensor world pose for the across-track projection + pixel->map marking:
+  // planar position + heading (ENU, CCW from +x/east). has_pose mirrors the source
+  // MbesPing (always true for a windowed ping, which is pre-filtered on has_pose).
+  double sensor_x = 0.0;
+  double sensor_y = 0.0;
+  double heading = 0.0;
+  bool has_pose = false;
   std::vector<float> intensities;             // per-beam dB (waterfall row)
   std::vector<MbesSounding> world_soundings;  // valid beams, WORLD frame + dB
 };
