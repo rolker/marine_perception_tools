@@ -23,6 +23,7 @@
   <depend>marine_acoustic_msgs</depend>
   <depend>marine_interfaces</depend>
   <depend>marine_colormap</depend>
+  <depend>marine_sonar_widgets</depend>
   <depend>geographic_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>ffmpeg_encoder_decoder</depend>

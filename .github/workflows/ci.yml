@@ -58,6 +58,16 @@ jobs:
           https://github.com/rolker/marine_colormap.git
           ../ws/src/marine_colormap
 
+      # marine_sonar_widgets is a source sibling (not in rosdep): the viewer's
+      # shared sonar panes (WaterfallWidget, EchogramWidget) live there. Its own
+      # deps resolve via the siblings already cloned (marine_colormap,
+      # marine_interfaces) + rosdep (marine_acoustic_msgs, Qt).
+      - name: Clone marine_sonar_widgets source dependency
+        run: >
+          git clone --depth 1 -b jazzy
+          https://github.com/rolker/marine_sonar_widgets.git
+          ../ws/src/marine_sonar_widgets
+
       # marine_interfaces (Contact.msg) is a package inside the unh_marine_autonomy
       # repo, not published to rosdep. Clone the repo and keep only that package so
       # CI doesn't pull the heavy transitive deps of its sibling packages.

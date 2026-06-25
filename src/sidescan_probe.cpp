@@ -51,8 +51,8 @@ int main(int argc, char ** argv)
   using mpt::SidescanChannel;
   try {
     mpt::SidescanBagSession session(argv[1]);
-    const auto & pings = session.pings();
-    std::printf("pings: %zu total\n", pings.size());
+    session.buildIndex();   // synchronous full build (one final snapshot)
+    std::printf("pings: %zu total\n", session.pingCount());
     std::printf("  port=%zu starboard=%zu down=%zu\n",
       session.channelCount(SidescanChannel::Port),
       session.channelCount(SidescanChannel::Starboard),
@@ -78,6 +78,28 @@ int main(int argc, char ** argv)
         "  mid-sample[%zu] ground_range=%.2f m -> map (%.2f, %.2f) valid=%d\n",
         win.size(), channel_name(p.channel), p.amplitudes.size(),
         p.geometry.altitude, mid, gp.ground_range, gp.x, gp.y, gp.valid);
+    }
+
+    // M3 multibeam: index count + a windowed read exercising the project + lift.
+    const auto snap = session.snapshot();
+    std::printf(
+      "mbes detections: %zu pings indexed\n", snap ? snap->mbes_pings.size() : 0);
+    const auto mwin = session.readMbesWindow(0.0, 50.0, 600);
+    if (!mwin.empty()) {
+      std::size_t soundings = 0;
+      for (const auto & mp : mwin) {
+        soundings += mp.world_soundings.size();
+      }
+      const auto & m0 = mwin.front();
+      std::printf(
+        "mbes window read (first 50 m): %zu pings • %zu soundings • beams/ping=%zu\n",
+        mwin.size(), soundings, m0.intensities.size());
+      if (!m0.world_soundings.empty()) {
+        const auto & s = m0.world_soundings.front();
+        std::printf(
+          "  first sounding world=(%.2f, %.2f, %.2f) dB=%.1f\n",
+          s.x, s.y, s.z, static_cast<double>(s.intensity));
+      }
     }
 
     // Time a window read at each end of the track — this is the per-scrub cost on

@@ -28,7 +28,9 @@
 #include <unordered_map>
 #include <utility>
 
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "marine_acoustic_msgs/msg/raw_sonar_image.hpp"
+#include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "rclcpp/serialization.hpp"
 #include "rclcpp/serialized_message.hpp"
 #include "rosbag2_cpp/reader.hpp"
@@ -101,6 +103,45 @@ bool interp_base_pose(
   out.yaw = a.yaw + dyaw * f;
   out.cumdist = a.cumdist + (b.cumdist - a.cumdist) * f;
   return true;
+}
+
+// Look up target<-source at `stamp`, falling back to the latest available
+// transform on an extrapolation throw (mirrors cube::DetectionsProjector). Used
+// to capture the full world<-m3 transform for each detections ping during the
+// load pass, while the bounded TF cache still brackets that stamp.
+bool lookup_at_or_latest(
+  const tf2::BufferCore & tf, const std::string & target, const std::string & source,
+  const tf2::TimePoint & stamp, geometry_msgs::msg::TransformStamped & out)
+{
+  try {
+    out = tf.lookupTransform(target, source, stamp);
+    return true;
+  } catch (const tf2::ExtrapolationException &) {
+    try {
+      out = tf.lookupTransform(target, source, tf2::TimePointZero);
+      return true;
+    } catch (const tf2::TransformException &) {
+      return false;
+    }
+  } catch (const tf2::TransformException &) {
+    return false;
+  }
+}
+
+// Rotate vector v by quaternion q (q assumed normalized): v' = v + 2 q_w (u x v)
+// + 2 u x (u x v), with u = q.xyz. Used to lift sensor-frame soundings to world.
+void rotate_by_quat(
+  double qx, double qy, double qz, double qw,
+  double vx, double vy, double vz, double & ox, double & oy, double & oz)
+{
+  // t = 2 * (u x v)
+  const double tx = 2.0 * (qy * vz - qz * vy);
+  const double ty = 2.0 * (qz * vx - qx * vz);
+  const double tz = 2.0 * (qx * vy - qy * vx);
+  // v' = v + qw * t + u x t
+  ox = vx + qw * tx + (qy * tz - qz * ty);
+  oy = vy + qw * ty + (qz * tx - qx * tz);
+  oz = vz + qw * tz + (qx * ty - qy * tx);
 }
 
 // True when this host is big-endian (runtime check; std::endian is C++20).
@@ -184,20 +225,10 @@ std::vector<float> extract_beam0(
 
 SidescanBagSession::SidescanBagSession(
   const std::string & bag_uri, const SidescanBagOptions & opts)
-: bag_uri_(bag_uri)
+: bag_uri_(bag_uri), opts_(opts)
 {
-  // Optional load profiling: set SIDESCAN_PROFILE=1 to print per-phase timings to
-  // stderr. Quiet by default.
-  const bool profile = std::getenv("SIDESCAN_PROFILE") != nullptr;
-  const auto t_start = std::chrono::steady_clock::now();
-  auto prof = [profile, t_start](const char * label) {
-      if (!profile) {return;}
-      const double ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - t_start).count();
-      std::fprintf(stderr, "[profile] %-22s %8.0f ms\n", label, ms);
-    };
-
-  // ---- Open + bounds + channel presence. ----
+  // Cheap: open + verify the bag has sidescan ping topics, so the caller surfaces a
+  // bad bag synchronously. The heavy index build is buildIndex() (run on a worker).
   rosbag2_cpp::Reader reader;
   reader.open(bag_uri);
   const auto & meta = reader.get_metadata();
@@ -219,7 +250,24 @@ SidescanBagSession::SidescanBagSession(
   // recording's transform depth, so per-ping pose resolution becomes ~O(n^2) on a
   // multi-hour survey. Instead keep the cache small and sample the boat pose at a
   // coarse cadence as we stream in time order, then interpolate per ping.
-  tf_buffer_ = std::make_unique<tf2::BufferCore>(tf2::durationFromSec(opts.tf_cache_s));
+  tf_buffer_ = std::make_unique<tf2::BufferCore>(tf2::durationFromSec(opts_.tf_cache_s));
+}
+
+void SidescanBagSession::buildIndex(const ProgressFn & progress)
+{
+  // Optional load profiling: set SIDESCAN_PROFILE=1 to print per-phase timings to
+  // stderr. Quiet by default.
+  const bool profile = std::getenv("SIDESCAN_PROFILE") != nullptr;
+  const auto t_start = std::chrono::steady_clock::now();
+  auto prof = [profile, t_start](const char * label) {
+      if (!profile) {return;}
+      const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_start).count();
+      std::fprintf(stderr, "[profile] %-22s %8.0f ms\n", label, ms);
+    };
+
+  rosbag2_cpp::Reader reader;
+  reader.open(bag_uri_);
 
   std::map<std::string, SidescanChannel> topic_to_channel;
   for (int c = 0; c < kNumSidescanChannels; ++c) {
@@ -238,12 +286,72 @@ SidescanBagSession::SidescanBagSession(
   std::vector<BasePoseSample> base_table;
   double frontier_s = -std::numeric_limits<double>::infinity();
   double last_sample_s = -std::numeric_limits<double>::infinity();
-  const double sample_dt = std::max(0.01, opts.pose_sample_dt_s);
+  const double sample_dt = std::max(0.01, opts_.pose_sample_dt_s);
   constexpr double kMargin = 0.1;
+
+  // Incremental resolve: accumulate the base-table cumulative distance and resolve
+  // (pose + along-track distance) every sidescan ping whose stamp is already
+  // bracketed by the cumdist-computed part of the table. Idempotent (skips already
+  // resolved). Lets each published snapshot expose the part scrubbable so far.
+  std::size_t resolved_base = 0;
+  auto resolve_incremental = [&]() {
+      for (std::size_t i = resolved_base; i < base_table.size(); ++i) {
+        base_table[i].cumdist = (i == 0) ? 0.0 :
+          base_table[i - 1].cumdist +
+          std::hypot(
+            base_table[i].x - base_table[i - 1].x, base_table[i].y - base_table[i - 1].y);
+      }
+      resolved_base = base_table.size();
+      if (base_table.empty()) {return;}
+      total_distance_m_ = base_table.back().cumdist;
+      const double resolvable_t = base_table.back().t;
+      for (auto & ping : pings_) {
+        if (ping.has_pose || ping.stamp_s > resolvable_t) {continue;}
+        BasePoseSample bp;
+        if (interp_base_pose(base_table, ping.stamp_s, opts_.pose_max_gap_s, bp)) {
+          ping.geometry.sensor_x = bp.x;
+          ping.geometry.sensor_y = bp.y;
+          ping.geometry.yaw = bp.yaw;
+          ping.cumulative_distance_m = bp.cumdist;
+          ping.has_pose = true;
+          ++poses_resolved_;
+        }
+      }
+      for (auto & mp : mbes_pings_) {
+        if (mp.has_pose || !mp.tf_ok || mp.stamp_s > resolvable_t) {continue;}
+        BasePoseSample bp;
+        if (interp_base_pose(base_table, mp.stamp_s, opts_.pose_max_gap_s, bp)) {
+          mp.cumulative_distance_m = bp.cumdist;
+          mp.has_pose = true;
+        }
+      }
+    };
+
+  // Publish a snapshot at most every ~1.5 s of wall time (and at least every
+  // kFlushMsgs messages, so a fast bag still grows). Intermediate snapshots carry
+  // pose+distance only (altitude is assigned authoritatively in the final pass).
+  auto last_flush = std::chrono::steady_clock::now();
+  constexpr double kFlushS = 1.5;
+  std::size_t since_flush = 0;
+  constexpr std::size_t kFlushMsgs = 50000;
+  auto maybe_flush = [&]() {
+      const auto now = std::chrono::steady_clock::now();
+      if (++since_flush < kFlushMsgs &&
+        std::chrono::duration<double>(now - last_flush).count() < kFlushS)
+      {
+        return;
+      }
+      resolve_incremental();
+      publishSnapshot(false);
+      if (progress) {progress(total_distance_m_, false);}
+      last_flush = now;
+      since_flush = 0;
+    };
 
   // ---- Single pass: stream the bag in order. ----
   while (reader.has_next()) {
     auto bag_msg = reader.read_next();
+    maybe_flush();   // grow the published snapshot as the bag streams in
     // One unreadable message (corrupt/truncated) is skipped + counted, not fatal.
     try {
       const std::string & topic = bag_msg->topic_name;
@@ -264,7 +372,7 @@ SidescanBagSession::SidescanBagSession(
             std::chrono::nanoseconds(static_cast<int64_t>(sample_t * 1e9)));
           try {
             const auto tf =
-              tf_buffer_->lookupTransform(opts.world_frame, opts.base_frame, tp);
+              tf_buffer_->lookupTransform(opts_.world_frame, opts_.base_frame, tp);
             const auto & tr = tf.transform.translation;
             const auto & q = tf.transform.rotation;
             BasePoseSample s;
@@ -275,11 +383,11 @@ SidescanBagSession::SidescanBagSession(
             base_table.push_back(s);
             last_sample_s = sample_t;
             if (!has_geo_reference_ &&
-              tf_buffer_->canTransform(opts.geo_frame, opts.world_frame, tp))
+              tf_buffer_->canTransform(opts_.geo_frame, opts_.world_frame, tp))
             {
               // Capture earth<-world (ECEF translation + rotation) for mapToGeo().
               const auto g =
-                tf_buffer_->lookupTransform(opts.geo_frame, opts.world_frame, tp);
+                tf_buffer_->lookupTransform(opts_.geo_frame, opts_.world_frame, tp);
               geo_tx_ = g.transform.translation.x;
               geo_ty_ = g.transform.translation.y;
               geo_tz_ = g.transform.translation.z;
@@ -301,6 +409,32 @@ SidescanBagSession::SidescanBagSession(
           const double t = rng.header.stamp.sec + rng.header.stamp.nanosec * 1e-9;
           nadir_depths.emplace_back(t, static_cast<double>(rng.range));
         }
+        continue;
+      }
+      if (topic == kMbesDetectionsTopic) {
+        // Index the ping (no samples) + capture world<-m3 now, while the bounded
+        // TF cache still brackets this stamp. Cumulative distance is assigned in
+        // the post-pass loop (needs the accumulated base-table distances).
+        auto det = deserialize<marine_acoustic_msgs::msg::SonarDetections>(bag_msg);
+        MbesPing mp;
+        mp.stamp_s = det.header.stamp.sec + det.header.stamp.nanosec * 1e-9;
+        mp.stamp_ns = static_cast<int64_t>(det.header.stamp.sec) * 1000000000LL +
+          det.header.stamp.nanosec;
+        const std::string src =
+          det.header.frame_id.empty() ? std::string("bizzy/m3") : det.header.frame_id;
+        const auto tp = tf2::TimePoint(std::chrono::nanoseconds(mp.stamp_ns));
+        geometry_msgs::msg::TransformStamped tf;
+        if (lookup_at_or_latest(*tf_buffer_, opts_.world_frame, src, tp, tf)) {
+          mp.tx = tf.transform.translation.x;
+          mp.ty = tf.transform.translation.y;
+          mp.tz = tf.transform.translation.z;
+          mp.qx = tf.transform.rotation.x;
+          mp.qy = tf.transform.rotation.y;
+          mp.qz = tf.transform.rotation.z;
+          mp.qw = tf.transform.rotation.w;
+          mp.tf_ok = true;  // transform captured; distance assigned in the resolve step
+        }
+        mbes_pings_.push_back(mp);
         continue;
       }
       auto ch_it = topic_to_channel.find(topic);
@@ -325,7 +459,7 @@ SidescanBagSession::SidescanBagSession(
         const auto amps = extract_beam0(img.image, img.samples_per_beam);
         const double alt = estimate_altitude_from_nadir(
           amps, ping.geometry.sample0, ping.geometry.metres_per_sample,
-          opts.altitude_threshold_frac);
+          opts_.altitude_threshold_frac);
         if (std::isfinite(alt)) {down_estimates.emplace_back(ping.stamp_s, alt);}
       }
       pings_.push_back(std::move(ping));
@@ -351,9 +485,11 @@ SidescanBagSession::SidescanBagSession(
   }
   total_distance_m_ = base_table.empty() ? 0.0 : base_table.back().cumdist;
 
+  poses_resolved_ = 0;
+  poses_skipped_ = 0;
   for (auto & ping : pings_) {
     BasePoseSample bp;
-    if (interp_base_pose(base_table, ping.stamp_s, opts.pose_max_gap_s, bp)) {
+    if (interp_base_pose(base_table, ping.stamp_s, opts_.pose_max_gap_s, bp)) {
       ping.geometry.sensor_x = bp.x;
       ping.geometry.sensor_y = bp.y;
       ping.geometry.yaw = bp.yaw;
@@ -361,9 +497,27 @@ SidescanBagSession::SidescanBagSession(
       ping.has_pose = true;
       ++poses_resolved_;
     } else {
+      ping.has_pose = false;
       ++poses_skipped_;
     }
   }
+
+  // M3 detection pings carry the world<-m3 transform (captured in-pass, tf_ok);
+  // assign their along-track distance from the same base table so one scrub drives
+  // both, and mark them selectable (has_pose). A ping with no transform or no
+  // distance mapping is left unscrubable.
+  for (auto & mp : mbes_pings_) {
+    BasePoseSample bp;
+    if (mp.tf_ok && interp_base_pose(base_table, mp.stamp_s, opts_.pose_max_gap_s, bp)) {
+      mp.cumulative_distance_m = bp.cumdist;
+      mp.has_pose = true;
+    } else {
+      mp.has_pose = false;
+    }
+  }
+  std::stable_sort(
+    mbes_pings_.begin(), mbes_pings_.end(),
+    [](const MbesPing & a, const MbesPing & b) {return a.stamp_s < b.stamp_s;});
 
   prof("pose+distance resolve");
 
@@ -406,25 +560,125 @@ SidescanBagSession::SidescanBagSession(
       // Only trust the nadir depth if it is close enough in time; across a long
       // nadir dropout, leave altitude unknown (0 -> flat slant≈ground) rather than
       // painting with a stale depth.
-      ping.geometry.altitude = (best_dt <= opts.altitude_max_dt_s) ? best : 0.0;
+      ping.geometry.altitude = (best_dt <= opts_.altitude_max_dt_s) ? best : 0.0;
     }
   }
 
   // Geo-export readiness (earth -> world) was probed during the streaming pass,
   // while the relevant transforms were still in the bounded cache.
   prof("altitude assign + done");
+
+  // Final authoritative snapshot (stamp-sorted, altitudes assigned).
+  publishSnapshot(true);
+  if (progress) {progress(total_distance_m_, true);}
+}
+
+void SidescanBagSession::publishSnapshot(bool complete)
+{
+  // Copy the worker's current working index into a fresh immutable snapshot and swap
+  // it in. Readers hold a shared_ptr to the old one until they release it, so the
+  // swap is safe without locking the index itself — only the pointer swap is guarded.
+  auto idx = std::make_shared<SessionIndex>();
+  idx->pings = pings_;
+  idx->mbes_pings = mbes_pings_;
+  idx->total_distance_m = total_distance_m_;
+  idx->poses_resolved = poses_resolved_;
+  idx->poses_skipped = poses_skipped_;
+  idx->decode_errors = decode_errors_;
+  idx->has_geo_reference = has_geo_reference_;
+  idx->used_nadir_depth = used_nadir_depth_;
+  idx->complete = complete;
+  idx->geo_tx = geo_tx_;
+  idx->geo_ty = geo_ty_;
+  idx->geo_tz = geo_tz_;
+  idx->geo_qx = geo_qx_;
+  idx->geo_qy = geo_qy_;
+  idx->geo_qz = geo_qz_;
+  idx->geo_qw = geo_qw_;
+  std::lock_guard<std::mutex> lock(snap_mutex_);
+  snap_ = std::move(idx);
+}
+
+std::shared_ptr<const SessionIndex> SidescanBagSession::snapshot() const
+{
+  std::lock_guard<std::mutex> lock(snap_mutex_);
+  return snap_;
+}
+
+double SidescanBagSession::totalDistance() const
+{
+  const auto s = snapshot();
+  return s ? s->total_distance_m : 0.0;
+}
+
+std::size_t SidescanBagSession::posesResolved() const
+{
+  const auto s = snapshot();
+  return s ? s->poses_resolved : 0;
+}
+
+std::size_t SidescanBagSession::posesSkipped() const
+{
+  const auto s = snapshot();
+  return s ? s->poses_skipped : 0;
+}
+
+std::size_t SidescanBagSession::pingCount() const
+{
+  const auto s = snapshot();
+  return s ? s->pings.size() : 0;
+}
+
+std::vector<std::pair<double, double>> SidescanBagSession::trackPoints() const
+{
+  const auto s = snapshot();
+  std::vector<std::pair<double, double>> out;
+  if (!s) {return out;}
+  out.reserve(s->pings.size());
+  for (const auto & p : s->pings) {
+    if (p.has_pose) {out.emplace_back(p.geometry.sensor_x, p.geometry.sensor_y);}
+  }
+  return out;
+}
+
+bool SidescanBagSession::hasGeoReference() const
+{
+  const auto s = snapshot();
+  return s && s->has_geo_reference;
+}
+
+bool SidescanBagSession::usedNadirDepth() const
+{
+  const auto s = snapshot();
+  return s && s->used_nadir_depth;
+}
+
+std::size_t SidescanBagSession::decodeErrors() const
+{
+  const auto s = snapshot();
+  return s ? s->decode_errors : 0;
+}
+
+bool SidescanBagSession::indexComplete() const
+{
+  const auto s = snapshot();
+  return s && s->complete;
 }
 
 SidescanBagSession::~SidescanBagSession() = default;
 
-std::vector<const SidescanPing *> SidescanBagSession::window(
+std::vector<SidescanPing> SidescanBagSession::window(
   double dist_lo, double dist_hi) const
 {
-  const double hi = (dist_hi < 0.0) ? total_distance_m_ : dist_hi;
-  std::vector<const SidescanPing *> out;
-  for (const auto & ping : pings_) {
-    if (ping.cumulative_distance_m >= dist_lo && ping.cumulative_distance_m <= hi) {
-      out.push_back(&ping);
+  const auto snap = snapshot();
+  if (!snap) {return {};}
+  const double hi = (dist_hi < 0.0) ? snap->total_distance_m : dist_hi;
+  std::vector<SidescanPing> out;
+  for (const auto & ping : snap->pings) {
+    if (ping.has_pose && ping.cumulative_distance_m >= dist_lo &&
+      ping.cumulative_distance_m <= hi)
+    {
+      out.push_back(ping);
     }
   }
   return out;
@@ -432,8 +686,10 @@ std::vector<const SidescanPing *> SidescanBagSession::window(
 
 std::size_t SidescanBagSession::channelCount(SidescanChannel ch) const
 {
+  const auto snap = snapshot();
+  if (!snap) {return 0;}
   std::size_t n = 0;
-  for (const auto & ping : pings_) {
+  for (const auto & ping : snap->pings) {
     if (ping.channel == ch) {
       ++n;
     }
@@ -444,44 +700,93 @@ std::size_t SidescanBagSession::channelCount(SidescanChannel ch) const
 bool SidescanBagSession::mapToGeo(
   double x, double y, double & lat_deg, double & lon_deg, double & alt) const
 {
-  if (!has_geo_reference_) {return false;}
+  const auto snap = snapshot();
+  if (!snap || !snap->has_geo_reference) {return false;}
   // Rotate the map point (x, y, 0) by the earth<-world quaternion and translate to
   // ECEF, then convert to geodetic.
-  const double qx = geo_qx_;
-  const double qy = geo_qy_;
-  const double qz = geo_qz_;
-  const double qw = geo_qw_;
+  const double qx = snap->geo_qx;
+  const double qy = snap->geo_qy;
+  const double qz = snap->geo_qz;
+  const double qw = snap->geo_qw;
   const double r00 = 1.0 - 2.0 * (qy * qy + qz * qz);
   const double r01 = 2.0 * (qx * qy - qz * qw);
   const double r10 = 2.0 * (qx * qy + qz * qw);
   const double r11 = 1.0 - 2.0 * (qx * qx + qz * qz);
   const double r20 = 2.0 * (qx * qz - qy * qw);
   const double r21 = 2.0 * (qy * qz + qx * qw);
-  const double ex = geo_tx_ + r00 * x + r01 * y;
-  const double ey = geo_ty_ + r10 * x + r11 * y;
-  const double ez = geo_tz_ + r20 * x + r21 * y;
+  const double ex = snap->geo_tx + r00 * x + r01 * y;
+  const double ey = snap->geo_ty + r10 * x + r11 * y;
+  const double ez = snap->geo_tz + r20 * x + r21 * y;
   ecef_to_geodetic(ex, ey, ez, lat_deg, lon_deg, alt);
   return true;
 }
 
 double SidescanBagSession::timeAtDistance(double dist_m) const
 {
-  if (pings_.empty()) {return 0.0;}
-  // pings_ are stamp-sorted with non-decreasing cumulative_distance_m.
+  const auto snap = snapshot();
+  if (!snap || snap->pings.empty()) {return 0.0;}
+  // pings are stamp-sorted with non-decreasing cumulative_distance_m (when complete;
+  // an in-progress snapshot is approximately ordered).
   const auto it = std::lower_bound(
-    pings_.begin(), pings_.end(), dist_m,
+    snap->pings.begin(), snap->pings.end(), dist_m,
     [](const SidescanPing & p, double d) {return p.cumulative_distance_m < d;});
-  return (it == pings_.end()) ? pings_.back().stamp_s : it->stamp_s;
+  return (it == snap->pings.end()) ? snap->pings.back().stamp_s : it->stamp_s;
+}
+
+bool SidescanBagSession::nearestTrackDistance(
+  double map_x, double map_y, double & dist_m) const
+{
+  const auto snap = snapshot();
+  if (!snap) {return false;}
+  bool found = false;
+  double best_d2 = 0.0;
+  double best_dist = 0.0;
+  for (const auto & p : snap->pings) {
+    if (!p.has_pose) {continue;}
+    const double dx = p.geometry.sensor_x - map_x;
+    const double dy = p.geometry.sensor_y - map_y;
+    const double d2 = dx * dx + dy * dy;
+    if (!found || d2 < best_d2) {
+      best_d2 = d2;
+      best_dist = p.cumulative_distance_m;
+      found = true;
+    }
+  }
+  if (found) {dist_m = best_dist;}
+  return found;
+}
+
+bool SidescanBagSession::positionAtDistance(
+  double dist_m, double & map_x, double & map_y) const
+{
+  const auto snap = snapshot();
+  if (!snap) {return false;}
+  bool found = false;
+  double best_dd = 0.0;
+  for (const auto & p : snap->pings) {
+    if (!p.has_pose) {continue;}
+    const double dd = std::abs(p.cumulative_distance_m - dist_m);
+    if (!found || dd < best_dd) {
+      best_dd = dd;
+      map_x = p.geometry.sensor_x;
+      map_y = p.geometry.sensor_y;
+      found = true;
+    }
+  }
+  return found;
 }
 
 std::vector<WindowPing> SidescanBagSession::readWindow(
   double dist_lo, double dist_hi, int max_pings, bool include_down) const
 {
-  const double hi = (dist_hi < 0.0) ? total_distance_m_ : dist_hi;
+  const auto snap = snapshot();
+  if (!snap) {return {};}
+  const double hi = (dist_hi < 0.0) ? snap->total_distance_m : dist_hi;
 
   // 1. Select paintable index entries in the distance window (channel-filtered).
+  // The snapshot is held (snap) for the whole method, so pointers into it stay valid.
   std::vector<const SidescanPing *> sel;
-  for (const auto & p : pings_) {
+  for (const auto & p : snap->pings) {
     if (p.cumulative_distance_m < dist_lo || p.cumulative_distance_m > hi) {continue;}
     if (!p.has_pose) {continue;}
     if (p.channel == SidescanChannel::Down && !include_down) {continue;}
@@ -550,6 +855,163 @@ std::vector<WindowPing> SidescanBagSession::readWindow(
       [](const WindowPing & w) {return w.amplitudes.empty();}),
     out.end());
   return out;
+}
+
+std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
+  double dist_lo, double dist_hi, int max_pings) const
+{
+  const auto snap = snapshot();
+  if (!snap) {return {};}
+  const double hi = (dist_hi < 0.0) ? snap->total_distance_m : dist_hi;
+
+  // 1. Select scrubbable detection pings in the distance window. The snapshot is
+  // held (snap) for the whole method, so pointers into it stay valid.
+  std::vector<const MbesPing *> sel;
+  for (const auto & p : snap->mbes_pings) {
+    if (!p.has_pose) {continue;}
+    if (p.cumulative_distance_m < dist_lo || p.cumulative_distance_m > hi) {continue;}
+    sel.push_back(&p);
+  }
+  if (sel.empty()) {return {};}
+
+  // 2. Stationary cap (same policy as readWindow).
+  const int from = stationary_keep_from(static_cast<int>(sel.size()), max_pings);
+  sel.erase(sel.begin(), sel.begin() + from);
+
+  // 3. Result slots keyed by stamp + the stamp span to re-read.
+  std::vector<MbesWindowPing> out(sel.size());
+  std::unordered_map<int64_t, int> slot;
+  int64_t t_lo = std::numeric_limits<int64_t>::max();
+  int64_t t_hi = std::numeric_limits<int64_t>::min();
+  for (std::size_t i = 0; i < sel.size(); ++i) {
+    out[i].cumulative_distance_m = sel[i]->cumulative_distance_m;
+    out[i].sensor_x = sel[i]->tx;
+    out[i].sensor_y = sel[i]->ty;
+    out[i].heading =
+      yaw_from_quaternion(sel[i]->qx, sel[i]->qy, sel[i]->qz, sel[i]->qw);
+    out[i].has_pose = sel[i]->has_pose;
+    slot.emplace(sel[i]->stamp_ns, static_cast<int>(i));
+    t_lo = std::min(t_lo, sel[i]->stamp_ns);
+    t_hi = std::max(t_hi, sel[i]->stamp_ns);
+  }
+
+  // 4. Re-read detections over the stamp span; project each to sensor-frame
+  // soundings and lift to the world frame with the ping's captured transform.
+  constexpr int64_t kPadNs = 3000000000LL;  // 3 s
+  rosbag2_cpp::Reader reader;
+  reader.open(bag_uri_);
+  try {
+    reader.seek(static_cast<rcutils_time_point_value_t>(t_lo - kPadNs));
+  } catch (const std::exception &) {
+    // seek unsupported -> sequential scan
+  }
+  while (reader.has_next()) {
+    auto bag_msg = reader.read_next();
+    if (bag_msg->recv_timestamp > t_hi + kPadNs) {break;}
+    if (bag_msg->topic_name != kMbesDetectionsTopic) {continue;}
+    try {
+      auto det = deserialize<marine_acoustic_msgs::msg::SonarDetections>(bag_msg);
+      const int64_t sns = static_cast<int64_t>(det.header.stamp.sec) * 1000000000LL +
+        det.header.stamp.nanosec;
+      auto it = slot.find(sns);
+      if (it == slot.end()) {continue;}
+      const int idx = it->second;
+      const MbesPing * p = sel[idx];
+      out[idx].intensities.assign(det.intensities.begin(), det.intensities.end());
+      const std::vector<MbesSounding> sensor = project_detections(det);
+      out[idx].world_soundings.reserve(sensor.size());
+      for (const auto & s : sensor) {
+        double rx = 0.0;
+        double ry = 0.0;
+        double rz = 0.0;
+        rotate_by_quat(p->qx, p->qy, p->qz, p->qw, s.x, s.y, s.z, rx, ry, rz);
+        MbesSounding w;
+        w.x = p->tx + rx;
+        w.y = p->ty + ry;
+        w.z = p->tz + rz;
+        w.intensity = s.intensity;
+        out[idx].world_soundings.push_back(w);
+      }
+    } catch (const std::exception &) {
+      // skip an unreadable message
+    }
+  }
+
+  // 5. Drop pings whose message wasn't found in the scan (no per-beam data read).
+  out.erase(
+    std::remove_if(
+      out.begin(), out.end(),
+      [](const MbesWindowPing & w) {return w.intensities.empty();}),
+    out.end());
+  return out;
+}
+
+std::vector<marine_acoustic_msgs::msg::RawSonarImage> SidescanBagSession::readDownImages(
+  double dist_lo, double dist_hi, int max_pings) const
+{
+  const auto snap = snapshot();
+  if (!snap) {return {};}
+  const double hi = (dist_hi < 0.0) ? snap->total_distance_m : dist_hi;
+
+  // 1. Select scrubbable down-channel pings in the window (along-track order). The
+  // snapshot is held (snap) for the whole method, so pointers into it stay valid.
+  std::vector<const SidescanPing *> sel;
+  for (const auto & p : snap->pings) {
+    if (p.channel != SidescanChannel::Down || !p.has_pose) {continue;}
+    if (p.cumulative_distance_m < dist_lo || p.cumulative_distance_m > hi) {continue;}
+    sel.push_back(&p);
+  }
+  if (sel.empty()) {return {};}
+
+  const int from = stationary_keep_from(static_cast<int>(sel.size()), max_pings);
+  sel.erase(sel.begin(), sel.begin() + from);
+
+  // 2. Result slots keyed by stamp + the stamp span to re-read.
+  std::vector<marine_acoustic_msgs::msg::RawSonarImage> out(sel.size());
+  std::vector<bool> filled(sel.size(), false);
+  std::unordered_map<int64_t, int> slot;
+  int64_t t_lo = std::numeric_limits<int64_t>::max();
+  int64_t t_hi = std::numeric_limits<int64_t>::min();
+  for (std::size_t i = 0; i < sel.size(); ++i) {
+    slot.emplace(sel[i]->stamp_ns, static_cast<int>(i));
+    t_lo = std::min(t_lo, sel[i]->stamp_ns);
+    t_hi = std::max(t_hi, sel[i]->stamp_ns);
+  }
+
+  // 3. Re-read the down-channel images over the stamp span (raw, undecoded).
+  constexpr int64_t kPadNs = 3000000000LL;  // 3 s
+  rosbag2_cpp::Reader reader;
+  reader.open(bag_uri_);
+  try {
+    reader.seek(static_cast<rcutils_time_point_value_t>(t_lo - kPadNs));
+  } catch (const std::exception &) {
+    // seek unsupported -> sequential scan
+  }
+  const std::string down_topic = kSidescanTopics[static_cast<int>(SidescanChannel::Down)];
+  while (reader.has_next()) {
+    auto bag_msg = reader.read_next();
+    if (bag_msg->recv_timestamp > t_hi + kPadNs) {break;}
+    if (bag_msg->topic_name != down_topic) {continue;}
+    try {
+      auto img = deserialize<marine_acoustic_msgs::msg::RawSonarImage>(bag_msg);
+      const int64_t sns = static_cast<int64_t>(img.header.stamp.sec) * 1000000000LL +
+        img.header.stamp.nanosec;
+      auto it = slot.find(sns);
+      if (it == slot.end()) {continue;}
+      out[it->second] = std::move(img);
+      filled[it->second] = true;
+    } catch (const std::exception &) {
+      // skip an unreadable message
+    }
+  }
+
+  // 4. Drop slots whose image wasn't read, preserving along-track order.
+  std::vector<marine_acoustic_msgs::msg::RawSonarImage> result;
+  result.reserve(out.size());
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    if (filled[i]) {result.push_back(std::move(out[i]));}
+  }
+  return result;
 }
 
 }  // namespace marine_perception_tools

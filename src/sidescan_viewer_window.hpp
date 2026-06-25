@@ -23,10 +23,11 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "contact_store.hpp"
+#include "marine_sonar_widgets/waterfall_model.hpp"
 #include "sidescan_bag_session.hpp"
-#include "sidescan_waterfall.hpp"
 
 class QLabel;
 class QSlider;
@@ -37,19 +38,20 @@ class QPushButton;
 class QListWidget;
 class QComboBox;
 class QRectF;
+class QCloseEvent;
+class QSplitter;
 
 namespace marine_perception_tools
 {
 
 class SidescanCanvas;
+class PointCloudView;
+}  // namespace marine_perception_tools
 
-// Result of an off-thread bag load: either a session or an error message. Copyable
-// (shared_ptr + QString) so it can ride through QFuture/QFutureWatcher.
-struct SidescanLoadResult
+namespace marine_sonar_widgets {class WaterfallWidget; class EchogramWidget;}
+
+namespace marine_perception_tools
 {
-  std::shared_ptr<SidescanBagSession> session;
-  QString error;
-};
 
 // Result of an off-thread window render: the painted coverage image + its map
 // extent. Built on a worker thread (readWindow + paint + rasterize) so scrubbing
@@ -59,8 +61,19 @@ struct SidescanRenderResult
   bool ok = false;
   uint64_t epoch = 0;    // session epoch this render was computed for (stale-drop)
   QImage image;          // georeferenced coverage (map frame)
-  QImage waterfall;      // uncorrected slant-range waterfall of the same window
-  WaterfallIndex waterfall_index;  // pixel->map mapping for waterfall marking
+  // Uncorrected slant-range sidescan rows (shared-lib WaterfallWidget) for the same
+  // window: port/starboard combined, newest drawn at top, each carrying its map pose
+  // so the widget inverts a marked pixel back to map coordinates.
+  std::vector<marine_sonar_widgets::WaterfallRow> sidescan_rows;
+  std::vector<MbesSounding> mbes_soundings;  // window's M3 soundings, world frame
+  // Boat pose at the scrub head (world frame) for the 3D context arrow.
+  bool boat_valid = false;
+  double boat_x = 0.0;
+  double boat_y = 0.0;
+  double boat_z = 0.0;
+  double boat_heading = 0.0;
+  std::vector<marine_sonar_widgets::WaterfallRow> mbes_backscatter_rows;  // per-ping dB
+  std::vector<marine_acoustic_msgs::msg::RawSonarImage> down_images;  // water-column pings
   double origin_x = 0.0;
   double origin_y = 0.0;
   double res_m = 0.25;
@@ -90,9 +103,24 @@ public:
   // Open a bag directly (e.g. from a CLI argument).
   void openBag(const std::string & bag_uri);
 
+protected:
+  // Persist window geometry + splitter sizes on close (QSettings).
+  void closeEvent(QCloseEvent * event) override;
+
+  // Route scrub keys (Left/Right/PageUp/PageDown/Home/End) to the scrub slider from
+  // anywhere in the window, so scrubbing works without the slider holding focus —
+  // except while editing a control (spin box / combo / list / the slider itself).
+  bool eventFilter(QObject * obj, QEvent * event) override;
+
+signals:
+  // Emitted from the background indexer (worker thread) as the bag resolves; the
+  // queued connection marshals it to the UI thread. `epoch` guards against a stale
+  // bag's worker updating after a newer bag was opened.
+  void indexProgress(quint64 epoch, double resolved_distance_m, bool done);
+
 private slots:
   void onOpenBag();
-  void onLoadFinished();
+  void onIndexProgress(quint64 epoch, double resolved_distance_m, bool done);
   void onRenderFinished();
   void onScrubChanged();
   void onGridSpacingChanged(double metres);
@@ -103,6 +131,13 @@ private slots:
   void onLoadContacts();
 
 private:
+  // Cross-pane linked cursor + click-to-seek coordination. A world map point is the
+  // shared currency; the echogram works in along-track fraction within the window.
+  void onCursorHover(double map_x, double map_y, bool valid);   // broadcast the cursor
+  void onCursorSeek(double map_x, double map_y);                // seek scrub to a point
+  void onEchogramHover(double frac, bool valid);                // echogram-sourced hover
+  void onEchogramSeek(double frac);                             // echogram-sourced seek
+
   void refreshContacts();   // push the store to the map overlay + the list
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
   // if a render is in flight, just flag a pending one and re-launch on finish
@@ -123,12 +158,33 @@ private:
   QPushButton * mark_button_ = nullptr;
   QListWidget * contact_list_ = nullptr;
   QComboBox * palette_combo_ = nullptr;
-  SidescanWaterfall * waterfall_ = nullptr;
+  marine_sonar_widgets::WaterfallWidget * waterfall_ = nullptr;
+  PointCloudView * cloud_ = nullptr;
+  QComboBox * cloud_color_combo_ = nullptr;
+  QDoubleSpinBox * zexag_spin_ = nullptr;
+  QDoubleSpinBox * point_size_spin_ = nullptr;
+  marine_sonar_widgets::WaterfallWidget * mbes_waterfall_ = nullptr;
+  marine_sonar_widgets::EchogramWidget * echogram_ = nullptr;
+
+  // Per-pane colormap selectors (the map keeps palette_combo_; the 3D cloud gets
+  // its own marine_colormap palette via cloud_palette_).
+  QComboBox * sidescan_cmap_ = nullptr;
+  QComboBox * mbes_cmap_ = nullptr;
+  QComboBox * echo_cmap_ = nullptr;
+  QComboBox * cloud_palette_ = nullptr;
+
+  // Nested resizable-pane layout: [contacts | map | 2x2 grid]; the grid is a
+  // vertical splitter of two horizontal rows. Held so their sizes persist (QSettings).
+  QSplitter * outer_split_ = nullptr;
+  QSplitter * grid_split_ = nullptr;
+  QSplitter * grid_top_split_ = nullptr;
+  QSplitter * grid_bot_split_ = nullptr;
 
   ContactStore contact_store_;
   int contact_counter_ = 0;
 
-  QFutureWatcher<SidescanLoadResult> load_watcher_;
+  QFutureWatcher<void> index_watcher_;   // background index build (buildIndex)
+  uint64_t index_epoch_ = 0;             // bumped per opened bag; guards stale progress
   QFutureWatcher<SidescanRenderResult> render_watcher_;
   bool loading_ = false;
   bool rendering_ = false;
@@ -138,6 +194,8 @@ private:
   double window_len_m_ = 100.0;
   uint64_t session_epoch_ = 0;   // bumped on each loaded bag; stale renders are dropped
   int max_window_pings_ = 600;   // stationary cap; also sets raster res = window / this
+  double last_win_lo_ = 0.0;     // current render window span, for echogram cursor mapping
+  double last_win_hi_ = 0.0;
 };
 
 }  // namespace marine_perception_tools

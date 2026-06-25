@@ -21,6 +21,7 @@ find_package(image_geometry REQUIRED)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(marine_colormap REQUIRED)
 find_package(marine_interfaces REQUIRED)
+find_package(marine_sonar_widgets REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -38,7 +39,9 @@ find_package(OpenCV REQUIRED)
 set(QT_VERSION_MAJOR 5)
 # Concurrent: background window loads (QtConcurrent::run + QFutureWatcher) keep
 # the GUI responsive while a multi-second window reload/warm-up runs.
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Concurrent)
+# Gui + OpenGL: the shared marine_sonar_widgets panes (WaterfallWidget,
+# EchogramWidget) and the new 3D point-cloud viewport are QOpenGLWidgets.
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Concurrent Gui OpenGL)
 set(CMAKE_AUTOMOC ON)
 
 # Headless core (no Qt): bag loading + the re-sim engine. Kept Qt-free so the
@@ -108,13 +111,15 @@ add_executable(sidescan_target_viewer
   src/sidescan_viewer_main.cpp
   src/sidescan_viewer_window.cpp
   src/sidescan_canvas.cpp
-  src/sidescan_waterfall.cpp
+  src/point_cloud_view.cpp
 )
 target_link_libraries(sidescan_target_viewer
   sidescan_core
   Qt${QT_VERSION_MAJOR}::Widgets
-  Qt${QT_VERSION_MAJOR}::Concurrent)
-ament_target_dependencies(sidescan_target_viewer marine_colormap)
+  Qt${QT_VERSION_MAJOR}::Concurrent
+  Qt${QT_VERSION_MAJOR}::Gui
+  Qt${QT_VERSION_MAJOR}::OpenGL)
+ament_target_dependencies(sidescan_target_viewer marine_colormap marine_sonar_widgets)
 
 install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
@@ -137,6 +142,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_sidescan_geometry test/test_sidescan_geometry.cpp)
   target_include_directories(test_sidescan_geometry PRIVATE src)
 
+  # Pure MBES (M3) beam geometry (mbes_geometry.hpp) — header-only; needs the
+  # source include dir + marine_acoustic_msgs for the SonarDetections message.
+  ament_add_gtest(test_mbes_geometry test/test_mbes_geometry.cpp)
+  target_include_directories(test_mbes_geometry PRIVATE src)
+  ament_target_dependencies(test_mbes_geometry marine_acoustic_msgs)
+
   # Pure rolling-distance scrub policy (distance_buffer_policy.hpp) — header-only.
   ament_add_gtest(test_distance_buffer_policy test/test_distance_buffer_policy.cpp)
   target_include_directories(test_distance_buffer_policy PRIVATE src)
@@ -149,6 +160,18 @@ if(BUILD_TESTING)
   ament_add_gtest(test_contact_store test/test_contact_store.cpp)
   target_link_libraries(test_contact_store sidescan_core)
   ament_target_dependencies(test_contact_store marine_interfaces)
+
+  # MBES 3D point-cloud viewport smoke test (offscreen GL; self-skips headless).
+  # Compiles the unit-under-test source directly + Qt OpenGL.
+  ament_add_gtest(test_point_cloud_view
+    test/test_point_cloud_view.cpp
+    src/point_cloud_view.cpp)
+  target_include_directories(test_point_cloud_view PRIVATE src)
+  ament_target_dependencies(test_point_cloud_view marine_acoustic_msgs marine_colormap)
+  target_link_libraries(test_point_cloud_view
+    Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::OpenGL)
+  set_tests_properties(test_point_cloud_view PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;LIBGL_ALWAYS_SOFTWARE=1")
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()

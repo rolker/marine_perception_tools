@@ -18,10 +18,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "marine_acoustic_msgs/msg/raw_sonar_image.hpp"
+
+#include "mbes_geometry.hpp"
 #include "sidescan_geometry.hpp"
 
 // Forward-declared so the persistent TF cache stays out of TUs that only consume
@@ -47,6 +53,12 @@ inline constexpr std::array<const char *, kNumSidescanChannels> kSidescanTopics{
 // not publish it.
 inline constexpr const char * kNadirDepthTopic =
   "/bizzy/sensors/sidescan/garmin_sidescan/nadir_depth";
+
+// The M3 multibeam detections topic (marine_acoustic_msgs/SonarDetections, frame
+// bizzy/m3). The bag carries detections only (no soundings cloud), so the viewer
+// projects soundings itself via mbes_geometry.hpp. Optional: a bag without it
+// still loads (sidescan-only).
+inline constexpr const char * kMbesDetectionsTopic = "/bizzy/sensors/m3/detections";
 
 // One ping's lightweight index entry: channel, time, the along-track distance of
 // the boat when it was transmitted, and the world-plane geometry needed to
@@ -78,6 +90,42 @@ struct WindowPing
   std::vector<float> amplitudes;
 };
 
+// One M3 detections ping's lightweight index entry: stamp, along-track distance
+// (shared scrub axis), and the full world<-m3 transform captured at the ping
+// stamp during the load pass (translation + quaternion, so soundings lift to the
+// world frame at read time with no TF). Full 3D — unlike the planar sidescan
+// pose, this carries the sensor roll/pitch/z that bathymetry needs. Sample data
+// is NOT held; readMbesWindow() re-reads the window. `has_pose` is false when the
+// transform or the distance mapping could not be resolved (unscrubable).
+struct MbesPing
+{
+  double stamp_s = 0.0;
+  int64_t stamp_ns = 0;
+  double cumulative_distance_m = 0.0;
+  bool tf_ok = false;     // world<-m3 transform captured (distance may still be pending)
+  bool has_pose = false;  // fully resolved (tf_ok AND distance assigned) -> selectable
+  double tx = 0.0, ty = 0.0, tz = 0.0;            // world<-m3 translation (m)
+  double qx = 0.0, qy = 0.0, qz = 0.0, qw = 1.0;  // world<-m3 rotation
+};
+
+// An M3 ping's window data: the raw per-beam backscatter (for the backscatter
+// waterfall, across-track = beam index) and the valid-detection soundings already
+// lifted to the WORLD frame (MbesSounding x/y/z in world metres, for the 3D
+// cloud). Produced on demand by readMbesWindow().
+struct MbesWindowPing
+{
+  double cumulative_distance_m = 0.0;
+  // M3 sensor world pose for the across-track projection + pixel->map marking:
+  // planar position + heading (ENU, CCW from +x/east). has_pose mirrors the source
+  // MbesPing (always true for a windowed ping, which is pre-filtered on has_pose).
+  double sensor_x = 0.0;
+  double sensor_y = 0.0;
+  double heading = 0.0;
+  bool has_pose = false;
+  std::vector<float> intensities;             // per-beam dB (waterfall row)
+  std::vector<MbesSounding> world_soundings;  // valid beams, WORLD frame + dB
+};
+
 struct SidescanBagOptions
 {
   std::string world_frame = "bizzy/map";     // local-tangent ENU render frame
@@ -102,6 +150,33 @@ struct SidescanBagOptions
 // survey length. `window()` returns the lightweight index slice.
 //
 // Throws std::runtime_error if the bag has no sidescan ping topics at all.
+
+// An immutable snapshot of the resolved index, published periodically by the
+// background indexer (buildIndex). Readers take a shared_ptr and use it lock-free;
+// the indexer swaps in a newer (more-complete) snapshot as the bag resolves. `pings`
+// / `mbes_pings` are stamp-sorted with cumulative distance assigned. Pings still
+// unresolved in an in-progress build carry has_pose=false and are skipped by readers.
+struct SessionIndex
+{
+  std::vector<SidescanPing> pings;
+  std::vector<MbesPing> mbes_pings;
+  double total_distance_m = 0.0;   // resolved-so-far distance (== final when complete)
+  std::size_t poses_resolved = 0;
+  std::size_t poses_skipped = 0;
+  std::size_t decode_errors = 0;
+  bool has_geo_reference = false;
+  bool used_nadir_depth = false;
+  bool complete = false;           // true once indexing has finished
+  // Captured earth<-world transform (geo_frame <- world_frame), for mapToGeo().
+  double geo_tx = 0.0;
+  double geo_ty = 0.0;
+  double geo_tz = 0.0;
+  double geo_qx = 0.0;
+  double geo_qy = 0.0;
+  double geo_qz = 0.0;
+  double geo_qw = 1.0;
+};
+
 class SidescanBagSession
 {
 public:
@@ -112,12 +187,23 @@ public:
   SidescanBagSession(const SidescanBagSession &) = delete;
   SidescanBagSession & operator=(const SidescanBagSession &) = delete;
 
-  // All pings, ordered by stamp, with cumulative along-track distance assigned.
-  const std::vector<SidescanPing> & pings() const {return pings_;}
+  // Build the in-memory index. Heavy (streams the whole bag); call once, on a worker
+  // thread. Publishes a SessionIndex snapshot periodically so readers can use the
+  // already-resolved part while the rest indexes; `progress(resolved_distance, done)`
+  // fires on each publish (from the calling thread). After it returns, the index is
+  // complete. Re-reads from the bag (readWindow etc.) and all accessors are safe to
+  // call concurrently from other threads while this runs — they read a lock-free
+  // immutable snapshot.
+  using ProgressFn = std::function<void(double resolved_distance_m, bool complete)>;
+  void buildIndex(const ProgressFn & progress = {});
 
-  // Pings whose along-track distance lies in [dist_lo, dist_hi] (metres). A
-  // negative dist_hi means "to the end of the track". Returned in index order.
-  std::vector<const SidescanPing *> window(double dist_lo, double dist_hi) const;
+  // The current immutable index snapshot (lock-free for the caller once held). Null
+  // until buildIndex publishes its first snapshot.
+  std::shared_ptr<const SessionIndex> snapshot() const;
+
+  // Posed pings whose along-track distance lies in [dist_lo, dist_hi] (metres). A
+  // negative dist_hi means "to the end of the track". Returned by value (snapshot).
+  std::vector<SidescanPing> window(double dist_lo, double dist_hi) const;
 
   // Paintable pings (port + starboard by default) whose along-track distance lies
   // in [dist_lo, dist_hi], WITH their sample data read fresh from the bag. The
@@ -127,20 +213,50 @@ public:
   std::vector<WindowPing> readWindow(
     double dist_lo, double dist_hi, int max_pings = 0, bool include_down = false) const;
 
-  // Total along-track distance of the recording (metres).
-  double totalDistance() const {return total_distance_m_;}
+  // M3 detection pings whose along-track distance lies in [dist_lo, dist_hi],
+  // with sample data read fresh and projected: per ping the raw per-beam
+  // backscatter (waterfall) + the valid soundings in the WORLD frame (3D cloud).
+  // Shares the sidescan distance axis, so one scrub drives both. `max_pings > 0`
+  // applies the same stationary cap as readWindow.
+  std::vector<MbesWindowPing> readMbesWindow(
+    double dist_lo, double dist_hi, int max_pings = 0) const;
+
+  // The down-channel (water-column) pings in [dist_lo, dist_hi] as raw
+  // RawSonarImage messages, in along-track order, for the echogram pane. Re-read
+  // from the bag like readWindow; `max_pings > 0` applies the stationary cap.
+  std::vector<marine_acoustic_msgs::msg::RawSonarImage> readDownImages(
+    double dist_lo, double dist_hi, int max_pings = 0) const;
+
+  // Total along-track distance resolved so far (metres); the final length once the
+  // index is complete.
+  double totalDistance() const;
 
   // Bag time (stamp, seconds) of the ping nearest the given along-track distance —
   // used to stamp a marked contact with its real observation time. 0 if empty.
   double timeAtDistance(double dist_m) const;
 
+  // Cumulative along-track distance (m) of the posed ping nearest a map position —
+  // maps a clicked/hovered world point onto the scrub axis. False if no posed pings.
+  bool nearestTrackDistance(double map_x, double map_y, double & dist_m) const;
+
+  // Map position (sensor x/y) of the posed ping nearest an along-track distance —
+  // maps an along-track (echogram) position back to a world point. False if empty.
+  bool positionAtDistance(double dist_m, double & map_x, double & map_y) const;
+
   std::size_t channelCount(SidescanChannel ch) const;
-  std::size_t posesResolved() const {return poses_resolved_;}
-  std::size_t posesSkipped() const {return poses_skipped_;}
+  std::size_t posesResolved() const;
+  std::size_t posesSkipped() const;
+
+  // Number of indexed pings so far (snapshot). For the status line.
+  std::size_t pingCount() const;
+
+  // The boat track (posed pings' sensor x/y) as of the current snapshot — for the
+  // map track polyline; grows as indexing proceeds.
+  std::vector<std::pair<double, double>> trackPoints() const;
 
   // True when earth->world_frame resolved at least once, i.e. marked contacts can
   // be exported to geographic coordinates without a datum fallback.
-  bool hasGeoReference() const {return has_geo_reference_;}
+  bool hasGeoReference() const;
 
   // Convert a world (map-frame) point to WGS84 geodetic (lat/lon degrees, altitude
   // metres) using the captured earth->world transform. Returns false when no geo
@@ -150,15 +266,25 @@ public:
   // True when ping altitudes came from the driver's nadir_depth Range topic;
   // false means the amplitude-based estimator fallback was used (or no altitude
   // source was available at all).
-  bool usedNadirDepth() const {return used_nadir_depth_;}
+  bool usedNadirDepth() const;
 
   // Count of bag messages that failed to deserialize and were skipped (one bad
   // message does not abort the load). A large value signals a corrupt bag.
-  std::size_t decodeErrors() const {return decode_errors_;}
+  std::size_t decodeErrors() const;
+
+  // True once buildIndex has finished (the snapshot is the complete index).
+  bool indexComplete() const;
 
 private:
+  // Publish a copy of the current working index as a new immutable snapshot.
+  void publishSnapshot(bool complete);
+
   std::string bag_uri_;
+  SidescanBagOptions opts_;
+
+  // --- Worker-thread-only working storage (mutated solely by buildIndex). ---
   std::vector<SidescanPing> pings_;
+  std::vector<MbesPing> mbes_pings_;
   std::unique_ptr<tf2::BufferCore> tf_buffer_;
   double total_distance_m_ = 0.0;
   std::size_t poses_resolved_ = 0;
@@ -166,9 +292,6 @@ private:
   std::size_t decode_errors_ = 0;
   bool has_geo_reference_ = false;
   bool used_nadir_depth_ = false;
-
-  // Captured earth<-world transform (geo_frame <- world_frame): ECEF translation +
-  // quaternion, used by mapToGeo(). Valid only when has_geo_reference_.
   double geo_tx_ = 0.0;
   double geo_ty_ = 0.0;
   double geo_tz_ = 0.0;
@@ -176,6 +299,10 @@ private:
   double geo_qy_ = 0.0;
   double geo_qz_ = 0.0;
   double geo_qw_ = 1.0;
+
+  // --- Published snapshot (the only state shared with reader threads). ---
+  mutable std::mutex snap_mutex_;
+  std::shared_ptr<const SessionIndex> snap_;
 };
 
 }  // namespace marine_perception_tools

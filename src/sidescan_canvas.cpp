@@ -32,7 +32,7 @@ SidescanCanvas::SidescanCanvas(QWidget * parent)
 : QWidget(parent)
 {
   setMinimumSize(480, 360);
-  setMouseTracking(false);
+  setMouseTracking(true);   // hover reporting (hoverWorld) needs moves without a button
   setAutoFillBackground(true);
 }
 
@@ -71,6 +71,12 @@ void SidescanCanvas::setMarkMode(bool on)
 {
   mark_mode_ = on;
   setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
+}
+
+void SidescanCanvas::setCursorWorld(const std::optional<QPointF> & map_point)
+{
+  cursor_world_ = map_point;
+  update();
 }
 
 void SidescanCanvas::setContacts(const QVector<ContactMarker> & contacts)
@@ -208,6 +214,17 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     }
   }
 
+  // Cross-pane linked cursor (cyan cross at the shared map point).
+  if (cursor_world_.has_value()) {
+    const QPointF c = mapToScreen(cursor_world_->x(), cursor_world_->y());
+    QPen pen(QColor(0, 255, 255));
+    pen.setWidthF(1.5);
+    painter.setPen(pen);
+    const double s = 7.0;
+    painter.drawLine(QPointF(c.x() - s, c.y()), QPointF(c.x() + s, c.y()));
+    painter.drawLine(QPointF(c.x(), c.y() - s), QPointF(c.x(), c.y() + s));
+  }
+
   // Rubber-band box while drawing a contact.
   if (marking_) {
     QPen pen(QColor(255, 0, 255));
@@ -234,6 +251,11 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
 
 void SidescanCanvas::mousePressEvent(QMouseEvent * event)
 {
+  if (event->button() == Qt::MiddleButton) {
+    const QPointF m = screenToMap(event->pos().x(), event->pos().y());
+    emit seekWorld(m.x(), m.y());   // middle-click: seek to this map position
+    return;
+  }
   if (event->button() != Qt::LeftButton) {return;}
   if (mark_mode_) {
     marking_ = true;
@@ -247,6 +269,10 @@ void SidescanCanvas::mousePressEvent(QMouseEvent * event)
 
 void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
 {
+  // Report the hovered map position for a cross-pane linked cursor (always valid on
+  // the map). Emitted on every move, including hover with no button held.
+  const QPointF hov = screenToMap(event->pos().x(), event->pos().y());
+  emit hoverWorld(hov.x(), hov.y(), true);
   if (!(event->buttons() & Qt::LeftButton)) {return;}
   if (marking_) {
     mark_cur_ = event->pos();
