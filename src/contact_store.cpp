@@ -15,9 +15,12 @@
 #include "contact_store.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "marine_interfaces/msg/contact_array.hpp"
@@ -126,6 +129,78 @@ bool ContactStore::load(const std::string & path)
   }
   contacts_ = arr.contacts;
   return true;
+}
+
+namespace
+{
+// Escape a string for a JSON string literal (RFC 8259): quotes, backslash, controls.
+std::string json_escape(const std::string & s)
+{
+  std::string out;
+  out.reserve(s.size() + 2);
+  for (char c : s) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char u[8];
+          std::snprintf(u, sizeof(u), "\\u%04x", static_cast<unsigned char>(c));
+          out += u;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+}  // namespace
+
+GeoJsonExportResult export_contacts_geojson(
+  const std::vector<marine_interfaces::msg::Contact> & contacts, const std::string & path)
+{
+  GeoJsonExportResult result;
+  std::ofstream f(path);
+  if (!f) {return result;}   // ok stays false
+
+  f << "{\n  \"type\": \"FeatureCollection\",\n  \"features\": [";
+  bool first = true;
+  for (const auto & c : contacts) {
+    const double lat = c.geo_pose.position.latitude;
+    const double lon = c.geo_pose.position.longitude;
+    if (!std::isfinite(lat) || !std::isfinite(lon)) {
+      ++result.skipped;   // no resolved geo reference -> not exportable as a point
+      continue;
+    }
+    // Sanitize non-finite numeric properties to 0 — `export` takes arbitrary
+    // Contacts (e.g. loaded from a .cdr), and a bare nan/inf token is invalid JSON.
+    // Buffers are sized for the worst-case finite double (%f ~ 320 chars) so a
+    // mis-resolved huge value can't truncate mid-number into malformed JSON.
+    const auto fin = [](double v) {return std::isfinite(v) ? v : 0.0;};
+    const double stamp = fin(
+      static_cast<double>(c.header.stamp.sec) +
+      static_cast<double>(c.header.stamp.nanosec) * 1e-9);
+    char coords[768];
+    std::snprintf(coords, sizeof(coords), "[%.8f, %.8f]", lon, lat);
+    char props[1024];
+    std::snprintf(
+      props, sizeof(props), "\"width_m\": %.3f, \"height_m\": %.3f, \"stamp\": %.3f",
+      fin(c.shape.dimensions.x), fin(c.shape.dimensions.y), stamp);
+    f << (first ? "" : ",")
+      << "\n    {\"type\": \"Feature\", \"geometry\": {\"type\": \"Point\", "
+      << "\"coordinates\": " << coords << "}, \"properties\": {\"id\": \""
+      << json_escape(c.id) << "\", " << props << "}}";
+    first = false;
+    ++result.written;
+  }
+  f << "\n  ]\n}\n";
+  result.ok = f.good();
+  return result;
 }
 
 }  // namespace marine_perception_tools

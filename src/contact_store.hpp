@@ -15,6 +15,7 @@
 #ifndef CONTACT_STORE_HPP_
 #define CONTACT_STORE_HPP_
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,23 @@ struct MapPoint
 marine_interfaces::msg::Contact make_box_contact(
   const std::vector<MapPoint> & points, const std::string & id,
   const std::string & source, const std::string & frame, double stamp_s);
+
+// Outcome of a GeoJSON export: whether the file wrote, and how many contacts were
+// written vs skipped (skipped = no resolved geo_pose, i.e. NaN latitude).
+struct GeoJsonExportResult
+{
+  bool ok = false;
+  std::size_t written = 0;
+  std::size_t skipped = 0;
+};
+
+// Write the contacts as an RFC 7946 GeoJSON FeatureCollection to `path`: one Point
+// feature per contact with a resolved geo_pose (finite latitude), geometry
+// [lon, lat], properties { id, width_m, height_m, stamp }. Contacts with no geo
+// reference (NaN latitude) are skipped and counted. Hand-written JSON (no new dep);
+// Qt-free so it is unit-tested without a display. Returns ok=false on a file error.
+GeoJsonExportResult export_contacts_geojson(
+  const std::vector<marine_interfaces::msg::Contact> & contacts, const std::string & path);
 
 class ContactStore
 {

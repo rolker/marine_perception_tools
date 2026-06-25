@@ -129,6 +129,7 @@ private slots:
   void onContactMarked(const QRectF & map_rect);
   void onSaveContacts();
   void onLoadContacts();
+  void onExportGeoJson();
 
 private:
   // Cross-pane linked cursor + click-to-seek coordination. A world map point is the
