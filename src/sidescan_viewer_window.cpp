@@ -292,12 +292,21 @@ SidescanRenderResult render_window(
       }
     }
     double max_z = out.mbes_soundings.front().z;
+    double min_z = max_z;
     for (const auto & s : out.mbes_soundings) {
       max_z = std::max(max_z, s.z);
+      min_z = std::min(min_z, s.z);
     }
+    // The boat is at the water surface — ABOVE the seabed by the water depth (the
+    // nadir height-above-bottom). Lift the arrow above the cloud top by that depth
+    // (or the cloud's vertical extent when altitude is unknown) so it reads as
+    // floating on the surface, not sitting on the bottom. (G will use the true m3
+    // sensor z instead of this estimate.)
+    const double alt = nearest->geometry.altitude;
+    const double lift = (alt > 0.0) ? alt : std::max(1.0, max_z - min_z);
     out.boat_x = nearest->geometry.sensor_x;
     out.boat_y = nearest->geometry.sensor_y;
-    out.boat_z = max_z;
+    out.boat_z = max_z + lift;
     out.boat_heading = nearest->geometry.yaw;
     out.boat_valid = true;
   }
