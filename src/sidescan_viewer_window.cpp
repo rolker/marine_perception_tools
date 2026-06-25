@@ -60,7 +60,6 @@
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
 #include "marine_interfaces/msg/contact.hpp"
-#include "marine_sonar_widgets/color_map.hpp"
 #include "marine_sonar_widgets/echogram_widget.hpp"
 #include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "point_cloud_view.hpp"
@@ -388,14 +387,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // marked pixel to map coordinates from each row's pose; slant range (water column
   // kept) matches the raw display analysts read, with across-track range gridlines.
   waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
-  waterfall_->set_color_map(marine_sonar_widgets::ColorMapType::Bronze);
-  waterfall_->set_ground_range(false);   // raw slant range, not slant->ground
+  waterfall_->set_ground_range(false);   // raw slant range, not slant->ground (palette set below)
 
   // MBES backscatter waterfall: one row per detection ping, the beam dB fan
   // across-track (beam-index axis, no metric range lines), newest at top.
   mbes_waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
-  mbes_waterfall_->set_color_map(marine_sonar_widgets::ColorMapType::Bronze);
-  mbes_waterfall_->set_range_lines(false);
+  mbes_waterfall_->set_range_lines(false);   // beam-index axis (palette set below)
 
   // Water-column echogram: the down-channel pings as a depth-vs-distance curtain.
   echogram_ = new marine_sonar_widgets::EchogramWidget(this);
@@ -418,24 +415,26 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   point_size_spin_->setPrefix("pt ");
   point_size_spin_->setToolTip("3D point size (pixels)");
 
-  // Per-pane colormap selectors. The waterfalls + echogram share the lib's three
-  // ColorMapType palettes; the 3D cloud uses the marine_colormap palettes (it
-  // colours by depth/backscatter value, not the lib's intensity ramp).
+  // Per-pane colormap selectors. Every pane offers the SAME full marine_colormap
+  // palette set (the waterfalls/echogram via the lib's palette overload, the map +
+  // 3D via marine_colormap directly), defaulting to bronze.
   auto make_cmap_combo = [this]() {
       auto * c = new QComboBox(this);
-      for (int i = 0; i < marine_sonar_widgets::kColorMapCount; ++i) {
-        c->addItem(marine_sonar_widgets::color_map_name(
-            marine_sonar_widgets::color_map_from_index(i)));
+      for (const auto & name : marine_colormap::palette_names()) {
+        c->addItem(QString::fromStdString(name));
+      }
+      if (const auto vi = marine_colormap::palette_index("bronze")) {
+        c->setCurrentIndex(static_cast<int>(*vi));
       }
       return c;
     };
   sidescan_cmap_ = make_cmap_combo();
-  sidescan_cmap_->setCurrentIndex(
-    marine_sonar_widgets::color_map_index(marine_sonar_widgets::ColorMapType::Bronze));
   mbes_cmap_ = make_cmap_combo();
-  mbes_cmap_->setCurrentIndex(
-    marine_sonar_widgets::color_map_index(marine_sonar_widgets::ColorMapType::Bronze));
   echo_cmap_ = make_cmap_combo();
+  // Apply each combo's initial palette to its widget (combos don't fire on init).
+  waterfall_->set_color_map(marine_colormap::palette(sidescan_cmap_->currentIndex()));
+  mbes_waterfall_->set_color_map(marine_colormap::palette(mbes_cmap_->currentIndex()));
+  echogram_->set_color_map(marine_colormap::palette(echo_cmap_->currentIndex()));
   cloud_palette_ = new QComboBox(this);
   for (const auto & name : marine_colormap::palette_names()) {
     cloud_palette_->addItem(QString::fromStdString(name));
@@ -553,15 +552,11 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   // Per-pane colormaps: each repaints/recolours live, no re-render needed.
   connect(sidescan_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-    this, [this](int i) {
-      waterfall_->set_color_map(marine_sonar_widgets::color_map_from_index(i));
-    });
+    this, [this](int i) {waterfall_->set_color_map(marine_colormap::palette(i));});
   connect(mbes_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-    this, [this](int i) {
-      mbes_waterfall_->set_color_map(marine_sonar_widgets::color_map_from_index(i));
-    });
+    this, [this](int i) {mbes_waterfall_->set_color_map(marine_colormap::palette(i));});
   connect(echo_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-    this, [this](int i) {echogram_->setColorMapIndex(i);});
+    this, [this](int i) {echogram_->set_color_map(marine_colormap::palette(i));});
   connect(cloud_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int i) {cloud_->setColorMap(i);});
 
