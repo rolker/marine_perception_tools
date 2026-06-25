@@ -74,6 +74,12 @@ struct SidescanRenderResult
   // so the widget inverts a marked pixel back to map coordinates.
   std::vector<marine_sonar_widgets::WaterfallRow> sidescan_rows;
   std::vector<MbesSounding> mbes_soundings;  // window's M3 soundings, world frame
+  // Boat pose at the scrub head (world frame) for the 3D context arrow.
+  bool boat_valid = false;
+  double boat_x = 0.0;
+  double boat_y = 0.0;
+  double boat_z = 0.0;
+  double boat_heading = 0.0;
   std::vector<marine_sonar_widgets::WaterfallRow> mbes_backscatter_rows;  // per-ping dB
   std::vector<marine_acoustic_msgs::msg::RawSonarImage> down_images;  // water-column pings
   double origin_x = 0.0;

@@ -14,14 +14,22 @@
 
 #include "point_cloud_view.hpp"
 
+#include <QColor>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPen>
+#include <QPointF>
+#include <QString>
 #include <QSurfaceFormat>
+#include <QVector3D>
 #include <QWheelEvent>
 #include <QtMath>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include "marine_colormap/colormap.hpp"
 #include "marine_colormap/palette.hpp"
@@ -79,6 +87,8 @@ PointCloudView::~PointCloudView()
     makeCurrent();
     pos_vbo_.destroy();
     col_vbo_.destroy();
+    arrow_vbo_.destroy();
+    arrow_vao_.destroy();
     vao_.destroy();
     doneCurrent();
   }
@@ -181,6 +191,64 @@ void PointCloudView::setPointSize(float px)
   update();
 }
 
+void PointCloudView::setBoat(
+  double wx, double wy, double wz, double heading_rad, bool valid)
+{
+  boat_valid_ = valid;
+  boat_x_ = static_cast<float>(wx);
+  boat_y_ = static_cast<float>(wy);
+  boat_z_ = static_cast<float>(wz);
+  boat_heading_ = static_cast<float>(heading_rad);
+  arrow_dirty_ = true;
+  update();
+}
+
+void PointCloudView::build_arrow()
+{
+  arrow_dirty_ = false;
+  arrow_verts_ = 0;
+  if (!gl_ready_ || !boat_valid_) {return;}
+
+  // Local arrow (x forward, y left), ~2.4 m long (-1.2..1.2) x 1.0 m wide head:
+  // a 0.5 m-wide shaft quad + a triangular head. Filled triangles, interleaved
+  // [x, y, z, r, g, b]; orange so it reads against the cloud.
+  struct V {float x; float y;};
+  const std::array<V, 9> local = {{
+    {-1.2f, -0.25f}, {0.3f, -0.25f}, {0.3f, 0.25f},   // shaft tri 1
+    {-1.2f, -0.25f}, {0.3f, 0.25f}, {-1.2f, 0.25f},   // shaft tri 2
+    {1.2f, 0.0f}, {0.3f, 0.5f}, {0.3f, -0.5f}}};      // head
+  constexpr float kR = 1.0f;
+  constexpr float kG = 0.55f;
+  constexpr float kB = 0.0f;
+  const float ch = std::cos(boat_heading_);
+  const float sh = std::sin(boat_heading_);
+  const float bx = boat_x_ - center_x_;
+  const float by = boat_y_ - center_y_;
+  const float bz = boat_z_ - center_z_;
+  std::vector<float> data;
+  data.reserve(local.size() * 6);
+  for (const auto & p : local) {
+    // forward (x) along heading; left (y) is (-sin, cos).
+    const float wx = bx + p.x * ch - p.y * sh;
+    const float wy = by + p.x * sh + p.y * ch;
+    data.push_back(wx);
+    data.push_back(wy);
+    data.push_back(bz);
+    data.push_back(kR);
+    data.push_back(kG);
+    data.push_back(kB);
+  }
+  arrow_vao_.bind();
+  arrow_vbo_.bind();
+  arrow_vbo_.allocate(data.data(), static_cast<int>(data.size() * sizeof(float)));
+  program_.enableAttributeArray(0);
+  program_.setAttributeBuffer(0, GL_FLOAT, 0, 3, 6 * sizeof(float));
+  program_.enableAttributeArray(1);
+  program_.setAttributeBuffer(1, GL_FLOAT, 3 * sizeof(float), 3, 6 * sizeof(float));
+  arrow_vao_.release();
+  arrow_verts_ = static_cast<int>(local.size());
+}
+
 void PointCloudView::rebuild_colors()
 {
   colors_.clear();
@@ -230,8 +298,11 @@ void PointCloudView::initializeGL()
   vao_.create();
   pos_vbo_.create();
   col_vbo_.create();
+  arrow_vao_.create();
+  arrow_vbo_.create();
   gl_ready_ = true;
   if (!pts_.empty()) {upload();}
+  if (boat_valid_) {build_arrow();}
 }
 
 void PointCloudView::upload()
@@ -291,7 +362,75 @@ void PointCloudView::paintGL()
   vao_.bind();
   glDrawArrays(GL_POINTS, 0, static_cast<int>(pts_.size()));
   vao_.release();
+
+  // Boat-context arrow (same MVP; flat in the horizontal plane at the boat z).
+  if (arrow_dirty_) {build_arrow();}
+  if (boat_valid_ && arrow_verts_ > 0) {
+    arrow_vao_.bind();
+    glDrawArrays(GL_TRIANGLES, 0, arrow_verts_);
+    arrow_vao_.release();
+  }
   program_.release();
+
+  // 2D overlay (scale bar + orientation axes) on top of the GL scene. Horizontal
+  // metres-per-pixel at the camera target from the perspective FOV.
+  const float fovy = qDegreesToRadians(45.0f);
+  const float mpp = (2.0f * distance_ * std::tan(fovy * 0.5f)) /
+    static_cast<float>(std::max(1, height()));
+  draw_overlay(view, mpp);
+}
+
+void PointCloudView::draw_overlay(const QMatrix4x4 & view, float metres_per_pixel)
+{
+  QPainter painter(this);
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  const int h = height();
+
+  // --- Scale bar (bottom-left): a round length nearest ~120 px. ---
+  if (metres_per_pixel > 0.0f && std::isfinite(metres_per_pixel)) {
+    const double target_m = 120.0 * metres_per_pixel;
+    const double mag = std::pow(10.0, std::floor(std::log10(target_m)));
+    double nice = 10.0 * mag;
+    for (double m : {1.0, 2.0, 5.0}) {
+      if (m * mag >= target_m) {nice = m * mag; break;}
+    }
+    const int bar_px = static_cast<int>(nice / metres_per_pixel);
+    const int x0 = 16;
+    const int y0 = h - 20;
+    QPen pen(QColor(235, 235, 235));
+    pen.setWidth(2);
+    painter.setPen(pen);
+    painter.drawLine(x0, y0, x0 + bar_px, y0);
+    painter.drawLine(x0, y0 - 4, x0, y0 + 4);
+    painter.drawLine(x0 + bar_px, y0 - 4, x0 + bar_px, y0 + 4);
+    const QString label = (nice >= 1.0) ?
+      QString::number(nice, 'f', 0) + " m" : QString::number(nice, 'f', 2) + " m";
+    painter.drawText(x0, y0 - 8, label);
+  }
+
+  // --- Orientation axes (top-left): project world E/N/Up into screen directions. ---
+  const float ox = 34.0f;
+  const float oy = 34.0f;
+  const float len = 22.0f;
+  struct Axis {QVector3D dir; QColor col; const char * lbl;};
+  const std::array<Axis, 3> axes = {{
+    {QVector3D(1, 0, 0), QColor(255, 90, 90), "E"},
+    {QVector3D(0, 1, 0), QColor(90, 220, 90), "N"},
+    {QVector3D(0, 0, 1), QColor(120, 160, 255), "Up"}}};
+  for (const auto & a : axes) {
+    const QVector3D d = view.mapVector(a.dir);   // eye-space direction (rotation only)
+    const float sx = d.x();
+    const float sy = -d.y();                     // screen y is down
+    const float n = std::hypot(sx, sy);
+    const float ux = (n > 1e-6f) ? sx / n : 0.0f;
+    const float uy = (n > 1e-6f) ? sy / n : 0.0f;
+    QPen pen(a.col);
+    pen.setWidth(2);
+    painter.setPen(pen);
+    painter.drawLine(QPointF(ox, oy), QPointF(ox + ux * len, oy + uy * len));
+    painter.drawText(QPointF(ox + ux * (len + 7) - 4, oy + uy * (len + 7) + 4), a.lbl);
+  }
+  painter.end();
 }
 
 void PointCloudView::mousePressEvent(QMouseEvent * event)

@@ -278,6 +278,30 @@ SidescanRenderResult render_window(
   // Down-channel water-column pings (raw) for the echogram, same window.
   out.down_images = session->readDownImages(win_lo, win_hi, max_pings);
 
+  // Boat pose at the scrub head, for the 3D context arrow: the ping nearest `head`
+  // gives the boat x/y/heading; place the arrow at the top of the cloud (near the
+  // surface, above the seabed). Only valid when there are soundings to show.
+  if (!out.mbes_soundings.empty()) {
+    const WindowPing * nearest = &paint.front();
+    double best = std::abs(paint.front().cumulative_distance_m - head);
+    for (const auto & p : paint) {
+      const double d = std::abs(p.cumulative_distance_m - head);
+      if (d < best) {
+        best = d;
+        nearest = &p;
+      }
+    }
+    double max_z = out.mbes_soundings.front().z;
+    for (const auto & s : out.mbes_soundings) {
+      max_z = std::max(max_z, s.z);
+    }
+    out.boat_x = nearest->geometry.sensor_x;
+    out.boat_y = nearest->geometry.sensor_y;
+    out.boat_z = max_z;
+    out.boat_heading = nearest->geometry.yaw;
+    out.boat_valid = true;
+  }
+
   double min_x = paint.front().geometry.sensor_x;
   double max_x = min_x;
   double min_y = paint.front().geometry.sensor_y;
@@ -899,6 +923,7 @@ void SidescanViewerWindow::onRenderFinished()
   // The 3D cloud keeps its own palette (set in the ctor and via cloud_palette_);
   // setPoints recolours with that stored palette, so no per-render setColorMap here.
   cloud_->setPoints(r.mbes_soundings);
+  cloud_->setBoat(r.boat_x, r.boat_y, r.boat_z, r.boat_heading, r.boat_valid);
   // Size the MBES backscatter scrollback to the window too (same reason as the
   // sidescan pane): the lib's default 200-row history is smaller than a dense
   // detections window, so without this the oldest MBES pings are evicted and the

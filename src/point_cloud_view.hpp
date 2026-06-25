@@ -63,6 +63,13 @@ public:
   void setColorMap(int palette_index);     // marine_colormap palette index
   void setPointSize(float px);             // GL point size in pixels (>= 1)
 
+  // Place a forward-pointing boat arrow (~2.4 m x 1 m) at a world position for
+  // 3D context. `heading_rad` is the ENU heading (CCW from +x/east). valid=false
+  // hides it. World coords (recentred internally like the cloud).
+  void setBoat(
+    double world_x, double world_y, double world_z, double heading_rad,
+    bool valid);
+
 protected:
   void initializeGL() override;
   void resizeGL(int w, int h) override;
@@ -74,11 +81,24 @@ protected:
 private:
   void rebuild_colors();   // recompute the per-point colour buffer for the mode
   void upload();           // (re)upload position + colour buffers (GL-current)
+  void build_arrow();      // (re)build the boat-arrow vertices (GL-current)
+  // Draw the 2D overlay (scale bar + E/N/Up orientation axes) with QPainter.
+  void draw_overlay(const QMatrix4x4 & view, float metres_per_pixel);
 
   QOpenGLShaderProgram program_;
   QOpenGLVertexArrayObject vao_;
   QOpenGLBuffer pos_vbo_{QOpenGLBuffer::VertexBuffer};
   QOpenGLBuffer col_vbo_{QOpenGLBuffer::VertexBuffer};
+  // Boat-arrow overlay (interleaved pos+col, drawn as triangles with the same program).
+  QOpenGLVertexArrayObject arrow_vao_;
+  QOpenGLBuffer arrow_vbo_{QOpenGLBuffer::VertexBuffer};
+  int arrow_verts_ = 0;
+  bool arrow_dirty_ = false;
+  bool boat_valid_ = false;
+  float boat_x_ = 0.0f;
+  float boat_y_ = 0.0f;
+  float boat_z_ = 0.0f;
+  float boat_heading_ = 0.0f;
   bool gl_ready_ = false;
   bool buffers_dirty_ = false;
 
