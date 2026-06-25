@@ -175,6 +175,12 @@ void PointCloudView::setColorMap(int palette_index)
   update();
 }
 
+void PointCloudView::setPointSize(float px)
+{
+  point_size_ = std::max(1.0f, px);
+  update();
+}
+
 void PointCloudView::rebuild_colors()
 {
   colors_.clear();
@@ -281,7 +287,7 @@ void PointCloudView::paintGL()
 
   program_.bind();
   program_.setUniformValue("u_mvp", proj * view * model);
-  program_.setUniformValue("u_point_size", 2.5f);
+  program_.setUniformValue("u_point_size", point_size_);
   vao_.bind();
   glDrawArrays(GL_POINTS, 0, static_cast<int>(pts_.size()));
   vao_.release();

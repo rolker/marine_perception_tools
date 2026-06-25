@@ -61,6 +61,7 @@ public:
   void setColorMode(ColorMode mode);
   void setZExaggeration(float z);          // >= 1; stretches depth
   void setColorMap(int palette_index);     // marine_colormap palette index
+  void setPointSize(float px);             // GL point size in pixels (>= 1)
 
 protected:
   void initializeGL() override;
@@ -95,7 +96,8 @@ private:
   float azimuth_deg_ = 0.0f;
   float elevation_deg_ = 35.0f;
   float distance_ = 10.0f;
-  float zexag_ = 3.0f;
+  float zexag_ = 1.0f;             // no vertical exaggeration by default
+  float point_size_ = 2.5f;        // GL point size (pixels)
   bool framed_ = false;            // true once the camera distance has been auto-framed
   ColorMode mode_ = ColorMode::Depth;
   int palette_index_ = 0;

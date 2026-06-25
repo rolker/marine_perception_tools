@@ -409,8 +409,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   zexag_spin_ = new QDoubleSpinBox(this);
   zexag_spin_->setRange(1.0, 20.0);
   zexag_spin_->setSingleStep(0.5);
-  zexag_spin_->setValue(3.0);
+  zexag_spin_->setValue(1.0);          // no vertical exaggeration by default
   zexag_spin_->setPrefix("Z× ");
+  point_size_spin_ = new QDoubleSpinBox(this);
+  point_size_spin_->setRange(1.0, 12.0);
+  point_size_spin_->setSingleStep(0.5);
+  point_size_spin_->setValue(2.5);
+  point_size_spin_->setPrefix("pt ");
+  point_size_spin_->setToolTip("3D point size (pixels)");
 
   // Per-pane colormap selectors. The waterfalls + echogram share the lib's three
   // ColorMapType palettes; the 3D cloud uses the marine_colormap palettes (it
@@ -461,7 +467,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   auto * bs_pane = make_pane("MBES Backscatter", mbes_waterfall_, {mbes_cmap_});
   auto * wc_pane = make_pane("Water Column", echogram_, {echo_cmap_});
   auto * cloud_pane = make_pane(
-    "MBES 3D", cloud_, {cloud_color_combo_, zexag_spin_, cloud_palette_});
+    "MBES 3D", cloud_, {cloud_color_combo_, zexag_spin_, point_size_spin_, cloud_palette_});
 
   // 2x2 grid of the four sonar views, each pane independently resizable:
   //   sidescan waterfall (UL) | MBES backscatter (UR)
@@ -542,6 +548,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     });
   connect(zexag_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, [this](double z) {cloud_->setZExaggeration(static_cast<float>(z));});
+  connect(point_size_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, [this](double px) {cloud_->setPointSize(static_cast<float>(px));});
 
   // Per-pane colormaps: each repaints/recolours live, no re-render needed.
   connect(sidescan_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),

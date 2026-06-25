@@ -151,6 +151,7 @@ private:
   PointCloudView * cloud_ = nullptr;
   QComboBox * cloud_color_combo_ = nullptr;
   QDoubleSpinBox * zexag_spin_ = nullptr;
+  QDoubleSpinBox * point_size_spin_ = nullptr;
   marine_sonar_widgets::WaterfallWidget * mbes_waterfall_ = nullptr;
   marine_sonar_widgets::EchogramWidget * echogram_ = nullptr;
 
