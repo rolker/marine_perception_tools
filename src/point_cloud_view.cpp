@@ -334,6 +334,13 @@ void PointCloudView::resizeGL(int w, int h)
 void PointCloudView::paintGL()
 {
   if (!gl_ready_) {return;}
+  // Re-assert depth state every frame. The 2D QPainter overlay (draw_overlay) leaves
+  // the GL paint engine's state behind — depth test disabled, depth mask + blend
+  // changed — so without this the cloud renders without depth testing after the first
+  // frame, and a left-disabled depth mask would even defeat the depth clear below.
+  glEnable(GL_DEPTH_TEST);
+  glDepthMask(GL_TRUE);
+  glDisable(GL_BLEND);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   if (pts_.empty()) {return;}
   if (buffers_dirty_) {upload();}
