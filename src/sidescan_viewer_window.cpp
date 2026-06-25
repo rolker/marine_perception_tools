@@ -629,6 +629,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   file_menu->addSeparator();
   file_menu->addAction("&Load Contacts…", this, &SidescanViewerWindow::onLoadContacts);
   file_menu->addAction("&Save Contacts…", this, &SidescanViewerWindow::onSaveContacts);
+  file_menu->addAction(
+    "Export Contacts as &GeoJSON…", this, &SidescanViewerWindow::onExportGeoJson);
   file_menu->addSeparator();
   file_menu->addAction("E&xit", this, &QWidget::close);
 
@@ -942,6 +944,29 @@ void SidescanViewerWindow::onSaveContacts()
   if (!contact_store_.save(path.toStdString())) {
     QMessageBox::warning(this, "Save failed", "Could not write " + path);
   }
+}
+
+void SidescanViewerWindow::onExportGeoJson()
+{
+  if (contact_store_.size() == 0) {
+    QMessageBox::information(this, "Export GeoJSON", "No contacts to export.");
+    return;
+  }
+  QString path = QFileDialog::getSaveFileName(
+    this, "Export contacts as GeoJSON", QString(), "GeoJSON (*.geojson)");
+  if (path.isEmpty()) {return;}
+  if (!path.endsWith(".geojson", Qt::CaseInsensitive)) {path += ".geojson";}
+  const auto r = export_contacts_geojson(contact_store_.contacts(), path.toStdString());
+  if (!r.ok) {
+    QMessageBox::warning(this, "Export failed", "Could not write " + path);
+    return;
+  }
+  QString msg = QString("Exported %1 contact(s) to GeoJSON.").arg(r.written);
+  if (r.skipped > 0) {
+    msg += QString(" %1 skipped (no geo reference — open a bag with an earth→map "
+      "transform to resolve lat/lon).").arg(r.skipped);
+  }
+  status_->setText(msg);
 }
 
 void SidescanViewerWindow::onLoadContacts()
