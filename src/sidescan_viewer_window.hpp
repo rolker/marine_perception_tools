@@ -53,14 +53,6 @@ namespace marine_sonar_widgets {class WaterfallWidget; class EchogramWidget;}
 namespace marine_perception_tools
 {
 
-// Result of an off-thread bag load: either a session or an error message. Copyable
-// (shared_ptr + QString) so it can ride through QFuture/QFutureWatcher.
-struct SidescanLoadResult
-{
-  std::shared_ptr<SidescanBagSession> session;
-  QString error;
-};
-
 // Result of an off-thread window render: the painted coverage image + its map
 // extent. Built on a worker thread (readWindow + paint + rasterize) so scrubbing
 // never blocks the UI; only the final setCoverage runs on the UI thread.
@@ -120,9 +112,15 @@ protected:
   // except while editing a control (spin box / combo / list / the slider itself).
   bool eventFilter(QObject * obj, QEvent * event) override;
 
+signals:
+  // Emitted from the background indexer (worker thread) as the bag resolves; the
+  // queued connection marshals it to the UI thread. `epoch` guards against a stale
+  // bag's worker updating after a newer bag was opened.
+  void indexProgress(quint64 epoch, double resolved_distance_m, bool done);
+
 private slots:
   void onOpenBag();
-  void onLoadFinished();
+  void onIndexProgress(quint64 epoch, double resolved_distance_m, bool done);
   void onRenderFinished();
   void onScrubChanged();
   void onGridSpacingChanged(double metres);
@@ -185,7 +183,8 @@ private:
   ContactStore contact_store_;
   int contact_counter_ = 0;
 
-  QFutureWatcher<SidescanLoadResult> load_watcher_;
+  QFutureWatcher<void> index_watcher_;   // background index build (buildIndex)
+  uint64_t index_epoch_ = 0;             // bumped per opened bag; guards stale progress
   QFutureWatcher<SidescanRenderResult> render_watcher_;
   bool loading_ = false;
   bool rendering_ = false;

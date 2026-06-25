@@ -632,8 +632,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   file_menu->addSeparator();
   file_menu->addAction("E&xit", this, &QWidget::close);
 
-  connect(&load_watcher_, &QFutureWatcher<SidescanLoadResult>::finished,
-    this, &SidescanViewerWindow::onLoadFinished);
+  connect(this, &SidescanViewerWindow::indexProgress,
+    this, &SidescanViewerWindow::onIndexProgress);
   connect(&render_watcher_, &QFutureWatcher<SidescanRenderResult>::finished,
     this, &SidescanViewerWindow::onRenderFinished);
   connect(scrub_, &QSlider::valueChanged, this, &SidescanViewerWindow::onScrubChanged);
@@ -729,8 +729,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 SidescanViewerWindow::~SidescanViewerWindow()
 {
   // Don't let a worker outlive the widgets it would signal: wait for any in-flight
-  // load/render to finish before the members tear down.
-  if (load_watcher_.isRunning()) {load_watcher_.waitForFinished();}
+  // index/render to finish before the members tear down (~QObject then discards any
+  // already-queued indexProgress events targeted at this window).
+  if (index_watcher_.isRunning()) {index_watcher_.waitForFinished();}
   if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
 }
 
@@ -790,66 +791,91 @@ void SidescanViewerWindow::onOpenBag()
 
 void SidescanViewerWindow::openBag(const std::string & bag_uri)
 {
-  // Opening a new bag while one is still loading replaces it: setFuture() below
-  // makes the watcher track only the newest load, so the stale one's result is
-  // dropped on arrival (its worker runs to completion harmlessly).
-  loading_ = true;
-  scrub_->setEnabled(false);
-  progress_->setVisible(true);
-  status_->setText(QString("Loading %1 …").arg(QString::fromStdString(bag_uri)));
+  // Construct the session cheaply (open + validate) on the UI thread so a bad bag
+  // surfaces immediately; then index in the background, growing the usable scrub
+  // range live as the bag resolves.
+  std::shared_ptr<SidescanBagSession> session;
+  try {
+    session = std::make_shared<SidescanBagSession>(bag_uri);
+  } catch (const std::exception & e) {
+    status_->setText("Open a bag to begin (File → Open Bag).");
+    QMessageBox::critical(this, "Open bag failed", QString::fromStdString(e.what()));
+    return;
+  }
 
-  // Read the bag off the UI thread so the window stays responsive (no WM
-  // "application not responding"). Errors are returned, not thrown across threads.
-  load_watcher_.setFuture(QtConcurrent::run([bag_uri]() -> SidescanLoadResult {
-      try {
-        return {std::make_shared<SidescanBagSession>(bag_uri), QString()};
-      } catch (const std::exception & e) {
-        return {nullptr, QString::fromStdString(e.what())};
-      }
+  // A previously-running indexer keeps running on its own captured session; bump the
+  // epoch so its queued progress is ignored from here on.
+  ++index_epoch_;
+  const quint64 epoch = index_epoch_;
+  session_ = session;
+  ++session_epoch_;   // any render in flight for the previous bag is now stale
+
+  // Reset the views for the new bag; the scrub range grows on each progress tick.
+  canvas_->setTrack({});
+  canvas_->resetView();
+  cloud_->resetView();
+  scrub_->setEnabled(false);
+  scrub_->blockSignals(true);
+  scrub_->setRange(0, 1);
+  scrub_->setValue(0);
+  scrub_->blockSignals(false);
+  progress_->setVisible(true);
+  loading_ = true;
+  status_->setText(QString("Indexing %1 …").arg(QString::fromStdString(bag_uri)));
+
+  // Index off the UI thread; the progress callback emits a queued signal so the UI
+  // grows the range + track as the bag resolves. The session is captured (shared_ptr)
+  // so it outlives the task; index_watcher_ is waited on in the destructor.
+  index_watcher_.setFuture(QtConcurrent::run([this, session, epoch]() {
+      session->buildIndex([this, epoch](double resolved_m, bool done) {
+        Q_EMIT indexProgress(epoch, resolved_m, done);
+      });
       }));
 }
 
-void SidescanViewerWindow::onLoadFinished()
+void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, bool done)
 {
-  loading_ = false;
-  progress_->setVisible(false);
-  const SidescanLoadResult result = load_watcher_.result();
-  if (!result.session) {
-    status_->setText("Open a bag to begin (File → Open Bag).");
-    QMessageBox::critical(this, "Open bag failed", result.error);
-    return;
-  }
-  session_ = result.session;
-  ++session_epoch_;   // any render in flight for the previous bag is now stale
+  if (epoch != index_epoch_ || !session_) {return;}   // stale (a newer bag was opened)
 
-  // Boat track from every ping with a resolved pose (stamp-ordered).
-  std::vector<QPointF> track;
-  for (const auto & p : session_->pings()) {
-    if (p.has_pose) {track.emplace_back(p.geometry.sensor_x, p.geometry.sensor_y);}
-  }
-  canvas_->setTrack(track);
-  canvas_->resetView();  // fit to the track now; coverage fills in asynchronously
-  cloud_->resetView();   // re-frame the 3D for the new bag (scrubs then keep the zoom)
-
-  // Slider units are metres of along-track distance, so the arrow-key step can be
-  // an exact fraction of the window.
+  const bool first = !scrub_->isEnabled();
+  const int max_m = std::max(1, static_cast<int>(std::lround(resolved_m)));
   scrub_->setEnabled(true);
+  const int cur = scrub_->value();
   scrub_->blockSignals(true);
-  scrub_->setRange(0, std::max(1, static_cast<int>(std::lround(session_->totalDistance()))));
-  scrub_->setValue(0);  // start at the beginning of the track
+  scrub_->setRange(0, max_m);
+  scrub_->setValue(std::min(cur, max_m));
   scrub_->blockSignals(false);
   updateScrubStep();
+
+  // Grow the boat-track polyline from the snapshot.
+  const auto pts = session_->trackPoints();
+  std::vector<QPointF> track;
+  track.reserve(pts.size());
+  for (const auto & p : pts) {
+    track.emplace_back(p.first, p.second);
+  }
+  canvas_->setTrack(track);
+  if (first) {
+    canvas_->resetView();   // fit once when the first resolved data arrives
+    cloud_->resetView();
+  }
   requestRender();
 
-  status_->setText(QString(
-      "%1 pings (%2 port, %3 stbd, %4 down) • %5 m track • alt: %6 • geo: %7")
-    .arg(session_->pings().size())
-    .arg(session_->channelCount(SidescanChannel::Port))
-    .arg(session_->channelCount(SidescanChannel::Starboard))
-    .arg(session_->channelCount(SidescanChannel::Down))
-    .arg(session_->totalDistance(), 0, 'f', 1)
-    .arg(session_->usedNadirDepth() ? "nadir_depth" : "estimator")
-    .arg(session_->hasGeoReference() ? "yes" : "no"));
+  if (done) {
+    loading_ = false;
+    progress_->setVisible(false);
+    status_->setText(QString(
+        "%1 pings (%2 port, %3 stbd, %4 down) • %5 m track • alt: %6 • geo: %7")
+      .arg(session_->pingCount())
+      .arg(session_->channelCount(SidescanChannel::Port))
+      .arg(session_->channelCount(SidescanChannel::Starboard))
+      .arg(session_->channelCount(SidescanChannel::Down))
+      .arg(session_->totalDistance(), 0, 'f', 1)
+      .arg(session_->usedNadirDepth() ? "nadir_depth" : "estimator")
+      .arg(session_->hasGeoReference() ? "yes" : "no"));
+  } else {
+    status_->setText(QString("Indexing… %1 m resolved").arg(resolved_m, 0, 'f', 0));
+  }
 }
 
 void SidescanViewerWindow::onScrubChanged()

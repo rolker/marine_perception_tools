@@ -51,8 +51,8 @@ int main(int argc, char ** argv)
   using mpt::SidescanChannel;
   try {
     mpt::SidescanBagSession session(argv[1]);
-    const auto & pings = session.pings();
-    std::printf("pings: %zu total\n", pings.size());
+    session.buildIndex();   // synchronous full build (one final snapshot)
+    std::printf("pings: %zu total\n", session.pingCount());
     std::printf("  port=%zu starboard=%zu down=%zu\n",
       session.channelCount(SidescanChannel::Port),
       session.channelCount(SidescanChannel::Starboard),
@@ -81,7 +81,9 @@ int main(int argc, char ** argv)
     }
 
     // M3 multibeam: index count + a windowed read exercising the project + lift.
-    std::printf("mbes detections: %zu pings indexed\n", session.mbesPings().size());
+    const auto snap = session.snapshot();
+    std::printf(
+      "mbes detections: %zu pings indexed\n", snap ? snap->mbes_pings.size() : 0);
     const auto mwin = session.readMbesWindow(0.0, 50.0, 600);
     if (!mwin.empty()) {
       std::size_t soundings = 0;
