@@ -22,6 +22,7 @@
 #include <QString>
 #include <QSurfaceFormat>
 #include <QVector3D>
+#include <QVector4D>
 #include <QWheelEvent>
 #include <QtMath>
 
@@ -71,6 +72,7 @@ PointCloudView::PointCloudView(QWidget * parent)
 {
   setMinimumSize(256, 256);
   setFocusPolicy(Qt::StrongFocus);
+  setMouseTracking(true);   // hover reporting (hoverWorld) needs moves without a button
   // Request a 3.3 context with a depth buffer (the cloud depth-tests). Without
   // this the widget can get a default context that lacks the 3.3 entry points and
   // QOpenGLFunctions_3_3_Core::initializeOpenGLFunctions() fails (null gl* -> crash).
@@ -363,8 +365,9 @@ void PointCloudView::paintGL()
   QMatrix4x4 model;
   model.scale(1.0f, 1.0f, zexag_);   // stretch depth about the centroid
 
+  mvp_ = proj * view * model;
   program_.bind();
-  program_.setUniformValue("u_mvp", proj * view * model);
+  program_.setUniformValue("u_mvp", mvp_);
   program_.setUniformValue("u_point_size", point_size_);
   vao_.bind();
   glDrawArrays(GL_POINTS, 0, static_cast<int>(pts_.size()));
@@ -437,17 +440,76 @@ void PointCloudView::draw_overlay(const QMatrix4x4 & view, float metres_per_pixe
     painter.drawLine(QPointF(ox, oy), QPointF(ox + ux * len, oy + uy * len));
     painter.drawText(QPointF(ox + ux * (len + 7) - 4, oy + uy * (len + 7) + 4), a.lbl);
   }
+
+  // --- Linked cursor: project the shared map point (at the centroid depth) ---
+  if (cursor_valid_) {
+    const QVector3D rc(cursor_x_ - center_x_, cursor_y_ - center_y_, 0.0f);
+    const QVector4D clip = mvp_ * QVector4D(rc, 1.0f);
+    if (clip.w() > 1e-6f) {
+      const float sx = (clip.x() / clip.w() * 0.5f + 0.5f) * static_cast<float>(width());
+      const float sy =
+        (1.0f - (clip.y() / clip.w() * 0.5f + 0.5f)) * static_cast<float>(height());
+      QPen pen(QColor(0, 255, 255));
+      pen.setWidthF(1.5);
+      painter.setPen(pen);
+      const double s = 7.0;
+      painter.drawLine(QPointF(sx - s, sy), QPointF(sx + s, sy));
+      painter.drawLine(QPointF(sx, sy - s), QPointF(sx, sy + s));
+    }
+  }
   painter.end();
+}
+
+void PointCloudView::setCursorWorld(double world_x, double world_y, bool valid)
+{
+  cursor_valid_ = valid;
+  cursor_x_ = static_cast<float>(world_x);
+  cursor_y_ = static_cast<float>(world_y);
+  update();
+}
+
+bool PointCloudView::unproject_ground(
+  const QPoint & px, double & world_x, double & world_y) const
+{
+  if (width() <= 0 || height() <= 0) {return false;}
+  bool ok = false;
+  const QMatrix4x4 inv = mvp_.inverted(&ok);
+  if (!ok) {return false;}
+  const float ndcx = 2.0f * static_cast<float>(px.x()) / static_cast<float>(width()) - 1.0f;
+  const float ndcy = 1.0f - 2.0f * static_cast<float>(px.y()) / static_cast<float>(height());
+  const QVector4D n4 = inv * QVector4D(ndcx, ndcy, -1.0f, 1.0f);
+  const QVector4D f4 = inv * QVector4D(ndcx, ndcy, 1.0f, 1.0f);
+  if (std::abs(n4.w()) < 1e-9f || std::abs(f4.w()) < 1e-9f) {return false;}
+  const QVector3D p0 = n4.toVector3DAffine();
+  const QVector3D p1 = f4.toVector3DAffine();
+  const QVector3D dir = p1 - p0;
+  if (std::abs(dir.z()) < 1e-9f) {return false;}  // ray parallel to the ground plane
+  const float t = -p0.z() / dir.z();              // intersect the recentred z=0 plane
+  const QVector3D hit = p0 + t * dir;
+  world_x = static_cast<double>(hit.x()) + center_x_;
+  world_y = static_cast<double>(hit.y()) + center_y_;
+  return true;
 }
 
 void PointCloudView::mousePressEvent(QMouseEvent * event)
 {
+  if (event->button() == Qt::MiddleButton) {
+    double wx = 0.0;
+    double wy = 0.0;
+    if (unproject_ground(event->pos(), wx, wy)) {Q_EMIT seekWorld(wx, wy);}
+    return;
+  }
   last_mouse_ = event->pos();
 }
 
 void PointCloudView::mouseMoveEvent(QMouseEvent * event)
 {
   if (!(event->buttons() & Qt::LeftButton)) {
+    // Hover: report the ground-plane pick under the cursor for the linked cursor.
+    double wx = 0.0;
+    double wy = 0.0;
+    const bool ok = unproject_ground(event->pos(), wx, wy);
+    Q_EMIT hoverWorld(wx, wy, ok);
     QOpenGLWidget::mouseMoveEvent(event);
     return;
   }

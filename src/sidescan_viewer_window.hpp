@@ -133,6 +133,13 @@ private slots:
   void onLoadContacts();
 
 private:
+  // Cross-pane linked cursor + click-to-seek coordination. A world map point is the
+  // shared currency; the echogram works in along-track fraction within the window.
+  void onCursorHover(double map_x, double map_y, bool valid);   // broadcast the cursor
+  void onCursorSeek(double map_x, double map_y);                // seek scrub to a point
+  void onEchogramHover(double frac, bool valid);                // echogram-sourced hover
+  void onEchogramSeek(double frac);                             // echogram-sourced seek
+
   void refreshContacts();   // push the store to the map overlay + the list
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
   // if a render is in flight, just flag a pending one and re-launch on finish
@@ -188,6 +195,8 @@ private:
   double window_len_m_ = 100.0;
   uint64_t session_epoch_ = 0;   // bumped on each loaded bag; stale renders are dropped
   int max_window_pings_ = 600;   // stationary cap; also sets raster res = window / this
+  double last_win_lo_ = 0.0;     // current render window span, for echogram cursor mapping
+  double last_win_hi_ = 0.0;
 };
 
 }  // namespace marine_perception_tools

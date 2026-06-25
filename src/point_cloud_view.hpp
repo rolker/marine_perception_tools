@@ -70,6 +70,17 @@ public:
     double world_x, double world_y, double world_z, double heading_rad,
     bool valid);
 
+  // Cross-pane linked cursor: draw a cross at a world map point (drawn at the cloud
+  // centroid depth). valid=false clears it.
+  void setCursorWorld(double world_x, double world_y, bool valid);
+
+Q_SIGNALS:
+  // Hovered / middle-clicked world position from a ground-plane pick under the
+  // mouse (for the linked cursor + click-to-seek). hoverWorld valid=false when the
+  // pick fails (e.g. the view ray is parallel to the ground plane).
+  void hoverWorld(double world_x, double world_y, bool valid);
+  void seekWorld(double world_x, double world_y);
+
 protected:
   void initializeGL() override;
   void resizeGL(int w, int h) override;
@@ -82,8 +93,10 @@ private:
   void rebuild_colors();   // recompute the per-point colour buffer for the mode
   void upload();           // (re)upload position + colour buffers (GL-current)
   void build_arrow();      // (re)build the boat-arrow vertices (GL-current)
-  // Draw the 2D overlay (scale bar + E/N/Up orientation axes) with QPainter.
+  // Draw the 2D overlay (scale bar + E/N/Up orientation axes + linked cursor).
   void draw_overlay(const QMatrix4x4 & view, float metres_per_pixel);
+  // Pick a world (x,y) on the cloud-centroid ground plane under a widget pixel.
+  bool unproject_ground(const QPoint & px, double & world_x, double & world_y) const;
 
   QOpenGLShaderProgram program_;
   QOpenGLVertexArrayObject vao_;
@@ -119,6 +132,11 @@ private:
   float zexag_ = 1.0f;             // no vertical exaggeration by default
   float point_size_ = 2.5f;        // GL point size (pixels)
   bool framed_ = false;            // true once the camera distance has been auto-framed
+
+  QMatrix4x4 mvp_;                  // last frame's MVP, for project/unproject (cursor)
+  bool cursor_valid_ = false;      // linked-cursor world point present
+  float cursor_x_ = 0.0f;
+  float cursor_y_ = 0.0f;
   ColorMode mode_ = ColorMode::Depth;
   int palette_index_ = 0;
   QPoint last_mouse_;

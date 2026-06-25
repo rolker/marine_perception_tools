@@ -556,6 +556,45 @@ double SidescanBagSession::timeAtDistance(double dist_m) const
   return (it == pings_.end()) ? pings_.back().stamp_s : it->stamp_s;
 }
 
+bool SidescanBagSession::nearestTrackDistance(
+  double map_x, double map_y, double & dist_m) const
+{
+  bool found = false;
+  double best_d2 = 0.0;
+  double best_dist = 0.0;
+  for (const auto & p : pings_) {
+    if (!p.has_pose) {continue;}
+    const double dx = p.geometry.sensor_x - map_x;
+    const double dy = p.geometry.sensor_y - map_y;
+    const double d2 = dx * dx + dy * dy;
+    if (!found || d2 < best_d2) {
+      best_d2 = d2;
+      best_dist = p.cumulative_distance_m;
+      found = true;
+    }
+  }
+  if (found) {dist_m = best_dist;}
+  return found;
+}
+
+bool SidescanBagSession::positionAtDistance(
+  double dist_m, double & map_x, double & map_y) const
+{
+  bool found = false;
+  double best_dd = 0.0;
+  for (const auto & p : pings_) {
+    if (!p.has_pose) {continue;}
+    const double dd = std::abs(p.cumulative_distance_m - dist_m);
+    if (!found || dd < best_dd) {
+      best_dd = dd;
+      map_x = p.geometry.sensor_x;
+      map_y = p.geometry.sensor_y;
+      found = true;
+    }
+  }
+  return found;
+}
+
 std::vector<WindowPing> SidescanBagSession::readWindow(
   double dist_lo, double dist_hi, int max_pings, bool include_down) const
 {

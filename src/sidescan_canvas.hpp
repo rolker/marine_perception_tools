@@ -22,6 +22,7 @@
 #include <QVector>
 #include <QWidget>
 
+#include <optional>
 #include <vector>
 
 namespace marine_perception_tools
@@ -73,9 +74,18 @@ public:
   // Contacts to overlay (map metres). Drawn wherever they fall in the current view.
   void setContacts(const QVector<ContactMarker> & contacts);
 
+  // Transient cross-pane linked cursor at a map point (metres); nullopt clears it.
+  void setCursorWorld(const std::optional<QPointF> & map_point);
+
 signals:
   // A contact box was drawn, in map coordinates (metres).
   void boxMarked(const QRectF & map_rect);
+
+  // Hovered map position (metres), for a cross-pane linked cursor (always valid).
+  void hoverWorld(double map_x, double map_y, bool valid);
+
+  // Middle-click map position (metres), for click-to-seek.
+  void seekWorld(double map_x, double map_y);
 
 protected:
   void paintEvent(QPaintEvent * event) override;
@@ -108,6 +118,7 @@ private:
   QPoint mark_start_;           // screen px
   QPoint mark_cur_;             // screen px
   QVector<ContactMarker> contacts_;
+  std::optional<QPointF> cursor_world_;   // cross-pane linked cursor (map metres)
 };
 
 }  // namespace marine_perception_tools

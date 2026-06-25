@@ -682,6 +682,27 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(cloud_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int i) {cloud_->setColorMap(i);});
 
+  // Cross-pane linked cursor + middle-click-to-seek. Every pane reports a hovered /
+  // clicked world point (the echogram works in along-track fraction); the window
+  // broadcasts the cursor to all panes and seeks the scrub on a click.
+  connect(canvas_, &SidescanCanvas::hoverWorld, this, &SidescanViewerWindow::onCursorHover);
+  connect(canvas_, &SidescanCanvas::seekWorld, this, &SidescanViewerWindow::onCursorSeek);
+  connect(cloud_, &PointCloudView::hoverWorld, this, &SidescanViewerWindow::onCursorHover);
+  connect(cloud_, &PointCloudView::seekWorld, this, &SidescanViewerWindow::onCursorSeek);
+  const auto wf_hover = [this](QPointF p, bool v) {onCursorHover(p.x(), p.y(), v);};
+  const auto wf_seek = [this](QPointF p) {onCursorSeek(p.x(), p.y());};
+  connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this, wf_hover);
+  connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::seekRequested, this, wf_seek);
+  connect(mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this, wf_hover);
+  connect(
+    mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::seekRequested, this, wf_seek);
+  connect(
+    echogram_, &marine_sonar_widgets::EchogramWidget::hoverAlongTrack,
+    this, &SidescanViewerWindow::onEchogramHover);
+  connect(
+    echogram_, &marine_sonar_widgets::EchogramWidget::seekAlongTrack,
+    this, &SidescanViewerWindow::onEchogramSeek);
+
   canvas_->setGridSpacing(grid_spin_->value());
   resize(1100, 760);
 
@@ -910,6 +931,67 @@ void SidescanViewerWindow::onLoadContacts()
   refreshContacts();
 }
 
+void SidescanViewerWindow::onCursorHover(double map_x, double map_y, bool valid)
+{
+  // Broadcast the shared cursor to every pane. The source pane drawing its own
+  // cursor too is harmless (confirms the projection).
+  if (!valid) {
+    canvas_->setCursorWorld(std::nullopt);
+    waterfall_->setCursorPoint(std::nullopt);
+    mbes_waterfall_->setCursorPoint(std::nullopt);
+    cloud_->setCursorWorld(0.0, 0.0, false);
+    echogram_->setCursorAlongTrack(std::nullopt);
+    return;
+  }
+  const QPointF p(map_x, map_y);
+  canvas_->setCursorWorld(p);
+  waterfall_->setCursorPoint(p);
+  mbes_waterfall_->setCursorPoint(p);
+  cloud_->setCursorWorld(map_x, map_y, true);
+  // Echogram: map the world point to an along-track fraction within the window.
+  double d = 0.0;
+  const double span = last_win_hi_ - last_win_lo_;
+  if (session_ && span > 0.0 && session_->nearestTrackDistance(map_x, map_y, d)) {
+    const double frac = (d - last_win_lo_) / span;
+    echogram_->setCursorAlongTrack(
+      (frac >= 0.0 && frac <= 1.0) ? std::optional<double>(frac) : std::nullopt);
+  } else {
+    echogram_->setCursorAlongTrack(std::nullopt);
+  }
+}
+
+void SidescanViewerWindow::onCursorSeek(double map_x, double map_y)
+{
+  double d = 0.0;
+  if (session_ && session_->nearestTrackDistance(map_x, map_y, d)) {
+    scrub_->setValue(std::clamp(
+        static_cast<int>(std::lround(d)), scrub_->minimum(), scrub_->maximum()));
+  }
+}
+
+void SidescanViewerWindow::onEchogramHover(double frac, bool valid)
+{
+  const double span = last_win_hi_ - last_win_lo_;
+  double x = 0.0;
+  double y = 0.0;
+  if (valid && session_ && span > 0.0 &&
+    session_->positionAtDistance(last_win_lo_ + frac * span, x, y))
+  {
+    onCursorHover(x, y, true);
+  } else {
+    onCursorHover(0.0, 0.0, false);
+  }
+}
+
+void SidescanViewerWindow::onEchogramSeek(double frac)
+{
+  const double span = last_win_hi_ - last_win_lo_;
+  if (!session_ || !(span > 0.0)) {return;}
+  const double d = last_win_lo_ + frac * span;
+  scrub_->setValue(std::clamp(
+      static_cast<int>(std::lround(d)), scrub_->minimum(), scrub_->maximum()));
+}
+
 void SidescanViewerWindow::refreshContacts()
 {
   QVector<ContactMarker> markers;
@@ -1007,6 +1089,8 @@ void SidescanViewerWindow::onRenderFinished()
     return;
   }
 
+  last_win_lo_ = r.win_lo;   // for the echogram linked-cursor along-track mapping
+  last_win_hi_ = r.win_hi;
   canvas_->setCoverage(r.image, r.origin_x, r.origin_y, r.res_m);
   // Rebuild the sidescan waterfall for this window: size the scrollback to the
   // window so none of its rows are evicted (the lib widget's default 200-row history

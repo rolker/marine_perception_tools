@@ -196,6 +196,14 @@ public:
   // used to stamp a marked contact with its real observation time. 0 if empty.
   double timeAtDistance(double dist_m) const;
 
+  // Cumulative along-track distance (m) of the posed ping nearest a map position —
+  // maps a clicked/hovered world point onto the scrub axis. False if no posed pings.
+  bool nearestTrackDistance(double map_x, double map_y, double & dist_m) const;
+
+  // Map position (sensor x/y) of the posed ping nearest an along-track distance —
+  // maps an along-track (echogram) position back to a world point. False if empty.
+  bool positionAtDistance(double dist_m, double & map_x, double & map_y) const;
+
   std::size_t channelCount(SidescanChannel ch) const;
   std::size_t posesResolved() const {return poses_resolved_;}
   std::size_t posesSkipped() const {return poses_skipped_;}
