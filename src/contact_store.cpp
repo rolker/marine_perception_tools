@@ -177,14 +177,20 @@ GeoJsonExportResult export_contacts_geojson(
       ++result.skipped;   // no resolved geo reference -> not exportable as a point
       continue;
     }
-    const double stamp = static_cast<double>(c.header.stamp.sec) +
-      static_cast<double>(c.header.stamp.nanosec) * 1e-9;
-    char coords[64];
+    // Sanitize non-finite numeric properties to 0 — `export` takes arbitrary
+    // Contacts (e.g. loaded from a .cdr), and a bare nan/inf token is invalid JSON.
+    // Buffers are sized for the worst-case finite double (%f ~ 320 chars) so a
+    // mis-resolved huge value can't truncate mid-number into malformed JSON.
+    const auto fin = [](double v) {return std::isfinite(v) ? v : 0.0;};
+    const double stamp = fin(
+      static_cast<double>(c.header.stamp.sec) +
+      static_cast<double>(c.header.stamp.nanosec) * 1e-9);
+    char coords[768];
     std::snprintf(coords, sizeof(coords), "[%.8f, %.8f]", lon, lat);
-    char props[96];
+    char props[1024];
     std::snprintf(
       props, sizeof(props), "\"width_m\": %.3f, \"height_m\": %.3f, \"stamp\": %.3f",
-      c.shape.dimensions.x, c.shape.dimensions.y, stamp);
+      fin(c.shape.dimensions.x), fin(c.shape.dimensions.y), stamp);
     f << (first ? "" : ",")
       << "\n    {\"type\": \"Feature\", \"geometry\": {\"type\": \"Point\", "
       << "\"coordinates\": " << coords << "}, \"properties\": {\"id\": \""

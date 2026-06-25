@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -114,6 +115,29 @@ TEST(ContactStore, GeoJsonExportWritesResolvedSkipsUnreferenced)
   EXPECT_EQ(text.find("T-002"), std::string::npos);   // skipped, not present
   EXPECT_NE(text.find("-71.40"), std::string::npos);  // lon first (GeoJSON order)
   EXPECT_NE(text.find("43.05"), std::string::npos);
+}
+
+TEST(ContactStore, GeoJsonExportSanitizesNonFiniteProperties)
+{
+  // A geo-resolved contact with a non-finite dimension (e.g. from a corrupt load)
+  // must still produce valid JSON — no bare nan/inf token.
+  Contact c = make_box_contact({{0.0, 0.0}}, "T-001", "sidescan", "bizzy/map", 1.0);
+  c.geo_pose.position.latitude = 43.0;
+  c.geo_pose.position.longitude = -71.0;
+  c.shape.dimensions.x = std::numeric_limits<double>::quiet_NaN();
+  c.shape.dimensions.y = std::numeric_limits<double>::infinity();
+
+  const std::string path = std::string(testing::TempDir()) + "mpt_contacts_nonfinite.geojson";
+  const auto r = export_contacts_geojson({c}, path);
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(r.written, 1u);
+
+  std::ifstream f(path);
+  std::stringstream ss;
+  ss << f.rdbuf();
+  const std::string text = ss.str();
+  EXPECT_EQ(text.find("nan"), std::string::npos);
+  EXPECT_EQ(text.find("inf"), std::string::npos);
 }
 
 TEST(ContactStore, GeoJsonExportEmptyOnNoGeo)
