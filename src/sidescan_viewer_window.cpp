@@ -55,7 +55,7 @@
 #include <utility>
 #include <vector>
 
-#include "contact_store.hpp"
+#include "marine_contacts/contact_store.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
 #include "marine_colormap/colormap.hpp"
@@ -929,14 +929,15 @@ void SidescanViewerWindow::onMaxPingsChanged(int max_pings)
 
 void SidescanViewerWindow::onContactMarked(const QRectF & map_rect)
 {
-  std::vector<MapPoint> pts{
+  std::vector<marine_contacts::MapPoint> pts{
     {map_rect.left(), map_rect.top()},
     {map_rect.right(), map_rect.bottom()}};
   const QString id = QString("T-%1").arg(++contact_counter_, 3, 10, QChar('0'));
   const double head = std::clamp(static_cast<double>(scrub_->value()), 0.0,
     session_ ? session_->totalDistance() : 0.0);
   const double stamp_s = session_ ? session_->timeAtDistance(head) : 0.0;
-  auto contact = make_box_contact(pts, id.toStdString(), "sidescan", "bizzy/map", stamp_s);
+  auto contact = marine_contacts::make_box_contact(
+    pts, id.toStdString(), "sidescan", "bizzy/map", stamp_s);
 
   // Resolve geo_pose (lat/lon) from the contact's map-frame centroid when the bag
   // carried an earth->map reference; leave it unresolved (NaN) otherwise.
@@ -980,7 +981,8 @@ void SidescanViewerWindow::onExportGeoJson()
     this, "Export contacts as GeoJSON", QString(), "GeoJSON (*.geojson)");
   if (path.isEmpty()) {return;}
   if (!path.endsWith(".geojson", Qt::CaseInsensitive)) {path += ".geojson";}
-  const auto r = export_contacts_geojson(contact_store_.contacts(), path.toStdString());
+  const auto r = marine_contacts::export_contacts_geojson(
+    contact_store_.contacts(), path.toStdString());
   if (!r.ok) {
     QMessageBox::warning(this, "Export failed", "Could not write " + path);
     return;

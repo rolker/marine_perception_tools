@@ -78,14 +78,17 @@ jobs:
           https://github.com/rolker/marine_sonar_widgets.git
           ../ws/src/marine_sonar_widgets
 
-      # marine_interfaces (Contact.msg) is a package inside the unh_marine_autonomy
-      # repo, not published to rosdep. Clone the repo and keep only that package so
-      # CI doesn't pull the heavy transitive deps of its sibling packages.
-      - name: Clone marine_interfaces source dependency
+      # marine_interfaces (Contact.msg) and marine_contacts (the Qt-free Contact
+      # builder the sidescan viewer links) are packages inside the unh_marine_autonomy
+      # repo, not published to rosdep. Clone the repo and keep only those two
+      # lightweight packages so CI doesn't pull the heavy transitive deps of their
+      # sibling packages.
+      - name: Clone marine_interfaces + marine_contacts source dependencies
         run: |
           git clone --depth 1 -b jazzy \
             https://github.com/rolker/unh_marine_autonomy.git /tmp/uma
           mv /tmp/uma/marine_interfaces ../ws/src/marine_interfaces
+          mv /tmp/uma/marine_contacts ../ws/src/marine_contacts
 
       - name: Install ROS dependencies
         working-directory: ../ws
