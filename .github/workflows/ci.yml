@@ -50,6 +50,16 @@ jobs:
           https://github.com/rolker/unh_marine_perception.git
           ../ws/src/unh_marine_perception
 
+      # marine_control is a source sibling (not in rosdep): sea_surface_segmentation
+      # gained a device-control dependency on it (unh_marine_autonomy#140 / ADR-0003),
+      # so its find_package(marine_control) fails without this. The repo also provides
+      # marine_control_interfaces (a sea_surface_segmentation test_depend).
+      - name: Clone marine_control source dependency
+        run: >
+          git clone --depth 1 -b jazzy
+          https://github.com/rolker/marine_control.git
+          ../ws/src/marine_control
+
       # marine_colormap is a source sibling (not in rosdep): the sidescan viewer
       # uses its shared colormap library/shaders. Clone it so the build resolves.
       - name: Clone marine_colormap source dependency
