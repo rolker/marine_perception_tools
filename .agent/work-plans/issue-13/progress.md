@@ -84,3 +84,27 @@ ament_target_dependencies(<your_target> marine_perception_tools)
   does not need to `find_package` them just to link `contact_builder`.
 
 No scope creep into #86's marking feature; this change is purely the export.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-28 14:39 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-13 at `4118d84`
+**Mode**: pre-push
+**Depth**: Standard (reason: cross-package exported interface / build-system change)
+**Must-fix**: 0 | **Suggestions**: 0
+**Round**: 1 | **Ship**: recommended — no must-fix; export contract verified end-to-end against the install tree
+
+### Findings
+- [ ] No issues found. LGTM.
+
+Verified: `ament_lint_cmake` clean; `sidescan_core` uses none of the moved symbols
+(safe removal); both consumers (`sidescan_target_viewer`, `test_contact_store`) relink
+`contact_builder`; generated `export_marine_perception_toolsExport*.cmake` produces a
+valid `STATIC IMPORTED` target (`IMPORTED_LOCATION=lib/libcontact_builder.a`,
+include + `marine_interfaces`/`rclcpp::rclcpp` interfaces); archive is PIC, no ODR risk;
+`package.xml` already carries the exported deps. Two Lens-B observations (PUBLIC-scope
+`rclcpp`, in-tree-flat vs downstream-namespaced include spelling) were confirmed
+intentional/convention-matching and dropped by the silence filter.
