@@ -20,6 +20,7 @@ find_package(geographic_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(marine_colormap REQUIRED)
+find_package(marine_contacts REQUIRED)
 find_package(marine_interfaces REQUIRED)
 find_package(marine_sonar_widgets REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -79,22 +80,12 @@ target_link_libraries(sea_surface_tuner
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Concurrent)
 
-# Contact builder (no Qt): the human-curated contact store + box->Contact builder
-# + GeoJSON export. Split into its own EXPORTED target (issue #13) so a downstream
-# package (rqt_operator_tools#86) can find_package(marine_perception_tools) and
-# link it. Qt-free: marine_interfaces is the public (header) dependency; rclcpp is
-# used only inside ContactStore::save/load for the CDR round-trip. Built with PIC so
-# this static library can be linked into a SHARED rqt plugin downstream.
-add_library(contact_builder
-  src/contact_store.cpp
-)
-add_library(${PROJECT_NAME}::contact_builder ALIAS contact_builder)
-set_target_properties(contact_builder PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(contact_builder PUBLIC
-  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
-  "$<INSTALL_INTERFACE:include>"
-)
-ament_target_dependencies(contact_builder marine_interfaces rclcpp)
+# The Qt-free Contact builder (make_box_contact / ContactStore /
+# export_contacts_geojson) used to live here as an exported `contact_builder` target
+# (issue #13). It now has a lightweight home in the marine_contacts package
+# (unh_marine_autonomy#243) so downstream consumers (rqt_operator_tools#86) link it
+# without pulling this package's offline-tuner dependency chain. The offline sidescan
+# viewer links marine_contacts::marine_contacts below.
 
 # Sidescan viewer core (no Qt): bag ingest + pure projection geometry for the
 # offline georeferenced sidescan viewer / target tracker (issue #7). Kept Qt-free
@@ -131,7 +122,7 @@ add_executable(sidescan_target_viewer
 )
 target_link_libraries(sidescan_target_viewer
   sidescan_core
-  contact_builder
+  marine_contacts::marine_contacts
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Concurrent
   Qt${QT_VERSION_MAJOR}::Gui
@@ -141,22 +132,6 @@ ament_target_dependencies(sidescan_target_viewer marine_colormap marine_sonar_wi
 install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
 )
-
-# Export contact_builder for downstream consumers (rqt_operator_tools#86). The
-# public header installs to include/${PROJECT_NAME}/ (matching the install-tree
-# include scheme used elsewhere in the workspace, e.g. marine_tiled_raster_store);
-# in-tree consumers keep the flat "contact_store.hpp" include via the BUILD_INTERFACE
-# src dir above. rclcpp is a PRIVATE link of this static library, so CMake propagates
-# it to consumers as $<LINK_ONLY:...>; it is therefore exported as a dependency too.
-install(FILES src/contact_store.hpp DESTINATION include/${PROJECT_NAME})
-install(TARGETS contact_builder
-  EXPORT export_${PROJECT_NAME}
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin
-)
-ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
-ament_export_dependencies(marine_interfaces rclcpp)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -189,11 +164,8 @@ if(BUILD_TESTING)
   ament_add_gtest(test_coverage_raster test/test_coverage_raster.cpp)
   target_link_libraries(test_coverage_raster sidescan_core)
 
-  # Contact store (box->Contact, in-box query, CDR round-trip) — links contact_builder,
-  # which now owns make_box_contact / ContactStore / export_contacts_geojson (#13).
-  ament_add_gtest(test_contact_store test/test_contact_store.cpp)
-  target_link_libraries(test_contact_store contact_builder)
-  ament_target_dependencies(test_contact_store marine_interfaces)
+  # The contact-store test moved to the marine_contacts package (unh_marine_autonomy#243)
+  # along with the builder it exercises.
 
   # MBES 3D point-cloud viewport smoke test (offscreen GL; self-skips headless).
   # Compiles the unit-under-test source directly + Qt OpenGL.

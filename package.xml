@@ -22,6 +22,7 @@
   <depend>image_geometry</depend>
   <depend>marine_acoustic_msgs</depend>
   <depend>marine_interfaces</depend>
+  <depend>marine_contacts</depend>
   <depend>marine_colormap</depend>
   <depend>marine_sonar_widgets</depend>
   <depend>geographic_msgs</depend>

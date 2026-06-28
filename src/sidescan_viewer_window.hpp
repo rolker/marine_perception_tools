@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-#include "contact_store.hpp"
+#include "marine_contacts/contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
 #include "sidescan_bag_session.hpp"
 
@@ -181,7 +181,7 @@ private:
   QSplitter * grid_top_split_ = nullptr;
   QSplitter * grid_bot_split_ = nullptr;
 
-  ContactStore contact_store_;
+  marine_contacts::ContactStore contact_store_;
   int contact_counter_ = 0;
 
   QFutureWatcher<void> index_watcher_;   // background index build (buildIndex)
