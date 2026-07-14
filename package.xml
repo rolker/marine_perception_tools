@@ -25,6 +25,9 @@
   <depend>marine_contacts</depend>
   <depend>marine_colormap</depend>
   <depend>marine_sonar_widgets</depend>
+  <depend>marine_survey_index</depend>
+  <depend>marine_tiled_raster_store</depend>
+  <depend>libsqlite3-dev</depend>
   <depend>geographic_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>ffmpeg_encoder_decoder</depend>

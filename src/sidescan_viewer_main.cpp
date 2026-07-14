@@ -20,8 +20,12 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <memory>
+#include <string>
 
 #include "sidescan_viewer_window.hpp"
+#include "survey_overview_window.hpp"
 
 namespace
 {
@@ -81,8 +85,17 @@ int main(int argc, char ** argv)
   const QCommandLineOption end_opt(
     "end", "Cue window end: UNIX nanoseconds or ISO-8601 (UTC assumed when "
     "no offset is given).", "time");
+  const QCommandLineOption index_opt(
+    "index", "survey_index.db to open the survey overview window (explorer "
+    "stage 2): store-tile map, click to list the passes that saw a spot.",
+    "db");
+  const QCommandLineOption stores_opt(
+    "stores", "Directory of GGGS store GeoTIFF tiles for the overview basemap "
+    "(default: <index dir>/bathymetry/survey).", "dir");
   parser.addOption(start_opt);
   parser.addOption(end_opt);
+  parser.addOption(index_opt);
+  parser.addOption(stores_opt);
   parser.process(app);
 
   const bool has_start = parser.isSet(start_opt);
@@ -112,6 +125,31 @@ int main(int argc, char ** argv)
       std::fprintf(stderr, "error: --end '%s' is not UNIX ns or ISO-8601\n",
         parser.value(end_opt).toUtf8().constData());
       return 2;
+    }
+  }
+
+  // With --index the survey overview is the primary window (no bag needed);
+  // a bag positional still opens a viewer alongside it.
+  std::unique_ptr<marine_perception_tools::SurveyOverviewWindow> overview;
+  if (parser.isSet(index_opt)) {
+    const std::string index_path = parser.value(index_opt).toStdString();
+    std::string stores_dir;
+    if (parser.isSet(stores_opt)) {
+      stores_dir = parser.value(stores_opt).toStdString();
+    } else {
+      stores_dir = (std::filesystem::path(index_path).parent_path() /
+        "bathymetry" / "survey").string();
+    }
+    try {
+      overview = std::make_unique<marine_perception_tools::SurveyOverviewWindow>(
+        index_path, stores_dir);
+    } catch (const std::exception & e) {
+      std::fprintf(stderr, "error: opening survey index: %s\n", e.what());
+      return 1;
+    }
+    overview->show();
+    if (positional.isEmpty()) {
+      return app.exec();
     }
   }
 
