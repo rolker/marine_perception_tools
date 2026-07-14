@@ -24,6 +24,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -43,6 +44,41 @@
 
 namespace marine_perception_tools
 {
+
+std::optional<std::pair<double, double>> distance_interval(
+  const SessionIndex & index, int64_t t_start_ns, int64_t t_end_ns)
+{
+  if (t_end_ns < t_start_ns) {std::swap(t_start_ns, t_end_ns);}
+
+  bool found = false;
+  double lo = 0.0;
+  double hi = 0.0;
+  // Both ping vectors are stamp-sorted: binary-search the window start, then
+  // walk the in-window range folding posed pings' (monotonic) distances.
+  const auto scan = [&](const auto & pings) {
+      const auto first = std::lower_bound(
+        pings.begin(), pings.end(), t_start_ns,
+        [](const auto & ping, int64_t t) {return ping.stamp_ns < t;});
+      for (auto it = first; it != pings.end() && it->stamp_ns <= t_end_ns; ++it) {
+        if (!it->has_pose) {continue;}
+        if (!found) {
+          lo = hi = it->cumulative_distance_m;
+          found = true;
+        } else {
+          lo = std::min(lo, it->cumulative_distance_m);
+          hi = std::max(hi, it->cumulative_distance_m);
+        }
+      }
+    };
+  scan(index.pings);
+  scan(index.mbes_pings);
+
+  if (!found) {
+    return std::nullopt;
+  }
+  return std::make_pair(lo, hi);
+}
+
 namespace
 {
 

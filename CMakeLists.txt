@@ -164,6 +164,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_coverage_raster test/test_coverage_raster.cpp)
   target_link_libraries(test_coverage_raster sidescan_core)
 
+  # Jump-to-pass time→distance mapping (distance_interval) — synthetic index,
+  # no bag I/O; links sidescan_core (#17).
+  ament_add_gtest(test_sidescan_interval test/test_sidescan_interval.cpp)
+  target_link_libraries(test_sidescan_interval sidescan_core)
+
   # The contact-store test moved to the marine_contacts package (unh_marine_autonomy#243)
   # along with the builder it exercises.
 

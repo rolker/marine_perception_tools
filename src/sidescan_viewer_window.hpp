@@ -100,8 +100,13 @@ public:
   explicit SidescanViewerWindow(QWidget * parent = nullptr);
   ~SidescanViewerWindow() override;
 
-  // Open a bag directly (e.g. from a CLI argument).
-  void openBag(const std::string & bag_uri);
+  // Open a bag directly (e.g. from a CLI argument). Non-zero cue bounds
+  // (UNIX ns) jump the scrub to the along-track window those stamps cover once
+  // indexing completes — the survey-index (jump-to-pass) bridge. The whole bag
+  // is still metadata-indexed first (TF + cumulative distance need the full
+  // recording); only sample data is window-read, so the cue costs one normal
+  // index pass, not a whole-bag sample read.
+  void openBag(const std::string & bag_uri, int64_t cue_start_ns = 0, int64_t cue_end_ns = 0);
 
 protected:
   // Persist window geometry + splitter sizes on close (QSettings).
@@ -197,6 +202,10 @@ private:
   int max_window_pings_ = 600;   // stationary cap; also sets raster res = window / this
   double last_win_lo_ = 0.0;     // current render window span, for echogram cursor mapping
   double last_win_hi_ = 0.0;
+  // Jump-to-pass cue (UNIX ns), applied once when indexing completes then cleared;
+  // 0 = no cue pending.
+  int64_t pending_cue_start_ns_ = 0;
+  int64_t pending_cue_end_ns_ = 0;
 };
 
 }  // namespace marine_perception_tools

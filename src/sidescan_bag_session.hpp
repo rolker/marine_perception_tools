@@ -21,6 +21,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -176,6 +177,17 @@ struct SessionIndex
   double geo_qz = 0.0;
   double geo_qw = 1.0;
 };
+
+// Along-track distance interval covered by the pings (sidescan + MBES) whose
+// stamps fall within [t_start_ns, t_end_ns] — maps a survey-index pass interval
+// (marine_survey_index, stage 1 of the exploration umbrella) onto the viewer's
+// shared scrub axis. Only posed pings participate (unposed pings carry no
+// meaningful distance). Swapped bounds are normalized. Returns std::nullopt
+// when no posed ping falls in the window (outside the bag's time range, or
+// nothing resolved there) so the caller can report it rather than silently
+// cueing to 0. Qt-free and bag-I/O-free.
+std::optional<std::pair<double, double>> distance_interval(
+  const SessionIndex & index, int64_t t_start_ns, int64_t t_end_ns);
 
 class SidescanBagSession
 {
