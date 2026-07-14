@@ -49,3 +49,15 @@ issue: 17
 - [ ] Update `.agents/README.md` CLI surface note when the `--start`/`--end` arguments are added.
 - [ ] Document (code comment or PR description) the seek-vs-whole-bag architectural choice and whether TF requires reading from bag start.
 - [ ] Ensure interval-selection logic is in a Qt-free, testable function (not embedded in the Qt window callback).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-07-14 00:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-17/plan.md` at `68fbbb2`
+**Branch**: feature/issue-17 at `68fbbb2`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
