@@ -143,3 +143,12 @@ Addressed the round-2 must-fix (host-inline):
 
 Verification: rebuild + full suite green — **272 tests, 0 failures, 41
 skipped**; real-data smoke (Massabesic index + survey store) alive at timeout.
+
+## Published
+**Status**: complete
+**When**: 2026-07-14
+**By**: Claude Code Agent (Claude Fable 5)
+
+Publish checkpoint approved by Roland. Branch `feature/issue-19` pushed;
+PR opened: https://github.com/rolker/marine_perception_tools/pull/20
+(base `jazzy`, `Closes #19`).
