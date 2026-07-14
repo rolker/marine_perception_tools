@@ -68,9 +68,37 @@ small inline amendments, not structural rework.
 Specialists: static analysis (cpplint clean; cppcheck syntaxError on TEST macros = gtest false positive), governance (all consequences Done — CLI doc lives in `.agents/README.md` per the #17 precedent, updated), plan drift (none — projection extraction, package.xml deps, SQLite linking all implemented; both plan open questions resolved in code), 2 fresh-context Claude adversarial passes (Lens A + Lens B). Copilot off (default). All cross-package API calls verified against the actual dependency headers in `core_ws`.
 
 ### Findings
-- [ ] (must-fix) Ctor `loadStoreTiles` calls `tileRasterCount()`/`loadTiles()` unguarded — both `@throws`; one bad tile kills the whole overview window (breaks documented graceful-degradation) and misreports as an index error — `src/survey_overview_window.cpp:141,151-152`
-- [ ] (must-fix) Initial view fit uses pre-layout widget size and is never recomputed (`have_fit_` set true at ctor-time; no `resizeEvent`/`showEvent`) — basemap opens mis-scaled — `src/survey_overview_canvas.cpp:54-71,83-85`
-- [ ] (suggestion) `survey_index_bridge` directly includes `marine_autonomy/gggs.h` but only depends on it transitively via `marine_survey_index`; add `marine_autonomy` to CMake + package.xml for directness — `CMakeLists.txt:122-125`, `package.xml`
-- [ ] (suggestion) Multi-tile click lists one physical pass as several per-tile segments; consider coalescing per `(bag,sensor,topic)` — `src/survey_overview_window.cpp:210-229`
-- [ ] (suggestion) Mixed-level / non-band-0 stores silently partial-render; guard or warn — `src/survey_overview_window.cpp:129-152`
-- [ ] (suggestion) `onHoverGeo` `statusBar()->showMessage()` transiently hides the non-permanent `status_` label on every mouse-move; use `addPermanentWidget` or a separate label — `src/survey_overview_window.cpp:108-110,250-254`
+- [x] (must-fix) Ctor `loadStoreTiles` calls `tileRasterCount()`/`loadTiles()` unguarded — both `@throws`; one bad tile kills the whole overview window (breaks documented graceful-degradation) and misreports as an index error — `src/survey_overview_window.cpp:141,151-152`
+- [x] (must-fix) Initial view fit uses pre-layout widget size and is never recomputed (`have_fit_` set true at ctor-time; no `resizeEvent`/`showEvent`) — basemap opens mis-scaled — `src/survey_overview_canvas.cpp:54-71,83-85`
+- [x] (suggestion) `survey_index_bridge` directly includes `marine_autonomy/gggs.h` but only depends on it transitively via `marine_survey_index`; add `marine_autonomy` to CMake + package.xml for directness — `CMakeLists.txt:122-125`, `package.xml`
+- [x] (suggestion) Multi-tile click lists one physical pass as several per-tile segments; consider coalescing per `(bag,sensor,topic)` — `src/survey_overview_window.cpp:210-229`
+- [x] (suggestion) Mixed-level / non-band-0 stores silently partial-render; guard or warn — `src/survey_overview_window.cpp:129-152`
+- [x] (suggestion) `onHoverGeo` `statusBar()->showMessage()` transiently hides the non-permanent `status_` label on every mouse-move; use `addPermanentWidget` or a separate label — `src/survey_overview_window.cpp:108-110,250-254`
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-14 19:37 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-19 at `3a37c3e`
+**Addressed**: Local Review (Pre-Push) — 2026-07-14 19:09 +00:00 at `8d9ae62` (all 6 unchecked findings; 2 must-fix, 4 suggestions)
+**Commits**: `92c9c64`, `e531459`, `107be81`, `8b4e47a`, `65127fa`, `ecae9dd`, `3a37c3e`
+
+### Actions
+- [x] (must-fix) Guard throwing tile loads — wrapped `tileRasterCount()` and `loadTiles()` in try/catch that degrades to an empty map with a status message (pass query still works), so one bad tile no longer aborts window construction or misreports as an index error — `src/survey_overview_window.cpp` (`92c9c64`)
+- [x] (must-fix) Basemap opens correctly scaled — `setTiles` no longer fits at ctor-time (pre-layout size); the fit is deferred to the first paint and a new `resizeEvent` refits at the real laid-out size until the user zooms/pans (`user_adjusted_` guard) — `src/survey_overview_canvas.{cpp,hpp}` (`e531459`)
+- [x] (suggestion) Direct `marine_autonomy` dependency — added `find_package(marine_autonomy)` + `ament_target_dependencies` for both `survey_index_bridge` and `sidescan_target_viewer` (both include `marine_autonomy/gggs.h` directly) and `<depend>marine_autonomy</depend>` — `CMakeLists.txt`, `package.xml` (`107be81`)
+- [x] (suggestion) Coalesce per-tile pass segments — new `coalescePasses()` merges segments sharing `(bag,sensor,topic)` whose time windows overlap or sit within a 5 s gap (one transit across adjacent tiles) into one list row, summing ping counts; distinct revisits stay separate — `src/survey_overview_window.cpp` (`8b4e47a`, formatting `3a37c3e`)
+- [x] (suggestion) Warn on mixed-level stores — scan collects all tile levels, renders the lowest deterministically, and appends a "mixed store: ignoring levels …" note to the status instead of silently dropping other levels — `src/survey_overview_window.cpp` (`65127fa`)
+- [x] (suggestion) Hover read-out no longer hides the status label — added a permanent `hover_` label (`addPermanentWidget`); `onHoverGeo` writes coords there instead of `statusBar()->showMessage()` — `src/survey_overview_window.{cpp,hpp}` (`ecae9dd`)
+
+### Checks
+- `ament_cpplint` on all four changed source/header files: **No problems found**.
+- `ament_uncrustify` on all four: clean after the `3a37c3e` continuation-indent fix.
+- Pre-commit hooks (cmake-lint, check-xml, whitespace/EOL, commit-identity) passed on every commit (no `--no-verify`).
+- Full `colcon build`/gtest **not run**: the `core_ws` underlay is not built in this worktree (empty `core_ws/install`), so `find_package(marine_autonomy …)` can't resolve here. Compile/`ament_lint_auto` test coverage is deferred to the re-review / CI, which builds the underlay. Changes were reasoned against the dependency headers in `layers/main/core_ws/src` (PassRow fields, `tileRasterCount`/`loadTiles` throw contracts).
+
+### Next step
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 19 --skill review-code
