@@ -48,6 +48,20 @@ show the map and let the operator click any location to see which passes cover i
    populate schema manually, call `queryPasses(lat, lon)`, assert expected `PassRow`
    results. No bag I/O. Pattern follows `marine_survey_index`'s `test_query_join.cpp`.
 
+## Decisions (plan review, 2026-07-14)
+
+- **package.xml must be updated alongside CMakeLists** (review must-fix):
+  `<depend>marine_survey_index</depend>`, `<depend>marine_tiled_raster_store</depend>`,
+  `<depend>libsqlite3-dev</depend>` — without them rosdep/ament resolution breaks.
+- **The lat/lon→pixel projection is a pure, unit-tested function** (review
+  suggestion): `survey_overview_projection.hpp` (header-only, Qt-free) owns the
+  cos(lat)-scaled geo↔pixel mapping; `SurveyOverviewCanvas` consumes it. New
+  `test_survey_projection.cpp` covers round-trip, aspect correction at the
+  survey latitude, and north-up orientation.
+- **SQLite3 is linked, not just found**: `find_package(SQLite3 REQUIRED)` +
+  `target_link_libraries(... SQLite::SQLite3)` on the executable (the bridge
+  compiles into it).
+
 ## Files to Change
 
 | File | Change |
