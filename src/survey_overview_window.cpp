@@ -194,51 +194,34 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
   // levels — otherwise the other levels vanish silently. A missing or empty
   // directory degrades to an empty map — the pass query still works.
   std::error_code ec;
-  std::map<int, std::string> level_sample;   // level -> a representative tile
+  std::map<int, std::vector<std::string>> by_level;   // level -> tile paths
   for (const auto & entry : std::filesystem::directory_iterator(stores_dir, ec)) {
     const auto name = entry.path().filename().string();
     if (entry.path().extension() != ".tif" || name.find('_') == std::string::npos) {
       continue;
     }
     try {
-      level_sample.emplace(
-        std::stoi(name.substr(0, name.find('_'))), entry.path().string());
+      by_level[std::stoi(name.substr(0, name.find('_')))].push_back(entry.path().string());
     } catch (const std::exception &) {
       continue;
     }
   }
-  if (level_sample.empty()) {
+  if (by_level.empty()) {
     status_->setText(QString("No store tiles found under %1 — map is empty; "
       "pass queries still work.").arg(QString::fromStdString(stores_dir)));
     return;
   }
 
-  const int level = level_sample.begin()->first;   // render the lowest level
-  int band_count = 0;
-  // tileRasterCount opens the GeoTIFF and @throws on a corrupt/unreadable
-  // tile. Degrade to an empty map (the pass query still works) rather than
-  // letting one bad tile abort the whole overview window's construction.
-  try {
-    band_count =
-      marine_tiled_raster_store::tileRasterCount(level_sample.begin()->second);
-  } catch (const std::exception & e) {
-    status_->setText(QString("Failed to read store tile %1: %2 — map is empty; "
-      "pass queries still work.")
-      .arg(QString::fromStdString(level_sample.begin()->second)).arg(e.what()));
-    return;
-  }
-  if (band_count < 1) {
-    status_->setText(QString("No store tiles found under %1 — map is empty; "
-      "pass queries still work.").arg(QString::fromStdString(stores_dir)));
-    return;
-  }
+  const int level = by_level.begin()->first;   // render the lowest level
+  const auto & level_paths = by_level.begin()->second;
 
   // Warn when the store mixes levels: only `level` is rendered, so name the
-  // ignored ones instead of dropping them without a trace.
+  // ignored ones instead of dropping them without a trace. (loadTiles() would
+  // throw on the off-level tiles, so this loads the chosen level tile-by-tile.)
   QString level_warning;
-  if (level_sample.size() > 1) {
+  if (by_level.size() > 1) {
     QStringList others;
-    for (const auto & [lvl, sample] : level_sample) {
+    for (const auto & [lvl, paths] : by_level) {
       if (lvl != level) {
         others << QString::number(lvl);
       }
@@ -246,16 +229,35 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
     level_warning = QString(" (mixed store: ignoring levels %1)").arg(others.join(", "));
   }
 
+  // Load per-tile with a per-tile guard: tileRasterCount/loadTile @throw on a
+  // corrupt or unreadable tile, and one bad tile must cost only itself — not
+  // the whole map, and certainly not the window (graceful degradation; the
+  // pass query works regardless).
   std::map<gggs::GridIndex, marine_tiled_raster_store::TiledRasterTile<double>> tiles;
-  // loadTiles @throws if any tile fails to decode; same graceful-degradation
-  // contract — a broken store leaves an empty map, not a dead window.
-  try {
-    marine_tiled_raster_store::loadTiles<double>(
-      tiles, stores_dir, static_cast<std::uint8_t>(level), band_count);
-  } catch (const std::exception & e) {
-    status_->setText(QString("Failed to load store tiles from %1: %2 — map is empty; "
-      "pass queries still work.")
-      .arg(QString::fromStdString(stores_dir)).arg(e.what()));
+  int failed_tiles = 0;
+  for (const auto & path : level_paths) {
+    try {
+      const int band_count = marine_tiled_raster_store::tileRasterCount(path);
+      if (band_count < 1) {
+        ++failed_tiles;
+        continue;
+      }
+      auto tile = marine_tiled_raster_store::loadTile<double>(
+        path, gggs::Level(static_cast<std::uint8_t>(level)),
+        static_cast<std::size_t>(band_count));
+      tiles.emplace(tile.index(), std::move(tile));
+    } catch (const std::exception &) {
+      ++failed_tiles;
+    }
+  }
+  if (failed_tiles > 0) {
+    level_warning += QString(" (%1 unreadable tile%2 skipped)")
+      .arg(failed_tiles).arg(failed_tiles == 1 ? "" : "s");
+  }
+  if (tiles.empty()) {
+    status_->setText(QString("No loadable store tiles under %1 — map is empty; "
+      "pass queries still work.%2")
+      .arg(QString::fromStdString(stores_dir)).arg(level_warning));
     return;
   }
 
