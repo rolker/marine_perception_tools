@@ -61,3 +61,19 @@ issue: 17
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-14 15:26 +00:00
+**By**: Claude Code Agent (Claude Opus) (in-context — author self-review)
+
+**Plan**: `.agent/work-plans/issue-17/plan.md` at `68fbbb2`
+**PR**: PR-less (`--issue 17`; reviewed from `feature/issue-17` worktree)
+**Verdict**: changes-requested
+
+### Findings
+- [ ] (must-fix) Cue target conflicts with trailing-window semantics: `distance_window(head,…)` paints `[head − window_len, head]` (`distance_buffer_policy.hpp:40`), so cueing the scrub head to `dist_lo` shows the window BEFORE the pass, not the pass itself — cue to `dist_hi` (or `dist_lo + window_len_m_`, clamped to total) — `plan.md:42`
+- [ ] (suggestion) ISO-8601 parse: `QDateTime::fromString(s, Qt::ISODateWithMs)` defaults to LocalTime when the string has no offset, mis-converting the epoch; force/verify UTC and reject an invalid `QDateTime` with a clear error — `plan.md:45`
+- [ ] (suggestion) `.agents/README.md` inventory/layout describe only `sea_surface_tuner`/`main.cpp`; the sidescan viewer is absent, so "add to the package inventory row" needs a viewer entry, not an append to the tuner row — `plan.md:51`
+- [ ] (suggestion) Flag naming: `sea_surface_tuner` already uses `--start-s`/`--end-s` (seconds); keep the viewer's suffix-free `--start`/`--end` and make the ns-or-ISO meaning explicit in `--help` — `plan.md:45`
+- [ ] (suggestion) Apply the cue at the END of the `done` block in `onIndexProgress()` (after the range is finalized at `sidescan_viewer_window.cpp:872`) and clear `pending_cue_*` there, so it isn't clobbered — `plan.md:43`
