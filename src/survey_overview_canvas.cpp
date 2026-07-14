@@ -17,6 +17,7 @@
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QResizeEvent>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -39,7 +40,10 @@ void SurveyOverviewCanvas::setTiles(std::vector<OverviewTile> tiles)
   tiles_ = std::move(tiles);
   have_mark_ = false;
   have_fit_ = false;
-  fitToTiles();
+  user_adjusted_ = false;
+  // Defer the fit to the first paint/resize: at ctor time (setTiles runs from
+  // the window ctor) the widget still has its pre-layout size, so fitting now
+  // would mis-scale the basemap. paintEvent refits lazily when !have_fit_.
   update();
 }
 
@@ -101,9 +105,22 @@ void SurveyOverviewCanvas::paintEvent(QPaintEvent * event)
   }
 }
 
+void SurveyOverviewCanvas::resizeEvent(QResizeEvent * event)
+{
+  QWidget::resizeEvent(event);
+  // Refit to the tile bounds whenever the widget is (re)sized, until the user
+  // takes control of the view. This is what makes the initial fit correct: the
+  // real laid-out size only exists after the first resize/show.
+  if (!user_adjusted_) {
+    have_fit_ = false;
+    update();
+  }
+}
+
 void SurveyOverviewCanvas::wheelEvent(QWheelEvent * event)
 {
   // Zoom about the cursor: keep the geographic point under it fixed.
+  user_adjusted_ = true;
   const double factor = (event->angleDelta().y() > 0) ? 1.25 : (1.0 / 1.25);
   const auto pos = event->position();
   const auto anchor = pixelToGeo(view_, pos.x(), pos.y(), width(), height());
@@ -136,6 +153,7 @@ void SurveyOverviewCanvas::mouseMoveEvent(QMouseEvent * event)
     moved_since_press_ = true;
   }
   last_mouse_ = event->pos();
+  user_adjusted_ = true;
   view_.center_lat += delta.y() / view_.px_per_deg_lat;
   view_.center_lon -= delta.x() / (view_.px_per_deg_lat * lonScale(view_));
   update();

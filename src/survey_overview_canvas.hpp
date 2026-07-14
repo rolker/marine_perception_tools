@@ -64,6 +64,7 @@ Q_SIGNALS:
 
 protected:
   void paintEvent(QPaintEvent * event) override;
+  void resizeEvent(QResizeEvent * event) override;
   void wheelEvent(QWheelEvent * event) override;
   void mousePressEvent(QMouseEvent * event) override;
   void mouseMoveEvent(QMouseEvent * event) override;
@@ -75,6 +76,10 @@ private:
   std::vector<OverviewTile> tiles_;
   GeoView view_;
   bool have_fit_ = false;
+  // Whether the user has zoomed/panned. Until they do, a resize refits to the
+  // tile bounds — the ctor-time widget size is pre-layout, so the first real
+  // fit must wait for a resize/first paint at the laid-out size.
+  bool user_adjusted_ = false;
 
   bool panning_ = false;
   bool moved_since_press_ = false;
