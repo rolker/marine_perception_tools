@@ -126,3 +126,19 @@ CLI error paths smoke-tested (basic-format date, bad ISO, lonely `--start`).
 Publish checkpoint approved by Roland. Branch `feature/issue-17` pushed;
 PR opened: https://github.com/rolker/marine_perception_tools/pull/18
 (base `jazzy`, `Closes #17`).
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-14 17:10 +00:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #18 at `1fcd4c6`
+**Sources**: 2 (Copilot R1 @ `1fcd4c6`; Local Review (Pre-Push) @ `1d0ef6a` — its 3 suggestions already adjudicated pre-publish)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test ✅)
+
+### Findings
+- [ ] (low, Copilot R1) `openBag()` stores cue bounds unvalidated — the CLI enforces both-or-neither, but the method is the public API stage 2 (#258) will call; a partial cue (one bound zero) swap-normalizes in `distance_interval()` into an unintended `[0, bound]` window. Defensively treat a partial cue as no cue in `openBag()` — `src/sidescan_viewer_window.cpp:837`
+
+### False positives
+- (Copilot R1) claimed `Qt::ISODateWithMs` rejects ISO input without fractional seconds (e.g. `2026-06-26T13:20:05Z`), breaking valid `--start/--end` — empirically disproven against the built binary: `--start 2026-06-26T13:20:05Z` parses (the CLI error correctly points at the deliberately-bad `--end`); Qt's `fromString` parses second-precision input under `ISODateWithMs` (the WithMs distinction affects `toString` formatting, not parsing)
