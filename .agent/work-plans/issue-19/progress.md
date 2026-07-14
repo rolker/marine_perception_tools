@@ -126,4 +126,20 @@ implementation in core_ws. Copilot off (default). Not built/tested here (core_ws
 unbuilt in this worktree); compile + gtest deferred to CI.
 
 ### Findings
-- [ ] (must-fix) Mixed-level-store handling is dead code / contradicts its claim: `loadTiles` loads every `.tif` at the chosen level and throws on any off-level tile, so a mixed store hits the catch (empty map + "failed to load") and never renders "lowest + warn" — the `level_warning` branch and `%5` placeholder are unreachable. Fix to match contract or drop the dead code + false comment/log claim — `src/survey_overview_window.cpp:238-247,294`
+- [x] (must-fix) Mixed-level-store handling is dead code / contradicts its claim: `loadTiles` loads every `.tif` at the chosen level and throws on any off-level tile, so a mixed store hits the catch (empty map + "failed to load") and never renders "lowest + warn" — the `level_warning` branch and `%5` placeholder are unreachable. Fix to match contract or drop the dead code + false comment/log claim — `src/survey_overview_window.cpp:238-247,294`
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-14 20:20 +00:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+Addressed the round-2 must-fix (host-inline):
+
+- [x] Store tiles now load per-tile (`tileRasterCount` + `loadTile`, per-tile
+  try/catch) instead of `loadTiles()`, which throws on any off-level tile and
+  made the mixed-level branch unreachable. Mixed stores genuinely render the
+  lowest level with the warning, a corrupt tile is skipped (and counted in the
+  status) instead of emptying the map — `src/survey_overview_window.cpp` (`ea2e8c3`)
+
+Verification: rebuild + full suite green — **272 tests, 0 failures, 41
+skipped**; real-data smoke (Massabesic index + survey store) alive at timeout.
