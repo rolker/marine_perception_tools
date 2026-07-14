@@ -102,3 +102,28 @@ Specialists: static analysis (cpplint clean; cppcheck syntaxError on TEST macros
 Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 19 --skill review-code
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-14 19:57 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-19 at `485e9cf`
+**Mode**: pre-push
+**Depth**: Deep (reason: >1000 changed lines / 15 files; correctness-critical cos(lat) geo projection; cross-package)
+**Must-fix**: 1 | **Suggestions**: 0
+**Round**: 2 | **Ship**: recommended — one contained, precise must-fix (down from 2 in round 1, not rising); address and ship rather than another full round
+
+Round-2 re-review. Verified all 6 round-1 findings (2 must-fix, 4 suggestions) are actually
+fixed in the diff (throwing tile loads guarded; fit deferred to laid-out size + resizeEvent
+refit; direct marine_autonomy dep; coalescePasses; permanent hover label). Static analysis
+clean (ament_cpplint + ament_uncrustify: no problems on all changed sources). Two fresh-context
+Claude adversarial passes: Lens B (systemic/safety) found nothing — SQLite handle lifecycle,
+unique_ptr/WA_DeleteOnClose window ownership, exception guarding, CMake/package.xml deps all
+sound. Lens A (logic) found one real defect, verified against the actual loadTiles/loadTile
+implementation in core_ws. Copilot off (default). Not built/tested here (core_ws underlay
+unbuilt in this worktree); compile + gtest deferred to CI.
+
+### Findings
+- [ ] (must-fix) Mixed-level-store handling is dead code / contradicts its claim: `loadTiles` loads every `.tif` at the chosen level and throws on any off-level tile, so a mixed store hits the catch (empty map + "failed to load") and never renders "lowest + warn" — the `level_warning` branch and `%5` placeholder are unreachable. Fix to match contract or drop the dead code + false comment/log claim — `src/survey_overview_window.cpp:238-247,294`
