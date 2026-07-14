@@ -918,7 +918,9 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
         std::nullopt;
       if (interval) {
         const double head = std::min(interval->first + window_len_m_, interval->second);
-        scrub_->setValue(static_cast<int>(std::lround(head)));   // triggers the render
+        // valueChanged re-renders on a move; if head equals the current value
+        // the earlier requestRender() in this handler already covers it.
+        scrub_->setValue(static_cast<int>(std::lround(head)));
         status_->setText(status_->text() + QString(" • cued to %1–%2 m")
           .arg(interval->first, 0, 'f', 0).arg(interval->second, 0, 'f', 0));
       } else {

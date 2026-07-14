@@ -91,8 +91,29 @@ issue: 17
 **Round**: 1 | **Ship**: recommended — no must-fix; feature is logically sound, well-tested, plan-adherent
 
 ### Findings
-- [ ] (suggestion) `parseCueBound` parses integer-ns before ISO, so a bare-digit ISO basic-format date (e.g. `20260714`) is silently taken as UNIX-ns and only surfaces as "matched no posed pings"; add a plausible-epoch/digit guard or try ISO first — `src/sidescan_viewer_main.cpp:38`
+- [x] (suggestion) `parseCueBound` parses integer-ns before ISO, so a bare-digit ISO basic-format date (e.g. `20260714`) is silently taken as UNIX-ns and only surfaces as "matched no posed pings"; add a plausible-epoch/digit guard or try ISO first — `src/sidescan_viewer_main.cpp:38`
 - [ ] (suggestion) `0 == no-cue` sentinel collides with a legit epoch-0 timestamp; an explicit `has_cue` bool would be cleaner than overloading `0` — `src/sidescan_viewer_main.cpp:32`
-- [ ] (suggestion) Comment `// triggers the render` overstates: no `valueChanged` fires when cued `head` equals the current scrub value (harmless — line-895 `requestRender()` already renders) — `src/sidescan_viewer_window.cpp:921`
+- [x] (suggestion) Comment `// triggers the render` overstates: no `valueChanged` fires when cued `head` equals the current scrub value (harmless — line-895 `requestRender()` already renders) — `src/sidescan_viewer_window.cpp:921`
 
 Notes: Static analysis clean (`ament_cpplint` "No problems found"; `cppcheck` findings all on untouched lines). Two independent adversarial passes (Lens A logic + Lens B systemic/safety) found no correctness or safety defects — verified the closed-interval binary search, snapshot-completeness ordering (`publishSnapshot(true)` precedes the `done` callback), trailing-window cue math, UTC handling, epoch/thread safety, and call-site coverage. Plan adherence: full match; both plan-review findings (optional return type; `head = min(lo+window_len, hi)` cue target) correctly implemented. All issue-review action items satisfied.
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-14 16:20 +00:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+Addressed 2 of the 3 round-1 suggestions (host-inline, five-minute fixes):
+
+- [x] Plausible-ns guard in `parseCueBound`: integers below 1e18 ns (pre-2001)
+  are no longer taken as stamps — `--start 20260714` now errors cleanly instead
+  of silently cueing to 1970 (smoke-verified) — `src/sidescan_viewer_main.cpp`
+- [x] Cue-apply comment corrected (no `valueChanged` fires when head equals the
+  current value; the handler's earlier `requestRender()` covers it) —
+  `src/sidescan_viewer_window.cpp`
+- Deferred with justification: the `0 == no-cue` sentinel stays — an epoch-0
+  stamp cannot occur in real bag data, a parse yielding 0 fails the plausible-ns
+  guard above, and threading a `has_cue` bool through `openBag()` adds signature
+  noise for a collision that cannot arise.
+
+Verification: rebuild + full suite green — **223 tests, 0 failures, 32 skipped**;
+CLI error paths smoke-tested (basic-format date, bad ISO, lonely `--start`).

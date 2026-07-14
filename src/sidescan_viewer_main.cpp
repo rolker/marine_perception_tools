@@ -26,17 +26,24 @@
 namespace
 {
 
+// Any real bag stamp in ns is ~1.7e18 (2020s); an integer below 1e18 (before
+// Sep 2001) is not a plausible ns stamp — more likely a mistyped or
+// basic-format ISO date (e.g. `20260714`), which must not be silently taken
+// as nanoseconds and "cue" to 1970.
+constexpr int64_t kMinPlausibleNs = 1000000000000000000LL;
+
 // Parse a cue bound: UNIX nanoseconds (bare integer) or ISO-8601. An ISO
 // string without a UTC offset is treated as UTC — bag stamps are UTC, and
 // silently interpreting operator input as local time would cue hours off.
-// Returns 0 and sets ok=false on unparseable input (0 is also the "no cue"
-// sentinel, so callers gate on ok).
+// Returns 0 and sets ok=false on unparseable (or implausible-ns) input; 0 is
+// also the "no cue" sentinel, which cannot collide with real data — an
+// epoch-0 stamp is no plausible bag time, and a parse yielding it fails here.
 int64_t parseCueBound(const QString & text, bool & ok)
 {
   ok = true;
   bool is_int = false;
   const qlonglong ns = text.toLongLong(&is_int);
-  if (is_int) {
+  if (is_int && ns >= kMinPlausibleNs) {
     return static_cast<int64_t>(ns);
   }
   QDateTime dt = QDateTime::fromString(text, Qt::ISODateWithMs);
