@@ -123,8 +123,8 @@ std::vector<CoalescedPass> coalescePasses(
       merged.back().ping_count += row.ping_count;
     } else {
       merged.push_back(CoalescedPass{
-        row.bag_path, row.sensor_type, row.topic,
-        row.t_start_ns, row.t_end_ns, row.ping_count});
+            row.bag_path, row.sensor_type, row.topic,
+            row.t_start_ns, row.t_end_ns, row.ping_count});
     }
   }
 
