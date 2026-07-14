@@ -117,3 +117,12 @@ Addressed 2 of the 3 round-1 suggestions (host-inline, five-minute fixes):
 
 Verification: rebuild + full suite green — **223 tests, 0 failures, 32 skipped**;
 CLI error paths smoke-tested (basic-format date, bad ISO, lonely `--start`).
+
+## Published
+**Status**: complete
+**When**: 2026-07-14
+**By**: Claude Code Agent (Claude Fable 5)
+
+Publish checkpoint approved by Roland. Branch `feature/issue-17` pushed;
+PR opened: https://github.com/rolker/marine_perception_tools/pull/18
+(base `jazzy`, `Closes #17`).
