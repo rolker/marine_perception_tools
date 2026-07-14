@@ -19,6 +19,7 @@ find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(geographic_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(marine_acoustic_msgs REQUIRED)
+find_package(marine_autonomy REQUIRED)
 find_package(marine_colormap REQUIRED)
 find_package(marine_contacts REQUIRED)
 find_package(marine_interfaces REQUIRED)
@@ -122,7 +123,9 @@ target_link_libraries(sidescan_probe sidescan_core)
 add_library(survey_index_bridge src/survey_index_bridge.cpp)
 target_include_directories(survey_index_bridge PUBLIC src)
 target_link_libraries(survey_index_bridge SQLite::SQLite3)
-ament_target_dependencies(survey_index_bridge marine_survey_index)
+# marine_autonomy is used directly (marine_autonomy/gggs.h) as well as
+# transitively via marine_survey_index; depend on it explicitly.
+ament_target_dependencies(survey_index_bridge marine_autonomy marine_survey_index)
 
 add_executable(sidescan_target_viewer
   src/sidescan_viewer_main.cpp
@@ -141,7 +144,7 @@ target_link_libraries(sidescan_target_viewer
   Qt${QT_VERSION_MAJOR}::Gui
   Qt${QT_VERSION_MAJOR}::OpenGL)
 ament_target_dependencies(sidescan_target_viewer
-  marine_colormap marine_sonar_widgets marine_tiled_raster_store)
+  marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
 
 install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
