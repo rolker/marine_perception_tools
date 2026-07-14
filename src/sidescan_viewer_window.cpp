@@ -815,7 +815,8 @@ void SidescanViewerWindow::onOpenBag()
   if (!dir.isEmpty()) {openBag(dir.toStdString());}
 }
 
-void SidescanViewerWindow::openBag(const std::string & bag_uri)
+void SidescanViewerWindow::openBag(
+  const std::string & bag_uri, int64_t cue_start_ns, int64_t cue_end_ns)
 {
   // Construct the session cheaply (open + validate) on the UI thread so a bad bag
   // surfaces immediately; then index in the background, growing the usable scrub
@@ -828,6 +829,12 @@ void SidescanViewerWindow::openBag(const std::string & bag_uri)
     QMessageBox::critical(this, "Open bag failed", QString::fromStdString(e.what()));
     return;
   }
+
+  // Jump-to-pass cue: remembered here, applied once indexing completes (the
+  // time→distance mapping needs the finished index). Reset on every open so a
+  // bag opened later via the menu doesn't inherit a stale cue.
+  pending_cue_start_ns_ = cue_start_ns;
+  pending_cue_end_ns_ = cue_end_ns;
 
   // A previously-running indexer keeps running on its own captured session; bump the
   // epoch so its queued progress is ignored from here on.
@@ -899,6 +906,27 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
       .arg(session_->totalDistance(), 0, 'f', 1)
       .arg(session_->usedNadirDepth() ? "nadir_depth" : "estimator")
       .arg(session_->hasGeoReference() ? "yes" : "no"));
+    // Apply a pending jump-to-pass cue now that the scrub range is final. The
+    // scrub head paints the TRAILING window [head − window_len, head], so cue
+    // head = min(lo + window_len, hi): a pass shorter than the window lands
+    // fully in view (with leading context); a longer one opens on its first
+    // window-length.
+    if (pending_cue_start_ns_ != 0 || pending_cue_end_ns_ != 0) {
+      const auto snapshot = session_->snapshot();
+      const auto interval = snapshot ?
+        distance_interval(*snapshot, pending_cue_start_ns_, pending_cue_end_ns_) :
+        std::nullopt;
+      if (interval) {
+        const double head = std::min(interval->first + window_len_m_, interval->second);
+        scrub_->setValue(static_cast<int>(std::lround(head)));   // triggers the render
+        status_->setText(status_->text() + QString(" • cued to %1–%2 m")
+          .arg(interval->first, 0, 'f', 0).arg(interval->second, 0, 'f', 0));
+      } else {
+        status_->setText(status_->text() + " • cue window matched no posed pings");
+      }
+      pending_cue_start_ns_ = 0;
+      pending_cue_end_ns_ = 0;
+    }
   } else {
     status_->setText(QString("Indexing… %1 m resolved").arg(resolved_m, 0, 'f', 0));
   }
