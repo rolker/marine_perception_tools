@@ -832,9 +832,13 @@ void SidescanViewerWindow::openBag(
 
   // Jump-to-pass cue: remembered here, applied once indexing completes (the
   // time→distance mapping needs the finished index). Reset on every open so a
-  // bag opened later via the menu doesn't inherit a stale cue.
-  pending_cue_start_ns_ = cue_start_ns;
-  pending_cue_end_ns_ = cue_end_ns;
+  // bag opened later via the menu doesn't inherit a stale cue. The contract is
+  // both-or-neither (the CLI enforces it; programmatic callers may not): a
+  // partial cue would swap-normalize into an unintended [0, bound] window, so
+  // treat it as no cue.
+  const bool has_cue = cue_start_ns != 0 && cue_end_ns != 0;
+  pending_cue_start_ns_ = has_cue ? cue_start_ns : 0;
+  pending_cue_end_ns_ = has_cue ? cue_end_ns : 0;
 
   // A previously-running indexer keeps running on its own captured session; bump the
   // epoch so its queued progress is ignored from here on.

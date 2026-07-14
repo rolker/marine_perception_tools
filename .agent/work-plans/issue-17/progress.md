@@ -138,7 +138,19 @@ PR opened: https://github.com/rolker/marine_perception_tools/pull/18
 **CI**: all-pass (build-and-test ✅)
 
 ### Findings
-- [ ] (low, Copilot R1) `openBag()` stores cue bounds unvalidated — the CLI enforces both-or-neither, but the method is the public API stage 2 (#258) will call; a partial cue (one bound zero) swap-normalizes in `distance_interval()` into an unintended `[0, bound]` window. Defensively treat a partial cue as no cue in `openBag()` — `src/sidescan_viewer_window.cpp:837`
+- [x] (low, Copilot R1) `openBag()` stores cue bounds unvalidated — the CLI enforces both-or-neither, but the method is the public API stage 2 (#258) will call; a partial cue (one bound zero) swap-normalizes in `distance_interval()` into an unintended `[0, bound]` window. Defensively treat a partial cue as no cue in `openBag()` — `src/sidescan_viewer_window.cpp:837`
 
 ### False positives
 - (Copilot R1) claimed `Qt::ISODateWithMs` rejects ISO input without fractional seconds (e.g. `2026-06-26T13:20:05Z`), breaking valid `--start/--end` — empirically disproven against the built binary: `--start 2026-06-26T13:20:05Z` parses (the CLI error correctly points at the deliberately-bad `--end`); Qt's `fromString` parses second-precision input under `ISODateWithMs` (the WithMs distinction affects `toString` formatting, not parsing)
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-14 17:25 +00:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+- [x] `openBag()` treats a partial cue (either bound zero) as no cue — guards
+  the public API seam stage 2 (#258) will call directly —
+  `src/sidescan_viewer_window.cpp`
+
+Verification: rebuild + full suite green — **223 tests, 0 failures, 32 skipped**.
+Merge authorized by Roland ("fix it, then push and merge").
