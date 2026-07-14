@@ -77,3 +77,22 @@ issue: 17
 - [ ] (suggestion) `.agents/README.md` inventory/layout describe only `sea_surface_tuner`/`main.cpp`; the sidescan viewer is absent, so "add to the package inventory row" needs a viewer entry, not an append to the tuner row — `plan.md:51`
 - [ ] (suggestion) Flag naming: `sea_surface_tuner` already uses `--start-s`/`--end-s` (seconds); keep the viewer's suffix-free `--start`/`--end` and make the ns-or-ISO meaning explicit in `--help` — `plan.md:45`
 - [ ] (suggestion) Apply the cue at the END of the `done` block in `onIndexProgress()` (after the range is finalized at `sidescan_viewer_window.cpp:872`) and clear `pending_cue_*` there, so it isn't clobbered — `plan.md:43`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-14 16:04 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-17 at `1d0ef6a`
+**Mode**: pre-push
+**Depth**: Standard (reason: medium C++ change, single package, no security/cross-layer signals)
+**Must-fix**: 0 | **Suggestions**: 3
+**Round**: 1 | **Ship**: recommended — no must-fix; feature is logically sound, well-tested, plan-adherent
+
+### Findings
+- [ ] (suggestion) `parseCueBound` parses integer-ns before ISO, so a bare-digit ISO basic-format date (e.g. `20260714`) is silently taken as UNIX-ns and only surfaces as "matched no posed pings"; add a plausible-epoch/digit guard or try ISO first — `src/sidescan_viewer_main.cpp:38`
+- [ ] (suggestion) `0 == no-cue` sentinel collides with a legit epoch-0 timestamp; an explicit `has_cue` bool would be cleaner than overloading `0` — `src/sidescan_viewer_main.cpp:32`
+- [ ] (suggestion) Comment `// triggers the render` overstates: no `valueChanged` fires when cued `head` equals the current scrub value (harmless — line-895 `requestRender()` already renders) — `src/sidescan_viewer_window.cpp:921`
+
+Notes: Static analysis clean (`ament_cpplint` "No problems found"; `cppcheck` findings all on untouched lines). Two independent adversarial passes (Lens A logic + Lens B systemic/safety) found no correctness or safety defects — verified the closed-interval binary search, snapshot-completeness ordering (`publishSnapshot(true)` precedes the `done` callback), trailing-window cue math, UTC handling, epoch/thread safety, and call-site coverage. Plan adherence: full match; both plan-review findings (optional return type; `head = min(lo+window_len, hi)` cue target) correctly implemented. All issue-review action items satisfied.
