@@ -19,6 +19,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QString>
+#include <QStringList>
 #include <QTimeZone>
 
 #include <algorithm>
@@ -181,39 +182,62 @@ SurveyOverviewWindow::SurveyOverviewWindow(
 
 void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
 {
-  // The tile level is encoded in the filenames (<level>_<row>_<col>.tif);
-  // read it off the first tile so any store level renders. A missing or
-  // empty directory degrades to an empty map — the pass query still works.
+  // The tile level is encoded in the filenames (<level>_<row>_<col>.tif). A
+  // store should hold a single level; scan every tile so we render one level
+  // deterministically (the lowest) and can warn when the directory mixes
+  // levels — otherwise the other levels vanish silently. A missing or empty
+  // directory degrades to an empty map — the pass query still works.
   std::error_code ec;
-  int level = -1;
-  int band_count = 0;
+  std::map<int, std::string> level_sample;   // level -> a representative tile
   for (const auto & entry : std::filesystem::directory_iterator(stores_dir, ec)) {
     const auto name = entry.path().filename().string();
     if (entry.path().extension() != ".tif" || name.find('_') == std::string::npos) {
       continue;
     }
     try {
-      level = std::stoi(name.substr(0, name.find('_')));
+      level_sample.emplace(
+        std::stoi(name.substr(0, name.find('_'))), entry.path().string());
     } catch (const std::exception &) {
       continue;
     }
-    // tileRasterCount opens the GeoTIFF and @throws on a corrupt/unreadable
-    // tile. Degrade to an empty map (the pass query still works) rather than
-    // letting one bad tile abort the whole overview window's construction.
-    try {
-      band_count = marine_tiled_raster_store::tileRasterCount(entry.path().string());
-    } catch (const std::exception & e) {
-      status_->setText(QString("Failed to read store tile %1: %2 — map is empty; "
-        "pass queries still work.")
-        .arg(QString::fromStdString(entry.path().string())).arg(e.what()));
-      return;
-    }
-    break;
   }
-  if (level < 0 || band_count < 1) {
+  if (level_sample.empty()) {
     status_->setText(QString("No store tiles found under %1 — map is empty; "
       "pass queries still work.").arg(QString::fromStdString(stores_dir)));
     return;
+  }
+
+  const int level = level_sample.begin()->first;   // render the lowest level
+  int band_count = 0;
+  // tileRasterCount opens the GeoTIFF and @throws on a corrupt/unreadable
+  // tile. Degrade to an empty map (the pass query still works) rather than
+  // letting one bad tile abort the whole overview window's construction.
+  try {
+    band_count =
+      marine_tiled_raster_store::tileRasterCount(level_sample.begin()->second);
+  } catch (const std::exception & e) {
+    status_->setText(QString("Failed to read store tile %1: %2 — map is empty; "
+      "pass queries still work.")
+      .arg(QString::fromStdString(level_sample.begin()->second)).arg(e.what()));
+    return;
+  }
+  if (band_count < 1) {
+    status_->setText(QString("No store tiles found under %1 — map is empty; "
+      "pass queries still work.").arg(QString::fromStdString(stores_dir)));
+    return;
+  }
+
+  // Warn when the store mixes levels: only `level` is rendered, so name the
+  // ignored ones instead of dropping them without a trace.
+  QString level_warning;
+  if (level_sample.size() > 1) {
+    QStringList others;
+    for (const auto & [lvl, sample] : level_sample) {
+      if (lvl != level) {
+        others << QString::number(lvl);
+      }
+    }
+    level_warning = QString(" (mixed store: ignoring levels %1)").arg(others.join(", "));
   }
 
   std::map<gggs::GridIndex, marine_tiled_raster_store::TiledRasterTile<double>> tiles;
@@ -260,8 +284,10 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
     overview.push_back(std::move(out));
   }
   canvas_->setTiles(std::move(overview));
-  status_->setText(QString("%1 store tiles (L%2), depth %3–%4 m — click to query passes.")
-    .arg(tiles.size()).arg(level).arg(lo, 0, 'f', 1).arg(hi, 0, 'f', 1));
+  status_->setText(
+    QString("%1 store tiles (L%2), depth %3–%4 m — click to query passes.%5")
+    .arg(tiles.size()).arg(level).arg(lo, 0, 'f', 1).arg(hi, 0, 'f', 1)
+    .arg(level_warning));
 }
 
 void SurveyOverviewWindow::onMapClicked(double lat, double lon)
