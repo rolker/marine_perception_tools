@@ -138,7 +138,17 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
     } catch (const std::exception &) {
       continue;
     }
-    band_count = marine_tiled_raster_store::tileRasterCount(entry.path().string());
+    // tileRasterCount opens the GeoTIFF and @throws on a corrupt/unreadable
+    // tile. Degrade to an empty map (the pass query still works) rather than
+    // letting one bad tile abort the whole overview window's construction.
+    try {
+      band_count = marine_tiled_raster_store::tileRasterCount(entry.path().string());
+    } catch (const std::exception & e) {
+      status_->setText(QString("Failed to read store tile %1: %2 — map is empty; "
+        "pass queries still work.")
+        .arg(QString::fromStdString(entry.path().string())).arg(e.what()));
+      return;
+    }
     break;
   }
   if (level < 0 || band_count < 1) {
@@ -148,8 +158,17 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
   }
 
   std::map<gggs::GridIndex, marine_tiled_raster_store::TiledRasterTile<double>> tiles;
-  marine_tiled_raster_store::loadTiles<double>(
-    tiles, stores_dir, static_cast<std::uint8_t>(level), band_count);
+  // loadTiles @throws if any tile fails to decode; same graceful-degradation
+  // contract — a broken store leaves an empty map, not a dead window.
+  try {
+    marine_tiled_raster_store::loadTiles<double>(
+      tiles, stores_dir, static_cast<std::uint8_t>(level), band_count);
+  } catch (const std::exception & e) {
+    status_->setText(QString("Failed to load store tiles from %1: %2 — map is empty; "
+      "pass queries still work.")
+      .arg(QString::fromStdString(stores_dir)).arg(e.what()));
+    return;
+  }
 
   // One shared depth range across the survey so colours are comparable
   // between tiles.
