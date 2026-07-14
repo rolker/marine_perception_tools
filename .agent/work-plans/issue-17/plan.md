@@ -100,6 +100,28 @@ description and in a code comment on `openBag()`.
 | CLI arguments added | `.agents/README.md` package inventory | Yes |
 | New free function in `sidescan_bag_session.hpp` | No downstream consumers outside this package | N/A |
 
+## Decisions (plan review, 2026-07-14)
+
+- **Cue target (review must-fix)**: the scrub head paints the TRAILING window
+  `[head − window_len, head]`, so cueing `head = dist_lo` would show the track
+  *before* the pass. Cue `head = min(dist_lo + window_len_m_, dist_hi)`: a pass
+  shorter than the window is fully in view (with leading context); a longer pass
+  opens on its first window-length.
+- **`distance_interval()` returns `std::optional<std::pair<double,double>>`**
+  (refines the planned bare pair): `nullopt` when no *posed* ping falls in the
+  window (outside the bag's time range / nothing resolved) — the caller reports
+  "cue window outside bag" instead of silently cueing to 0. Zero bounds = no cue,
+  handled by the caller before calling.
+- **ISO-8601 parse forces UTC (review suggestion)**: `QDateTime::fromString(s,
+  Qt::ISODateWithMs)`; invalid → clear CLI error; a string without an offset
+  parses as LocalTime → reinterpreted as UTC via `setTimeSpec(Qt::UTC)`.
+- **Flags stay `--start`/`--end`** (suffix-free, unlike sea_surface_tuner's
+  `--start-s` seconds flags); the ns-or-ISO meaning is explicit in `--help`.
+- **Cue applies at the END of the `done` block** in `onIndexProgress()` (after
+  the range is finalized) and `pending_cue_*` are cleared there.
+- **`.agents/README.md` gets a viewer entry** (the inventory currently describes
+  only sea_surface_tuner), not an append to the tuner row.
+
 ## Open Questions
 
 - None. The acceptance criterion allows documenting the full-bag metadata scan rather
