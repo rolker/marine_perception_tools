@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -80,6 +81,64 @@ QImage tileToImage(
     }
   }
   return image;
+}
+
+// One physical pass over the queried spot. queryPasses returns one PassRow per
+// (pass, tile), so a transit that crosses several tiles inside the query box
+// comes back as several per-tile segments.
+struct CoalescedPass
+{
+  std::string bag_path;
+  std::string sensor_type;
+  std::string topic;
+  std::int64_t t_start_ns = 0;
+  std::int64_t t_end_ns = 0;
+  std::int64_t ping_count = 0;
+};
+
+// Merge the per-tile segments so the pass list shows one row per physical pass.
+// Segments sharing (bag, sensor, topic) whose time windows overlap or sit
+// within kSegmentGapNs are one transit across adjacent tiles (their windows are
+// back-to-back); a genuine revisit of the same spot is separated by far more,
+// so it stays a distinct entry. Ping counts of merged segments are summed.
+// Result is ordered by bag then start, matching the queryPasses contract the
+// list build relies on.
+std::vector<CoalescedPass> coalescePasses(
+  const std::vector<marine_survey_index::PassRow> & rows)
+{
+  // 5 s comfortably spans the inter-tile ping gap within one transit without
+  // bridging two separate visits (survey revisits are minutes apart).
+  constexpr std::int64_t kSegmentGapNs = 5LL * 1000000000LL;
+
+  // rows arrive ordered by bag then t_start; bucket by (bag, sensor, topic) —
+  // filtering that order per bucket keeps each bucket sorted by t_start, so a
+  // running interval-merge against the last segment is correct.
+  std::map<std::tuple<std::string, std::string, std::string>,
+    std::vector<CoalescedPass>> buckets;
+  for (const auto & row : rows) {
+    auto & merged = buckets[{row.bag_path, row.sensor_type, row.topic}];
+    if (!merged.empty() && row.t_start_ns <= merged.back().t_end_ns + kSegmentGapNs) {
+      merged.back().t_end_ns = std::max(merged.back().t_end_ns, row.t_end_ns);
+      merged.back().ping_count += row.ping_count;
+    } else {
+      merged.push_back(CoalescedPass{
+        row.bag_path, row.sensor_type, row.topic,
+        row.t_start_ns, row.t_end_ns, row.ping_count});
+    }
+  }
+
+  std::vector<CoalescedPass> passes;
+  for (auto & [key, merged] : buckets) {
+    passes.insert(passes.end(), merged.begin(), merged.end());
+  }
+  std::sort(passes.begin(), passes.end(),
+    [](const CoalescedPass & a, const CoalescedPass & b) {
+      if (a.bag_path != b.bag_path) {
+        return a.bag_path < b.bag_path;
+      }
+      return a.t_start_ns < b.t_start_ns;
+    });
+  return passes;
 }
 
 }  // namespace
@@ -222,32 +281,32 @@ void SurveyOverviewWindow::onMapClicked(double lat, double lon)
     return;
   }
 
-  // Group by bag (rows arrive ordered by bag path, then time).
+  const auto passes = coalescePasses(rows);
+
+  // Group by bag (passes are ordered by bag path, then time).
   QTreeWidgetItem * bag_item = nullptr;
   QString current_bag;
-  int pass_count = 0;
-  for (const auto & row : rows) {
-    const QString bag = QString::fromStdString(row.bag_path);
-    if (bag != current_bag) {
+  for (const auto & pass : passes) {
+    const QString bag = QString::fromStdString(pass.bag_path);
+    if (bag_item == nullptr || bag != current_bag) {
       current_bag = bag;
       bag_item = new QTreeWidgetItem(pass_list_, {bag});
       bag_item->setFirstColumnSpanned(true);
       bag_item->setExpanded(true);
     }
     const double duration_s =
-      static_cast<double>(row.t_end_ns - row.t_start_ns) / 1e9;
+      static_cast<double>(pass.t_end_ns - pass.t_start_ns) / 1e9;
     auto * item = new QTreeWidgetItem(bag_item, {
-        isoUtc(row.t_start_ns),
+        isoUtc(pass.t_start_ns),
         QString("%1 s").arg(duration_s, 0, 'f', 1),
-        QString::number(row.ping_count),
-        QString::fromStdString(row.sensor_type)});
+        QString::number(pass.ping_count),
+        QString::fromStdString(pass.sensor_type)});
     item->setData(0, Qt::UserRole, bag);
-    item->setData(1, Qt::UserRole, QVariant::fromValue<qlonglong>(row.t_start_ns));
-    item->setData(2, Qt::UserRole, QVariant::fromValue<qlonglong>(row.t_end_ns));
-    ++pass_count;
+    item->setData(1, Qt::UserRole, QVariant::fromValue<qlonglong>(pass.t_start_ns));
+    item->setData(2, Qt::UserRole, QVariant::fromValue<qlonglong>(pass.t_end_ns));
   }
   status_->setText(QString("%1 passes at %2, %3 — double-click one to open it.")
-    .arg(pass_count).arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
+    .arg(passes.size()).arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
 }
 
 void SurveyOverviewWindow::onPassActivated(QTreeWidgetItem * item, int)
