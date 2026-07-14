@@ -58,6 +58,7 @@ private:
   SurveyOverviewCanvas * canvas_ = nullptr;
   QTreeWidget * pass_list_ = nullptr;
   QLabel * status_ = nullptr;
+  QLabel * hover_ = nullptr;
 };
 
 }  // namespace marine_perception_tools

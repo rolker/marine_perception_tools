@@ -169,6 +169,12 @@ SurveyOverviewWindow::SurveyOverviewWindow(
   statusBar()->addWidget(status_, 1);
   status_->setText("Click the map to list the passes that saw that spot.");
 
+  // The hover read-out is a permanent widget so it doesn't disturb (or get
+  // hidden by) the main status_ label the way a transient statusBar message
+  // would on every mouse-move.
+  hover_ = new QLabel(this);
+  statusBar()->addPermanentWidget(hover_);
+
   connect(canvas_, &SurveyOverviewCanvas::clicked,
     this, &SurveyOverviewWindow::onMapClicked);
   connect(canvas_, &SurveyOverviewCanvas::hoverGeo,
@@ -353,8 +359,7 @@ void SurveyOverviewWindow::onPassActivated(QTreeWidgetItem * item, int)
 
 void SurveyOverviewWindow::onHoverGeo(double lat, double lon)
 {
-  statusBar()->showMessage(
-    QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6), 2000);
+  hover_->setText(QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
 }
 
 }  // namespace marine_perception_tools
