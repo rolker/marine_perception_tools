@@ -32,3 +32,23 @@ issue: 19
 ### Open questions
 - [ ] Tile load path: confirm `--stores <dir>` subdirectory naming (e.g. `bathymetry/`) for bathy GeoTIFFs
 - [ ] Colormap for depth basemap: which `marine_colormap` palette to use by default
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-14 17:32 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-19/plan.md` at `16f7797`
+**PR**: PR-less (`--issue` mode)
+**Verdict**: changes-requested
+
+Architecturally sound: correct decomposition (headless testable bridge / Qt
+canvas / window / CLI), accurate file targeting, and referenced dep APIs
+(`tilesForBoundingBox`, `queryPasses`, `loadTiles`, `PassRow`) verified present
+in `core_ws`. Two review-issue findings did not make it into the plan; both are
+small inline amendments, not structural rework.
+
+### Findings
+- [ ] (must-fix) `package.xml` not updated — plan adds `marine_survey_index`, `marine_tiled_raster_store`, SQLite3 to CMakeLists only; needs `<depend>marine_survey_index</depend>`, `<depend>marine_tiled_raster_store</depend>`, `<depend>libsqlite3-dev</depend>` or rosdep/ament resolution breaks (review-issue action #3) — `plan.md:52` (Files-to-Change) & `plan.md:84` (Consequences)
+- [ ] (suggestion) Tile-placement verification unscoped (review-issue action #5) — the `cos(lat)` lat/lon→pixel projection is correctness-critical but untested; extract it as a pure unit-testable function or document a manual acceptance check — `plan.md:46`, `plan.md:70`
+- [ ] (suggestion) Note SQLite3 `target_link_libraries` linking (not just `find_package`) in the CMake change — `plan.md:44`
