@@ -108,3 +108,22 @@ Deviations from plan, both found by the real-data smoke:
 
 Verified: 311 tests / 0 failures (was 274); overview offscreen smoke;
 real-bag windowed reads at two positions in a 2.5 GB Massabesic bag.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-15 19:07 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-21 at `217c81d`
+**Mode**: pre-push
+**Depth**: Deep (reason: 1386 lines changed ≥200 and 15 code files ≥10; `.agents/README.md` override-trigger)
+**Must-fix**: 0 | **Suggestions**: 5
+**Round**: 1 | **Ship**: recommended — no must-fix; static/governance/plan-drift/2× adversarial all clean, suggestions are optional hardening/parity
+
+### Findings
+- [ ] (suggestion) Add `MbesCloudWindow` destructor with `waitForFinished()` for shutdown parity with sibling worker-thread windows (not a UAF — worker is static + snapshot copy) — `src/mbes_cloud_window.cpp`
+- [ ] (suggestion) Add reversed-window (`t_start > t_end`) swap to match the `readMbesWindow` precedent — `src/mbes_window_reader.cpp:374`
+- [ ] (suggestion) Skip the redundant first color rebuild in `setMultiPassPoints` — `src/point_cloud_view.cpp:170`
+- [ ] (suggestion) Validate `strtoll` parse (endptr) in the `--mbes-window` probe path — `src/sidescan_probe.cpp:891`
+- [ ] (suggestion) Track a separate doc task for a top-level README `sidescan_target_viewer` section (not a #21 gap) — `README.md`
