@@ -17,6 +17,7 @@
 
 #include <QLabel>
 #include <QMainWindow>
+#include <QString>
 #include <QTreeWidget>
 
 #include <memory>
@@ -41,7 +42,8 @@ public:
   // index_path: survey_index.db. stores_dir: a directory containing GGGS
   // store GeoTIFF tiles (e.g. <stores>/bathymetry/survey). Throws
   // std::runtime_error when the index can't be opened; a missing/empty
-  // stores dir degrades to an empty map (the pass query still works).
+  // stores dir degrades to an empty map fitted to the index extent, so
+  // click-to-query still works (unless the index itself holds no passes).
   SurveyOverviewWindow(
     const std::string & index_path, const std::string & stores_dir,
     QWidget * parent = nullptr);
@@ -53,6 +55,7 @@ private Q_SLOTS:
 
 private:
   void loadStoreTiles(const std::string & stores_dir);
+  void fitCanvasToIndexExtent(const QString & why_empty);
 
   std::unique_ptr<SurveyIndexBridge> bridge_;
   SurveyOverviewCanvas * canvas_ = nullptr;

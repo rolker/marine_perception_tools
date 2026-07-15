@@ -15,6 +15,7 @@
 #ifndef SURVEY_INDEX_BRIDGE_HPP_
 #define SURVEY_INDEX_BRIDGE_HPP_
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,16 @@ struct sqlite3;
 
 namespace marine_perception_tools
 {
+
+// A geographic bounding box in degrees (south/west inclusive corners of the
+// covered GGGS tiles).
+struct GeoExtent
+{
+  double south = 0.0;
+  double west = 0.0;
+  double north = 0.0;
+  double east = 0.0;
+};
 
 // Headless bridge from a map click to the survey index: owns the
 // `survey_index.db` connection and answers "which passes saw this point?"
@@ -47,6 +58,11 @@ public:
   // time. Empty when the spot was never ensonified.
   std::vector<marine_survey_index::PassRow> queryPoint(
     double lat, double lon, double radius_m = 25.0) const;
+
+  // Union of the geographic bounds of every indexed pass tile — what the
+  // overview fits its view to when no store tiles are available, so the map
+  // click can still be aimed. nullopt when the index holds no passes.
+  std::optional<GeoExtent> extent() const;
 
 private:
   sqlite3 * db_ = nullptr;

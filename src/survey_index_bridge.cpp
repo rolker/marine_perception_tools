@@ -18,6 +18,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -59,6 +62,52 @@ std::vector<marine_survey_index::PassRow> SurveyIndexBridge::queryPoint(
     tiles.insert(tiles.end(), level_tiles.begin(), level_tiles.end());
   }
   return marine_survey_index::queryPasses(db_, tiles, "");
+}
+
+std::optional<GeoExtent> SurveyIndexBridge::extent() const
+{
+  // gggs::GridIndex knows its own bounds but its (level, row, col) constructor
+  // is private, so mirror its accessors using the public gggs::levels specs.
+  // The formulas must stay in lockstep with GridIndex::southLatitude() etc. —
+  // the bridge test pins them against a GridIndex built from coordinates.
+  sqlite3_stmt * stmt = nullptr;
+  if (sqlite3_prepare_v2(
+      db_, "SELECT DISTINCT level, tile_row, tile_col FROM passes;",
+      -1, &stmt, nullptr) != SQLITE_OK)
+  {
+    throw std::runtime_error(
+      std::string("survey index extent query failed: ") + sqlite3_errmsg(db_));
+  }
+  std::optional<GeoExtent> box;
+  int rc;
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    const auto level = sqlite3_column_int64(stmt, 0);
+    const auto row = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 1));
+    const auto col = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 2));
+    if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size()) {
+      continue;   // out-of-contract row; the schema check already vouched for v1
+    }
+    const auto & spec = gggs::levels[level];
+    const double south = std::clamp(-96.0 + row * spec.grid_angular_span, -90.0, 90.0);
+    const double north = std::clamp(-96.0 + (row + 1) * spec.grid_angular_span, -90.0, 90.0);
+    const double lon_span = spec.gridLongitudinalSpan(row);
+    const double west = -180.0 + col * lon_span;
+    const double east = -180.0 + (col + 1) * lon_span;
+    if (!box) {
+      box = GeoExtent{south, west, north, east};
+    } else {
+      box->south = std::min(box->south, south);
+      box->west = std::min(box->west, west);
+      box->north = std::max(box->north, north);
+      box->east = std::max(box->east, east);
+    }
+  }
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_DONE) {
+    throw std::runtime_error(
+      std::string("survey index extent scan failed: ") + sqlite3_errmsg(db_));
+  }
+  return box;
 }
 
 }  // namespace marine_perception_tools

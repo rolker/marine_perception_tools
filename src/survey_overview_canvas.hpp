@@ -53,6 +53,12 @@ public:
   // Replaces the tile set and refits the view to its bounds.
   void setTiles(std::vector<OverviewTile> tiles);
 
+  // Geographic bounds to fit when there are no tiles (e.g. the survey-index
+  // extent while no store tiles are loadable) — keeps clicks and hover
+  // aimable on an otherwise empty map. Without tiles AND without fallback
+  // bounds the canvas has no geo frame, so all geo interactions are inert.
+  void setFallbackBounds(double south, double west, double north, double east);
+
   // Marks the last-queried point (drawn as a crosshair); invalidated by setTiles.
   void setQueryMark(double lat, double lon);
 
@@ -76,6 +82,11 @@ private:
   std::vector<OverviewTile> tiles_;
   GeoView view_;
   bool have_fit_ = false;
+  bool have_fallback_ = false;
+  double fallback_south_ = 0.0;
+  double fallback_west_ = 0.0;
+  double fallback_north_ = 0.0;
+  double fallback_east_ = 0.0;
   // Whether the user has zoomed/panned. Until they do, a resize refits to the
   // tile bounds — the ctor-time widget size is pre-layout, so the first real
   // fit must wait for a resize/first paint at the laid-out size.

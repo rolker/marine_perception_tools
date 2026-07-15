@@ -47,6 +47,20 @@ void SurveyOverviewCanvas::setTiles(std::vector<OverviewTile> tiles)
   update();
 }
 
+void SurveyOverviewCanvas::setFallbackBounds(
+  double south, double west, double north, double east)
+{
+  have_fallback_ = true;
+  fallback_south_ = south;
+  fallback_west_ = west;
+  fallback_north_ = north;
+  fallback_east_ = east;
+  if (!user_adjusted_) {
+    have_fit_ = false;   // let the next paint refit against the new bounds
+  }
+  update();
+}
+
 void SurveyOverviewCanvas::setQueryMark(double lat, double lon)
 {
   have_mark_ = true;
@@ -58,7 +72,13 @@ void SurveyOverviewCanvas::setQueryMark(double lat, double lon)
 void SurveyOverviewCanvas::fitToTiles()
 {
   if (tiles_.empty()) {
-    return;
+    if (have_fallback_) {
+      view_ = fitView(
+        fallback_south_, fallback_west_, fallback_north_, fallback_east_,
+        width(), height());
+      have_fit_ = true;
+    }
+    return;   // no tiles and no fallback: no geo frame — stay unfit
   }
   double south = std::numeric_limits<double>::max();
   double west = std::numeric_limits<double>::max();
@@ -79,13 +99,19 @@ void SurveyOverviewCanvas::paintEvent(QPaintEvent * event)
   Q_UNUSED(event);
   QPainter painter(this);
   painter.fillRect(rect(), QColor(24, 26, 30));
-  if (tiles_.empty()) {
-    painter.setPen(Qt::gray);
-    painter.drawText(rect(), Qt::AlignCenter, "No store tiles loaded");
-    return;
-  }
   if (!have_fit_) {
     fitToTiles();
+  }
+  if (tiles_.empty()) {
+    painter.setPen(Qt::gray);
+    painter.drawText(
+      rect(), Qt::AlignCenter,
+      have_fit_ ?
+      "No store tiles loaded — click anywhere to query passes" :
+      "No store tiles loaded");
+    if (!have_fit_) {
+      return;   // no geo frame: nothing further can be drawn meaningfully
+    }
   }
   painter.setRenderHint(QPainter::SmoothPixmapTransform);
   for (const auto & tile : tiles_) {
@@ -119,6 +145,9 @@ void SurveyOverviewCanvas::resizeEvent(QResizeEvent * event)
 
 void SurveyOverviewCanvas::wheelEvent(QWheelEvent * event)
 {
+  if (!have_fit_) {
+    return;   // no geo frame yet: zooming a default view would lock in garbage
+  }
   // Zoom about the cursor: keep the geographic point under it fixed.
   user_adjusted_ = true;
   const double factor = (event->angleDelta().y() > 0) ? 1.25 : (1.0 / 1.25);
@@ -143,6 +172,9 @@ void SurveyOverviewCanvas::mousePressEvent(QMouseEvent * event)
 
 void SurveyOverviewCanvas::mouseMoveEvent(QMouseEvent * event)
 {
+  if (!have_fit_) {
+    return;   // no geo frame yet: hover/pan through the default view is noise
+  }
   const auto geo = pixelToGeo(view_, event->pos().x(), event->pos().y(), width(), height());
   Q_EMIT hoverGeo(geo.first, geo.second);
   if (!panning_) {
@@ -165,7 +197,7 @@ void SurveyOverviewCanvas::mouseReleaseEvent(QMouseEvent * event)
     return;
   }
   panning_ = false;
-  if (!moved_since_press_) {   // a click, not a pan
+  if (!moved_since_press_ && have_fit_) {   // a click, not a pan
     const auto geo = pixelToGeo(view_, event->pos().x(), event->pos().y(), width(), height());
     Q_EMIT clicked(geo.first, geo.second);
   }

@@ -186,13 +186,30 @@ SurveyOverviewWindow::SurveyOverviewWindow(
   resize(1280, 800);
 }
 
+void SurveyOverviewWindow::fitCanvasToIndexExtent(const QString & why_empty)
+{
+  // No renderable basemap. Fit the view to the survey-index extent instead so
+  // the map click still has a geo frame to aim with — the explorer stays
+  // usable from the index alone (e.g. stores not regenerated yet).
+  const auto box = bridge_->extent();
+  if (box) {
+    canvas_->setFallbackBounds(box->south, box->west, box->north, box->east);
+    status_->setText(
+      why_empty + " — map is empty; click anywhere to query passes.");
+  } else {
+    status_->setText(
+      why_empty + " — and the index holds no passes; nothing to explore.");
+  }
+}
+
 void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
 {
   // The tile level is encoded in the filenames (<level>_<row>_<col>.tif). A
   // store should hold a single level; scan every tile so we render one level
   // deterministically (the lowest) and can warn when the directory mixes
   // levels — otherwise the other levels vanish silently. A missing or empty
-  // directory degrades to an empty map — the pass query still works.
+  // directory degrades to an empty map fitted to the index extent, so the
+  // click-to-query still has a geo frame to aim with.
   std::error_code ec;
   std::map<int, std::vector<std::string>> by_level;   // level -> tile paths
   for (const auto & entry : std::filesystem::directory_iterator(stores_dir, ec)) {
@@ -207,8 +224,8 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
     }
   }
   if (by_level.empty()) {
-    status_->setText(QString("No store tiles found under %1 — map is empty; "
-      "pass queries still work.").arg(QString::fromStdString(stores_dir)));
+    fitCanvasToIndexExtent(
+      QString("No store tiles found under %1").arg(QString::fromStdString(stores_dir)));
     return;
   }
 
@@ -255,8 +272,8 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
       .arg(failed_tiles).arg(failed_tiles == 1 ? "" : "s");
   }
   if (tiles.empty()) {
-    status_->setText(QString("No loadable store tiles under %1 — map is empty; "
-      "pass queries still work.%2")
+    fitCanvasToIndexExtent(
+      QString("No loadable store tiles under %1%2")
       .arg(QString::fromStdString(stores_dir)).arg(level_warning));
     return;
   }
@@ -274,7 +291,7 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
     }
   }
   if (lo > hi) {
-    status_->setText("Store tiles hold no finite depths — map is empty.");
+    fitCanvasToIndexExtent("Store tiles hold no finite depths");
     return;
   }
   const auto lut = marine_colormap::bake_lut(
