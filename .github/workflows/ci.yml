@@ -78,17 +78,22 @@ jobs:
           https://github.com/rolker/marine_sonar_widgets.git
           ../ws/src/marine_sonar_widgets
 
-      # marine_interfaces (Contact.msg) and marine_contacts (the Qt-free Contact
-      # builder the sidescan viewer links) are packages inside the unh_marine_autonomy
-      # repo, not published to rosdep. Clone the repo and keep only those two
-      # lightweight packages so CI doesn't pull the heavy transitive deps of their
-      # sibling packages.
-      - name: Clone marine_interfaces + marine_contacts source dependencies
+      # Several source siblings live inside the unh_marine_autonomy repo, not in
+      # rosdep. Clone the repo once and keep only the packages the viewer needs,
+      # so CI doesn't pull the heavy transitive deps of the other siblings:
+      #   marine_interfaces (Contact.msg) + marine_contacts (Qt-free Contact builder)
+      #   marine_autonomy (gggs tile grid) + marine_tiled_raster_store (store tiles)
+      #   marine_survey_index (index query lib) and its deps marine_sidescan_mosaic
+      #   + marine_backscatter — the survey-overview basemap/pass-list chain.
+      - name: Clone unh_marine_autonomy source dependencies
         run: |
           git clone --depth 1 -b jazzy \
             https://github.com/rolker/unh_marine_autonomy.git /tmp/uma
-          mv /tmp/uma/marine_interfaces ../ws/src/marine_interfaces
-          mv /tmp/uma/marine_contacts ../ws/src/marine_contacts
+          for pkg in marine_interfaces marine_contacts marine_autonomy \
+            marine_tiled_raster_store marine_backscatter marine_sidescan_mosaic \
+            marine_survey_index; do
+            mv "/tmp/uma/$pkg" "../ws/src/$pkg"
+          done
 
       - name: Install ROS dependencies
         working-directory: ../ws
