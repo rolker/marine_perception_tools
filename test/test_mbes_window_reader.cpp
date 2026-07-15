@@ -119,6 +119,9 @@ TEST(FrameReprojectionTest, EqualAnchorsComposeToIdentity)
   const auto anchor = makeTransform(1000.0, -2000.0, 300.0, 0.1, 0.2, 0.3,
       std::sqrt(1.0 - 0.01 - 0.04 - 0.09));
   const auto r = make_reprojection(anchor, anchor);
+  // The numerically-identity composition must be DETECTED, not just harmless:
+  // apply_reprojection() then skips the per-point rotate+translate entirely.
+  EXPECT_TRUE(r.identity);
   double x = 12.0;
   double y = 34.0;
   double z = -5.0;
@@ -126,6 +129,21 @@ TEST(FrameReprojectionTest, EqualAnchorsComposeToIdentity)
   EXPECT_NEAR(x, 12.0, 1e-9);
   EXPECT_NEAR(y, 34.0, 1e-9);
   EXPECT_NEAR(z, -5.0, 1e-9);
+}
+
+TEST(FrameReprojectionTest, RealOffsetIsNotCollapsedToIdentity)
+{
+  // A 5 mm inter-bag offset is real survey signal — it must survive the
+  // identity detection.
+  const auto earth_from_ref = makeTransform(0.0, 0.0, 0.0);
+  const auto earth_from_src = makeTransform(0.005, 0.0, 0.0);
+  const auto r = make_reprojection(earth_from_ref, earth_from_src);
+  EXPECT_FALSE(r.identity);
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+  apply_reprojection(r, x, y, z);
+  EXPECT_NEAR(x, 0.005, 1e-12);
 }
 
 TEST(FrameReprojectionTest, TranslatedSrcFrameMapsIntoRef)

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
@@ -215,6 +216,22 @@ FrameReprojection make_reprojection(
     };
   const tf2::Transform ref_from_src =
     to_tf2(earth_from_ref).inverse() * to_tf2(earth_from_src);
+  // Equal anchors (bags sharing one geo alignment) compose to identity up to
+  // double rounding — flag it so apply_reprojection() is a no-op per point.
+  // Rounding on ECEF-sized translations is ~1e-9 m (6.4e6 m x 1e-16); 1e-6 m
+  // covers it with margin while staying 1000x below any real mm-scale
+  // inter-bag offset, so genuine survey signal can never be collapsed.
+  constexpr double kTransEps = 1e-6;   // metres
+  constexpr double kRotEps = 1e-12;    // quaternion component distance
+  const auto & o = ref_from_src.getOrigin();
+  const auto q0 = ref_from_src.getRotation();
+  if (std::abs(o.x()) < kTransEps && std::abs(o.y()) < kTransEps &&
+    std::abs(o.z()) < kTransEps &&
+    std::abs(q0.x()) < kRotEps && std::abs(q0.y()) < kRotEps &&
+    std::abs(q0.z()) < kRotEps && std::abs(std::abs(q0.w()) - 1.0) < kRotEps)
+  {
+    return FrameReprojection{};   // identity
+  }
   FrameReprojection out;
   out.identity = false;
   out.tx = ref_from_src.getOrigin().x();

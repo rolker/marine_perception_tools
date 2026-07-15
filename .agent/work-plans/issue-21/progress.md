@@ -160,7 +160,7 @@ rename rewrites the tool's user-facing docs anyway.
 **CI**: all-pass (`build-and-test` green on first run)
 
 ### Findings
-- [ ] (minor, Copilot R1) `make_reprojection()` never sets `identity = true`, so equal earth anchors across bags still pay a per-point rotate+translate. Cost is small (~ms per 1M soundings) but the fix is cheap and exact: detect the numerically-identity composition (|t| and |q−1| below double-noise epsilon) and set the flag — catches the equal-anchor case without risking collapse of a real mm-level offset — `src/mbes_window_reader.cpp:228`
+- [x] (minor, Copilot R1) `make_reprojection()` never sets `identity = true`, so equal earth anchors across bags still pay a per-point rotate+translate. Cost is small (~ms per 1M soundings) but the fix is cheap and exact: detect the numerically-identity composition (|t| and |q−1| below double-noise epsilon) and set the flag — catches the equal-anchor case without risking collapse of a real mm-level offset — `src/mbes_window_reader.cpp:228`
 
 ### False positives
 - (Copilot R1) "`const LoadOutcome out = watcher_.result()` prevents move semantics and forces a deep copy" — initializing from `result()`'s return value is a prvalue initialization: guaranteed copy elision (C++17), `const` is irrelevant to it. The one unavoidable copy happens INSIDE Qt5's `QFuture::result()` (returns a copy of the stored result; `takeResult()` is Qt6-only and this package pins QT_VERSION_MAJOR=5). Downstream, `setMultiPassPoints` flattens into a new vector by design, so moving `out` would not eliminate any copy either.
