@@ -109,6 +109,7 @@ set(SIDESCAN_CORE_DEPS
 add_library(sidescan_core
   src/sidescan_bag_session.cpp
   src/coverage_raster.cpp
+  src/mbes_window_reader.cpp
 )
 target_include_directories(sidescan_core PUBLIC src)
 ament_target_dependencies(sidescan_core ${SIDESCAN_CORE_DEPS})
@@ -134,6 +135,7 @@ add_executable(sidescan_target_viewer
   src/point_cloud_view.cpp
   src/survey_overview_canvas.cpp
   src/survey_overview_window.cpp
+  src/mbes_cloud_window.cpp
 )
 target_link_libraries(sidescan_target_viewer
   sidescan_core
@@ -195,6 +197,11 @@ if(BUILD_TESTING)
   # written through the marine_survey_index schema (#19).
   ament_add_gtest(test_survey_index_bridge test/test_survey_index_bridge.cpp)
   target_link_libraries(test_survey_index_bridge survey_index_bridge SQLite::SQLite3)
+
+  # Multi-pass windowed-read pure parts (#21): cross-bag frame reprojection +
+  # the shared tf_lift helpers. No bag I/O; links sidescan_core.
+  ament_add_gtest(test_mbes_window_reader test/test_mbes_window_reader.cpp)
+  target_link_libraries(test_mbes_window_reader sidescan_core)
 
   # The contact-store test moved to the marine_contacts package (unh_marine_autonomy#243)
   # along with the builder it exercises.

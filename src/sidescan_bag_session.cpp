@@ -41,6 +41,7 @@
 #include "tf2_msgs/msg/tf_message.hpp"
 
 #include "distance_buffer_policy.hpp"
+#include "tf_lift.hpp"
 
 namespace marine_perception_tools
 {
@@ -141,44 +142,8 @@ bool interp_base_pose(
   return true;
 }
 
-// Look up target<-source at `stamp`, falling back to the latest available
-// transform on an extrapolation throw (mirrors cube::DetectionsProjector). Used
-// to capture the full world<-m3 transform for each detections ping during the
-// load pass, while the bounded TF cache still brackets that stamp.
-bool lookup_at_or_latest(
-  const tf2::BufferCore & tf, const std::string & target, const std::string & source,
-  const tf2::TimePoint & stamp, geometry_msgs::msg::TransformStamped & out)
-{
-  try {
-    out = tf.lookupTransform(target, source, stamp);
-    return true;
-  } catch (const tf2::ExtrapolationException &) {
-    try {
-      out = tf.lookupTransform(target, source, tf2::TimePointZero);
-      return true;
-    } catch (const tf2::TransformException &) {
-      return false;
-    }
-  } catch (const tf2::TransformException &) {
-    return false;
-  }
-}
-
-// Rotate vector v by quaternion q (q assumed normalized): v' = v + 2 q_w (u x v)
-// + 2 u x (u x v), with u = q.xyz. Used to lift sensor-frame soundings to world.
-void rotate_by_quat(
-  double qx, double qy, double qz, double qw,
-  double vx, double vy, double vz, double & ox, double & oy, double & oz)
-{
-  // t = 2 * (u x v)
-  const double tx = 2.0 * (qy * vz - qz * vy);
-  const double ty = 2.0 * (qz * vx - qx * vz);
-  const double tz = 2.0 * (qx * vy - qy * vx);
-  // v' = v + qw * t + u x t
-  ox = vx + qw * tx + (qy * tz - qz * ty);
-  oy = vy + qw * ty + (qz * tx - qx * tz);
-  oz = vz + qw * tz + (qx * ty - qy * tx);
-}
+// lookup_at_or_latest / rotate_by_quat moved to tf_lift.hpp (#21) — shared with
+// read_mbes_window()'s one-shot windowed read.
 
 // True when this host is big-endian (runtime check; std::endian is C++20).
 bool host_is_big_endian()

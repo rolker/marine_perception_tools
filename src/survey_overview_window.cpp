@@ -14,13 +14,17 @@
 
 #include "survey_overview_window.hpp"
 
+#include <QAbstractItemView>
 #include <QDateTime>
+#include <QFileInfo>
 #include <QHeaderView>
+#include <QPushButton>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QString>
 #include <QStringList>
 #include <QTimeZone>
+#include <QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
@@ -39,6 +43,7 @@
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
 #include "marine_tiled_raster_store/tile_io.hpp"
+#include "mbes_cloud_window.hpp"
 #include "sidescan_viewer_window.hpp"
 
 namespace marine_perception_tools
@@ -157,10 +162,26 @@ SurveyOverviewWindow::SurveyOverviewWindow(
   pass_list_->setHeaderLabels({"Start (UTC)", "Duration", "Pings", "Sensor"});
   pass_list_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
   pass_list_->setRootIsDecorated(true);
+  // Multi-select feeds the MBES cloud (#21): ctrl/shift-select several passes,
+  // one button opens them together. Double-click still opens the single-pass
+  // sidescan scrub viewer.
+  pass_list_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
+  cloud_button_ = new QPushButton("View MBES cloud", this);
+  cloud_button_->setEnabled(false);
+  cloud_button_->setToolTip(
+    "Open the selected mbes-bathy passes together as a 3D point cloud, "
+    "one colour per pass");
+
+  auto * right = new QWidget(this);
+  auto * right_layout = new QVBoxLayout(right);
+  right_layout->setContentsMargins(0, 0, 0, 0);
+  right_layout->addWidget(pass_list_, 1);
+  right_layout->addWidget(cloud_button_);
 
   auto * splitter = new QSplitter(this);
   splitter->addWidget(canvas_);
-  splitter->addWidget(pass_list_);
+  splitter->addWidget(right);
   splitter->setStretchFactor(0, 3);
   splitter->setStretchFactor(1, 2);
   setCentralWidget(splitter);
@@ -181,6 +202,10 @@ SurveyOverviewWindow::SurveyOverviewWindow(
     this, &SurveyOverviewWindow::onHoverGeo);
   connect(pass_list_, &QTreeWidget::itemActivated,
     this, &SurveyOverviewWindow::onPassActivated);
+  connect(pass_list_, &QTreeWidget::itemSelectionChanged,
+    this, &SurveyOverviewWindow::onPassSelectionChanged);
+  connect(cloud_button_, &QPushButton::clicked,
+    this, &SurveyOverviewWindow::onViewMbesCloud);
 
   loadStoreTiles(stores_dir);
   resize(1280, 800);
@@ -362,9 +387,59 @@ void SurveyOverviewWindow::onMapClicked(double lat, double lon)
     item->setData(0, Qt::UserRole, bag);
     item->setData(1, Qt::UserRole, QVariant::fromValue<qlonglong>(pass.t_start_ns));
     item->setData(2, Qt::UserRole, QVariant::fromValue<qlonglong>(pass.t_end_ns));
+    item->setData(3, Qt::UserRole, QString::fromStdString(pass.sensor_type));
   }
-  status_->setText(QString("%1 passes at %2, %3 — double-click one to open it.")
+  status_->setText(
+    QString("%1 passes at %2, %3 — double-click to open one; select several "
+      "for the MBES cloud.")
     .arg(passes.size()).arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
+}
+
+// The selected pass rows that can feed the MBES cloud: leaf items (bag header
+// rows span the columns and carry no bag data) whose sensor is mbes-bathy —
+// sidescan stays single-pass by design (#258: blending kills shadows).
+std::vector<CloudPassInfo> SurveyOverviewWindow::selectedMbesPasses() const
+{
+  std::vector<CloudPassInfo> passes;
+  const auto selected = pass_list_->selectedItems();
+  for (const auto * item : selected) {
+    const QString bag = item->data(0, Qt::UserRole).toString();
+    if (bag.isEmpty()) {
+      continue;   // bag header row
+    }
+    if (item->data(3, Qt::UserRole).toString() != QLatin1String("mbes-bathy")) {
+      continue;
+    }
+    CloudPassInfo pass;
+    pass.bag_path = bag.toStdString();
+    pass.t_start_ns = static_cast<std::int64_t>(item->data(1, Qt::UserRole).toLongLong());
+    pass.t_end_ns = static_cast<std::int64_t>(item->data(2, Qt::UserRole).toLongLong());
+    pass.label = QString("%1  (%2)")
+      .arg(item->text(0))
+      .arg(QFileInfo(bag).fileName())
+      .toStdString();
+    passes.push_back(std::move(pass));
+  }
+  return passes;
+}
+
+void SurveyOverviewWindow::onPassSelectionChanged()
+{
+  cloud_button_->setEnabled(!selectedMbesPasses().empty());
+}
+
+void SurveyOverviewWindow::onViewMbesCloud()
+{
+  auto passes = selectedMbesPasses();
+  if (passes.empty()) {
+    status_->setText("Select one or more mbes-bathy passes for the cloud.");
+    return;
+  }
+  // One cloud window per click; closing it frees it (same lifetime pattern as
+  // the sidescan viewer). The overview stays up as the navigation hub.
+  auto * cloud = new MbesCloudWindow(std::move(passes));
+  cloud->setAttribute(Qt::WA_DeleteOnClose);
+  cloud->show();
 }
 
 void SurveyOverviewWindow::onPassActivated(QTreeWidgetItem * item, int)
