@@ -155,7 +155,10 @@ TEST_F(PointCloudViewTest, EmptyIsSafe)
   EXPECT_EQ(non_background(img), 0);
 }
 
-// Two passes in ColorMode::Pass render (multi-pass entry point, #21).
+// Two passes in ColorMode::Pass render with DISTINCT per-pass hues — pass 0 is
+// red-dominant, pass 1 green-dominant (golden-angle palette). Asserting both
+// hue families appear catches a regression where Pass mode is ignored or every
+// point lands in pass 0 (#21).
 TEST_F(PointCloudViewTest, MultiPassColour)
 {
   PointCloudView view;
@@ -164,12 +167,25 @@ TEST_F(PointCloudViewTest, MultiPassColour)
   auto pass_a = make_cloud();
   auto pass_b = make_cloud();
   for (auto & s : pass_b) {
-    s.z += 1.0;   // slightly offset repeat pass
+    s.y += 25.0;   // place the repeat pass beside the first so both are visible
   }
   view.setMultiPassPoints({pass_a, pass_b});
   const QImage img = view.grabFramebuffer();
   ASSERT_FALSE(img.isNull());
-  EXPECT_GT(non_background(img), 0) << "multi-pass cloud should render points";
+  int red_dominant = 0;
+  int green_dominant = 0;
+  for (int y = 0; y < img.height(); ++y) {
+    for (int x = 0; x < img.width(); ++x) {
+      const QColor c = img.pixelColor(x, y);
+      if (c.red() > 100 && c.red() > 2 * c.green() && c.red() > 2 * c.blue()) {
+        ++red_dominant;    // pass_color(0) ≈ (0.90, 0.14, 0.14)
+      } else if (c.green() > 100 && c.green() > 2 * c.red()) {
+        ++green_dominant;  // pass_color(1) ≈ (0.14, 0.90, 0.36)
+      }
+    }
+  }
+  EXPECT_GT(red_dominant, 0) << "pass 0 (red-dominant) pixels should render";
+  EXPECT_GT(green_dominant, 0) << "pass 1 (green-dominant) pixels should render";
 }
 
 // Switching to Pass mode on a single-pass cloud is safe (everything is pass 0).

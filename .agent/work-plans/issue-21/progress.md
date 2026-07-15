@@ -164,3 +164,19 @@ rename rewrites the tool's user-facing docs anyway.
 
 ### False positives
 - (Copilot R1) "`const LoadOutcome out = watcher_.result()` prevents move semantics and forces a deep copy" — initializing from `result()`'s return value is a prvalue initialization: guaranteed copy elision (C++17), `const` is irrelevant to it. The one unavoidable copy happens INSIDE Qt5's `QFuture::result()` (returns a copy of the stored result; `takeResult()` is Qt6-only and this package pins QT_VERSION_MAJOR=5). Downstream, `setMultiPassPoints` flattens into a new vector by design, so moving `out` would not eliminate any copy either.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-15 15:51 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #23 at `d28103d`
+**Sources**: 2 (Copilot R2 @ `d28103d`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass
+
+### Findings
+- [x] (minor, Copilot R2) `MultiPassColour` only asserted that some points render — would pass with Pass mode ignored or all points in pass 0. Strengthened: passes placed side by side, framebuffer scanned for red-dominant (pass 0) AND green-dominant (pass 1) pixels; verified passing under software GL (self-skips headless otherwise) — `test/test_point_cloud_view.cpp`
+
+### False positives
+- none.
