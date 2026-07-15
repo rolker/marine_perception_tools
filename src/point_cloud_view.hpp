@@ -24,12 +24,41 @@
 #include <QPoint>
 #include <QVector3D>
 
+#include <cmath>
 #include <vector>
 
 #include "mbes_geometry.hpp"
 
 namespace marine_perception_tools
 {
+
+// Colour for a pass index in ColorMode::Pass: golden-angle hue steps (137.508°)
+// maximise perceptual separation for the first ~10 passes; constant saturation/
+// value keep the colours vivid. Pure (no Qt/GL) — pinned in test_point_cloud_view.
+inline void pass_color(int pass_index, float & r, float & g, float & b)
+{
+  const float h = std::fmod(static_cast<float>(pass_index) * 137.508f, 360.0f);
+  constexpr float s = 0.85f;
+  constexpr float v = 0.9f;
+  const float c = v * s;
+  const float hp = h / 60.0f;
+  const float x = c * (1.0f - std::abs(std::fmod(hp, 2.0f) - 1.0f));
+  float r1 = 0.0f;
+  float g1 = 0.0f;
+  float b1 = 0.0f;
+  switch (static_cast<int>(hp)) {
+    case 0: r1 = c; g1 = x; break;
+    case 1: r1 = x; g1 = c; break;
+    case 2: g1 = c; b1 = x; break;
+    case 3: g1 = x; b1 = c; break;
+    case 4: r1 = x; b1 = c; break;
+    default: r1 = c; b1 = x; break;
+  }
+  const float m = v - c;
+  r = r1 + m;
+  g = g1 + m;
+  b = b1 + m;
+}
 
 // A view-only 3D point-cloud viewport for the windowed MBES soundings. GeoZui-style
 // orbit: left-drag rotates (azimuth + elevation), wheel zooms; a Z-exaggeration
@@ -44,13 +73,19 @@ public:
   explicit PointCloudView(QWidget * parent = nullptr);
   ~PointCloudView() override;
 
-  enum class ColorMode { Depth, Backscatter };
+  enum class ColorMode { Depth, Backscatter, Pass };
 
   // Replace the displayed cloud with this window's world-frame soundings. Recentres
   // on their centroid so the cloud stays in view, but preserves the operator's
   // zoom/orientation across scrubs — the camera distance is only auto-framed on the
   // first cloud after a resetView() (new bag / Fit View), not on every update.
   void setPoints(const std::vector<MbesSounding> & world_soundings);
+
+  // Replace the cloud with several passes' soundings at once (all in ONE common
+  // world frame — the caller reprojects first, #21). In ColorMode::Pass each
+  // pass keeps a distinct golden-angle hue (pass_color) so repeat-pass
+  // agreement/disagreement over a spot is visible.
+  void setMultiPassPoints(const std::vector<std::vector<MbesSounding>> & passes);
   void clear();
 
   // Re-frame the camera (default orbit + auto distance) on the next setPoints. Call
@@ -90,6 +125,10 @@ protected:
   void wheelEvent(QWheelEvent * event) override;
 
 private:
+  // Shared body of setPoints/setMultiPassPoints: recentre, frame, colour —
+  // one colour rebuild with the final per-point pass ids.
+  void set_points_impl(
+    const std::vector<MbesSounding> & world_soundings, std::vector<int> pass_ids);
   void rebuild_colors();   // recompute the per-point colour buffer for the mode
   void upload();           // (re)upload position + colour buffers (GL-current)
   void build_arrow();      // (re)build the boat-arrow vertices (GL-current)
@@ -119,6 +158,7 @@ private:
   std::vector<QVector3D> pts_;     // world soundings minus centroid
   std::vector<float> depth_;       // -z (positive down) for the depth ramp
   std::vector<float> intensity_;   // backscatter dB
+  std::vector<int> pass_of_point_;  // pass index per point (ColorMode::Pass)
   std::vector<float> colors_;      // rgb triples, size == 3 * pts_.size()
   float center_x_ = 0.0f;
   float center_y_ = 0.0f;

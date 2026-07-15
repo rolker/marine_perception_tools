@@ -17,12 +17,15 @@
 
 #include <QLabel>
 #include <QMainWindow>
+#include <QPushButton>
 #include <QString>
 #include <QTreeWidget>
 
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "mbes_cloud_window.hpp"
 #include "survey_index_bridge.hpp"
 #include "survey_overview_canvas.hpp"
 
@@ -51,15 +54,19 @@ public:
 private Q_SLOTS:
   void onMapClicked(double lat, double lon);
   void onPassActivated(QTreeWidgetItem * item, int column);
+  void onPassSelectionChanged();
+  void onViewMbesCloud();
   void onHoverGeo(double lat, double lon);
 
 private:
   void loadStoreTiles(const std::string & stores_dir);
   void fitCanvasToIndexExtent(const QString & why_empty);
+  std::vector<CloudPassInfo> selectedMbesPasses() const;
 
   std::unique_ptr<SurveyIndexBridge> bridge_;
   SurveyOverviewCanvas * canvas_ = nullptr;
   QTreeWidget * pass_list_ = nullptr;
+  QPushButton * cloud_button_ = nullptr;
   QLabel * status_ = nullptr;
   QLabel * hover_ = nullptr;
 };

@@ -27,6 +27,7 @@
 #include <QOpenGLContext>
 #include <QSurfaceFormat>
 
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -152,5 +153,73 @@ TEST_F(PointCloudViewTest, EmptyIsSafe)
   const QImage img = view.grabFramebuffer();
   ASSERT_FALSE(img.isNull());
   EXPECT_EQ(non_background(img), 0);
+}
+
+// Two passes in ColorMode::Pass render with DISTINCT per-pass hues — pass 0 is
+// red-dominant, pass 1 green-dominant (golden-angle palette). Asserting both
+// hue families appear catches a regression where Pass mode is ignored or every
+// point lands in pass 0 (#21).
+TEST_F(PointCloudViewTest, MultiPassColour)
+{
+  PointCloudView view;
+  view.resize(kW, kH);
+  view.setColorMode(PointCloudView::ColorMode::Pass);
+  auto pass_a = make_cloud();
+  auto pass_b = make_cloud();
+  for (auto & s : pass_b) {
+    s.y += 25.0;   // place the repeat pass beside the first so both are visible
+  }
+  view.setMultiPassPoints({pass_a, pass_b});
+  const QImage img = view.grabFramebuffer();
+  ASSERT_FALSE(img.isNull());
+  int red_dominant = 0;
+  int green_dominant = 0;
+  for (int y = 0; y < img.height(); ++y) {
+    for (int x = 0; x < img.width(); ++x) {
+      const QColor c = img.pixelColor(x, y);
+      if (c.red() > 100 && c.red() > 2 * c.green() && c.red() > 2 * c.blue()) {
+        ++red_dominant;    // pass_color(0) ≈ (0.90, 0.14, 0.14)
+      } else if (c.green() > 100 && c.green() > 2 * c.red()) {
+        ++green_dominant;  // pass_color(1) ≈ (0.14, 0.90, 0.36)
+      }
+    }
+  }
+  EXPECT_GT(red_dominant, 0) << "pass 0 (red-dominant) pixels should render";
+  EXPECT_GT(green_dominant, 0) << "pass 1 (green-dominant) pixels should render";
+}
+
+// Switching to Pass mode on a single-pass cloud is safe (everything is pass 0).
+TEST_F(PointCloudViewTest, ColorModePassOnSinglePassIsSafe)
+{
+  PointCloudView view;
+  view.resize(kW, kH);
+  view.setPoints(make_cloud());
+  view.setColorMode(PointCloudView::ColorMode::Pass);
+  const QImage img = view.grabFramebuffer();
+  ASSERT_FALSE(img.isNull());
+  EXPECT_GT(non_background(img), 0);
+}
+
+// The golden-angle pass palette is pure and stable: pinned values + distinct
+// leading hues (legend colours must not drift between releases).
+TEST(PassColor, StableAndDistinct)
+{
+  float r0, g0, b0;
+  marine_perception_tools::pass_color(0, r0, g0, b0);
+  // Index 0 is hue 0 (red-ish) at s=0.85, v=0.9: rgb = (0.9, 0.135, 0.135).
+  EXPECT_NEAR(r0, 0.9f, 1e-4);
+  EXPECT_NEAR(g0, 0.135f, 1e-4);
+  EXPECT_NEAR(b0, 0.135f, 1e-4);
+  // The first ten pass colours are pairwise distinguishable.
+  for (int i = 0; i < 10; ++i) {
+    for (int j = i + 1; j < 10; ++j) {
+      float ri, gi, bi, rj, gj, bj;
+      marine_perception_tools::pass_color(i, ri, gi, bi);
+      marine_perception_tools::pass_color(j, rj, gj, bj);
+      const float d =
+        std::abs(ri - rj) + std::abs(gi - gj) + std::abs(bi - bj);
+      EXPECT_GT(d, 0.1f) << "passes " << i << " and " << j << " too similar";
+    }
+  }
 }
 }  // namespace

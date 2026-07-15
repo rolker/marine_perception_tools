@@ -20,9 +20,11 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <string>
 
+#include "mbes_window_reader.hpp"
 #include "sidescan_bag_session.hpp"
 #include "sidescan_geometry.hpp"
 
@@ -43,10 +45,51 @@ const char * channel_name(marine_perception_tools::SidescanChannel ch)
 int main(int argc, char ** argv)
 {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: sidescan_probe <bag_uri>\n");
+    std::fprintf(stderr,
+      "usage: sidescan_probe <bag_uri>\n"
+      "       sidescan_probe --mbes-window <bag_uri> <t_start_ns> <t_end_ns>\n");
     return 2;
   }
   namespace mpt = marine_perception_tools;
+
+  // One-shot windowed MBES read (#21): the headless check for the multi-pass
+  // cloud's ingest path — no session, no full-bag metadata scan. Timed, since
+  // avoiding the full scan is the point.
+  if (std::string(argv[1]) == "--mbes-window") {
+    if (argc < 5) {
+      std::fprintf(stderr,
+        "usage: sidescan_probe --mbes-window <bag_uri> <t_start_ns> <t_end_ns>\n");
+      return 2;
+    }
+    char * end_start = nullptr;
+    char * end_end = nullptr;
+    const auto t_start = std::strtoll(argv[3], &end_start, 10);
+    const auto t_end = std::strtoll(argv[4], &end_end, 10);
+    if (*argv[3] == '\0' || *end_start != '\0' || *argv[4] == '\0' || *end_end != '\0') {
+      std::fprintf(stderr, "error: t_start_ns / t_end_ns must be integers (ns)\n");
+      return 2;
+    }
+    try {
+      const auto t0 = std::chrono::steady_clock::now();
+      const auto res = mpt::read_mbes_window(argv[2], t_start, t_end);
+      const auto t1 = std::chrono::steady_clock::now();
+      std::printf(
+        "mbes window: %zu soundings from %d pings (%d skipped, no TF) in %.0f ms\n"
+        "  world frame: %s • geo anchor (earth<-world): %s\n",
+        res.world_soundings.size(), res.used_pings, res.skipped_pings,
+        std::chrono::duration<double, std::milli>(t1 - t0).count(),
+        res.world_frame.c_str(), res.has_geo ? "captured" : "ABSENT");
+      if (!res.world_soundings.empty()) {
+        const auto & s = res.world_soundings.front();
+        std::printf("  first sounding world=(%.2f, %.2f, %.2f) dB=%.1f\n",
+          s.x, s.y, s.z, static_cast<double>(s.intensity));
+      }
+      return 0;
+    } catch (const std::exception & e) {
+      std::fprintf(stderr, "error: %s\n", e.what());
+      return 1;
+    }
+  }
   using mpt::project_sample;
   using mpt::SidescanChannel;
   try {

@@ -30,6 +30,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include "marine_colormap/colormap.hpp"
@@ -98,9 +99,17 @@ PointCloudView::~PointCloudView()
 
 void PointCloudView::setPoints(const std::vector<MbesSounding> & world_soundings)
 {
+  // Single-pass entry: every point belongs to pass 0.
+  set_points_impl(world_soundings, std::vector<int>(world_soundings.size(), 0));
+}
+
+void PointCloudView::set_points_impl(
+  const std::vector<MbesSounding> & world_soundings, std::vector<int> pass_ids)
+{
   pts_.clear();
   depth_.clear();
   intensity_.clear();
+  pass_of_point_ = std::move(pass_ids);
   if (world_soundings.empty()) {
     colors_.clear();
     buffers_dirty_ = true;
@@ -146,6 +155,24 @@ void PointCloudView::setPoints(const std::vector<MbesSounding> & world_soundings
   rebuild_colors();
   buffers_dirty_ = true;
   update();
+}
+
+void PointCloudView::setMultiPassPoints(
+  const std::vector<std::vector<MbesSounding>> & passes)
+{
+  std::size_t total = 0;
+  for (const auto & pass : passes) {
+    total += pass.size();
+  }
+  std::vector<MbesSounding> all;
+  std::vector<int> ids;
+  all.reserve(total);
+  ids.reserve(total);
+  for (std::size_t i = 0; i < passes.size(); ++i) {
+    all.insert(all.end(), passes[i].begin(), passes[i].end());
+    ids.insert(ids.end(), passes[i].size(), static_cast<int>(i));
+  }
+  set_points_impl(all, std::move(ids));
 }
 
 void PointCloudView::clear()
@@ -255,6 +282,21 @@ void PointCloudView::rebuild_colors()
 {
   colors_.clear();
   if (pts_.empty()) {return;}
+  if (mode_ == ColorMode::Pass) {
+    // Pass identity, not a scalar ramp: one golden-angle hue per pass index.
+    colors_.reserve(pts_.size() * 3);
+    for (std::size_t i = 0; i < pts_.size(); ++i) {
+      const int pass = (i < pass_of_point_.size()) ? pass_of_point_[i] : 0;
+      float r = 1.0f;
+      float g = 1.0f;
+      float b = 1.0f;
+      pass_color(pass, r, g, b);
+      colors_.push_back(r);
+      colors_.push_back(g);
+      colors_.push_back(b);
+    }
+    return;
+  }
   const std::vector<float> & scalar = (mode_ == ColorMode::Depth) ? depth_ : intensity_;
 
   float lo = std::numeric_limits<float>::max();
