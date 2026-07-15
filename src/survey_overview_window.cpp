@@ -218,7 +218,14 @@ void SurveyOverviewWindow::loadStoreTiles(const std::string & stores_dir)
       continue;
     }
     try {
-      by_level[std::stoi(name.substr(0, name.find('_')))].push_back(entry.path().string());
+      const int level = std::stoi(name.substr(0, name.find('_')));
+      // Reject non-GGGS levels here: by_level renders its LOWEST key, so one
+      // junk "-1_x_y.tif" would otherwise win level selection and blank the
+      // real tiles (gggs::Level itself throws only at load time, per tile).
+      if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size()) {
+        continue;
+      }
+      by_level[level].push_back(entry.path().string());
     } catch (const std::exception &) {
       continue;
     }

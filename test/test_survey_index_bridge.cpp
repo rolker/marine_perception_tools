@@ -37,7 +37,7 @@ class BridgeFixture : public ::testing::Test
 protected:
   void SetUp() override
   {
-    path_ = std::string(::testing::TempDir()) + "bridge_fixture.db";
+    path_ = std::string(::testing::TempDir()) + "/bridge_fixture.db";
     std::remove(path_.c_str());
     sqlite3 * db = marine_survey_index::openIndexDb(path_);
     exec(db, "INSERT INTO bags (id, path, size_bytes, mtime_ns, indexed_at_ns)"
@@ -116,7 +116,7 @@ TEST_F(BridgeFixture, ExtentMatchesTheIndexedTileBounds)
 
 TEST(SurveyIndexBridge, ExtentOfEmptyIndexIsNullopt)
 {
-  const std::string path = std::string(::testing::TempDir()) + "empty_index.db";
+  const std::string path = std::string(::testing::TempDir()) + "/empty_index.db";
   std::remove(path.c_str());
   sqlite3_close(marine_survey_index::openIndexDb(path));
   const marine_perception_tools::SurveyIndexBridge bridge(path);
