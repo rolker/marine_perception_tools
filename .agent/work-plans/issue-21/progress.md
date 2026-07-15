@@ -141,3 +141,10 @@ reversed-window swap, single colour rebuild via set_points_impl,
 reversed-window real-bag read identical, parse guard exits 2). Fifth
 (top-level README viewer section) deferred to #22 with a comment — the
 rename rewrites the tool's user-facing docs anyway.
+
+## Published
+**Status**: complete
+**When**: 2026-07-15 15:17 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #23 (https://github.com/rolker/marine_perception_tools/pull/23), base `jazzy`, Closes #21. Branch pushed at `0745124`. Publish checkpoint approved by Roland. Next: Copilot review → /triage-reviews round → desk check → merge.
