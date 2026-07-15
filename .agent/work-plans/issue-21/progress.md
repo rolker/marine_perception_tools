@@ -122,8 +122,22 @@ real-bag windowed reads at two positions in a 2.5 GB Massabesic bag.
 **Round**: 1 | **Ship**: recommended — no must-fix; static/governance/plan-drift/2× adversarial all clean, suggestions are optional hardening/parity
 
 ### Findings
-- [ ] (suggestion) Add `MbesCloudWindow` destructor with `waitForFinished()` for shutdown parity with sibling worker-thread windows (not a UAF — worker is static + snapshot copy) — `src/mbes_cloud_window.cpp`
-- [ ] (suggestion) Add reversed-window (`t_start > t_end`) swap to match the `readMbesWindow` precedent — `src/mbes_window_reader.cpp:374`
-- [ ] (suggestion) Skip the redundant first color rebuild in `setMultiPassPoints` — `src/point_cloud_view.cpp:170`
-- [ ] (suggestion) Validate `strtoll` parse (endptr) in the `--mbes-window` probe path — `src/sidescan_probe.cpp:891`
+- [x] (suggestion) Add `MbesCloudWindow` destructor with `waitForFinished()` for shutdown parity with sibling worker-thread windows (not a UAF — worker is static + snapshot copy) — `src/mbes_cloud_window.cpp`
+- [x] (suggestion) Add reversed-window (`t_start > t_end`) swap to match the `readMbesWindow` precedent — `src/mbes_window_reader.cpp:374`
+- [x] (suggestion) Skip the redundant first color rebuild in `setMultiPassPoints` — `src/point_cloud_view.cpp:170`
+- [x] (suggestion) Validate `strtoll` parse (endptr) in the `--mbes-window` probe path — `src/sidescan_probe.cpp:891`
 - [ ] (suggestion) Track a separate doc task for a top-level README `sidescan_target_viewer` section (not a #21 gap) — `README.md`
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-15 15:13 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**Branch**: feature/issue-21 at `c7d95a0`
+
+Addressed 4 of 5 round-1 suggestions in `c7d95a0` (dtor waitForFinished,
+reversed-window swap, single colour rebuild via set_points_impl,
+--mbes-window arg validation — all re-verified: 311 tests / 0 failures,
+reversed-window real-bag read identical, parse guard exits 2). Fifth
+(top-level README viewer section) deferred to #22 with a comment — the
+rename rewrites the tool's user-facing docs anyway.
