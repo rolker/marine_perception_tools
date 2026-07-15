@@ -95,6 +95,17 @@ jobs:
             mv "/tmp/uma/$pkg" "../ws/src/$pkg"
           done
 
+      # geodesy from the released jazzy debian predates the WGS84-geodesics API
+      # (geodesy/geodesics.h) that marine_sidescan_mosaic uses; the workspace
+      # carries geographic_info (ros2 branch) in underlay_ws for the same
+      # reason (see unh_marine_autonomy config/repos/underlay.repos). Cloning
+      # it into src makes rosdep skip the debian and colcon build it fresh.
+      - name: Clone geographic_info source dependency
+        run: >
+          git clone --depth 1 -b ros2
+          https://github.com/ros-geographic-info/geographic_info.git
+          ../ws/src/geographic_info
+
       - name: Install ROS dependencies
         working-directory: ../ws
         run: >
