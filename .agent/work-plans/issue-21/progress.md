@@ -78,3 +78,33 @@ issue: 21
 - [ ] (suggestion) Reuse the world-lift helpers `rotate_by_quat` / `lookup_at_or_latest` (anon-namespace in `sidescan_bag_session.cpp`) — they do exactly the TF capture + sensor→world lift the new reader needs. Both would live in `sidescan_core`; extract/share rather than re-implement ("Only what's needed"). — `plan.md:36`
 - [ ] (suggestion) Test approach diverges from the package norm: no existing test writes a synthetic rosbag; bag-touching logic is covered by pure-math tests (`test_mbes_geometry`). A synthetic-bag test exercises framework glue — mild tension with the plan's own "test what breaks, not the framework glue" note. Consider factoring the pure world-lift (given a captured transform) into a bag-free testable function. — `plan.md:88`
 - [ ] (suggestion) Scope-count inconsistency: "Files to Change" lists 12 rows but "Estimated Scope" says "~8 files." At 12 files / 4 components the PR is at the upper single-PR bound, but the changes form one cohesive vertical slice (reader → color mode → window → wiring) — keep together; just fix the count. — `plan.md:156`
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-15 14:59 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**Branch**: feature/issue-21 at `98bd095`
+
+Implemented per the amended plan (all 5 review-plan suggestions folded in
+at `23ee2fd`): `read_mbes_window` in sidescan_core (seek + topic-filter,
+tf_lift.hpp helpers shared with the session), cross-bag earth-anchor
+reprojection into the first pass's frame, PointCloudView ColorMode::Pass
++ setMultiPassPoints (golden-angle pass_color), MbesCloudWindow
+(QtConcurrent load, legend, visible skip counts), overview
+extended-select + "View MBES cloud" button, `sidescan_probe
+--mbes-window` headless check, .agents/README.md row updated (top-level
+README has no viewer section — the inventory row is the doc home).
+
+Deviations from plan, both found by the real-data smoke:
+- /tf is SEEKED (15 s pre-window history), not scanned from bag start:
+  the earth<-map anchor is continuously republished in these bags
+  (verified by sampling /tf mid-bag), and a start-scan costs time
+  proportional to the window's position.
+- Removed an accidental per-ping exact `reserve()` that made the
+  sounding append quadratic — 50 s -> 478 ms for a ~1M-sounding pass
+  (3,921 pings, matching the index's count exactly; geo anchor
+  captured; 0 skipped).
+
+Verified: 311 tests / 0 failures (was 274); overview offscreen smoke;
+real-bag windowed reads at two positions in a 2.5 GB Massabesic bag.
