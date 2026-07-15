@@ -152,3 +152,21 @@ skipped**; real-data smoke (Massabesic index + survey store) alive at timeout.
 Publish checkpoint approved by Roland. Branch `feature/issue-19` pushed;
 PR opened: https://github.com/rolker/marine_perception_tools/pull/20
 (base `jazzy`, `Closes #19`).
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-15 08:48 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #20 at `ccc37d7` (local head `b447700` adds the CI fix, unpushed)
+**Sources**: 4 (Copilot R1 @ `53f511f`, Copilot R2 @ `ccc37d7`, Local Review timeline, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: failures-noted — `build-and-test` FAILED: `find_package(marine_autonomy)` unresolved; the mpt CI workflow only kept marine_interfaces + marine_contacts from its unh_marine_autonomy clone. Fixed locally in `b447700` (stages the full 5-package chain: marine_autonomy, marine_tiled_raster_store, marine_backscatter, marine_sidescan_mosaic, marine_survey_index).
+
+### Findings
+- [ ] (must-fix, Copilot R2 ×6 grouped) No defined geo frame when store tiles are absent or before the first fit: `GeoView` defaults to (0°, 0°) @ 1 px/deg, yet `wheelEvent`/`mouseMoveEvent`/`mouseReleaseEvent` project through it unguarded (bogus `hoverGeo`/`clicked` near Null Island, and wheel/pan set `user_adjusted_`), while the window status text and ctor docstring claim "pass queries still work" with an empty map — the click can't be aimed, so the claim is false as shipped — `src/survey_overview_canvas.cpp:120-172`, `src/survey_overview_window.cpp:209-213,257-262`, `src/survey_overview_window.hpp:41-44`. Recommended fix: gate geo-emitting interactions on `have_fit_`, and make the claim TRUE by fitting the view from the survey index extent when no store tiles load (extent query on SurveyIndexBridge → canvas fallback fit bounds), keeping the "No store tiles loaded" backdrop.
+- [ ] (minor, Copilot R1) Test fixture `exec()` streams sqlite3's `err` into the assertion without `sqlite3_free()` — leaks only on the failure path, still trivially fixable — `test/test_survey_index_bridge.cpp:60-65`.
+- [x] (must-fix, CI rollup) `build-and-test` red: missing uma sibling packages in the CI workspace — fixed in `b447700` (`.github/workflows/ci.yml`).
+
+### False positives
+- none — all six R2 comments share the one valid root cause above; R1's leak is real (if minor).
