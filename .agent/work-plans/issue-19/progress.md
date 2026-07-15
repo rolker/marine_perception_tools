@@ -164,9 +164,32 @@ PR opened: https://github.com/rolker/marine_perception_tools/pull/20
 **CI**: failures-noted — `build-and-test` FAILED: `find_package(marine_autonomy)` unresolved; the mpt CI workflow only kept marine_interfaces + marine_contacts from its unh_marine_autonomy clone. Fixed locally in `b447700` (stages the full 5-package chain: marine_autonomy, marine_tiled_raster_store, marine_backscatter, marine_sidescan_mosaic, marine_survey_index).
 
 ### Findings
-- [ ] (must-fix, Copilot R2 ×6 grouped) No defined geo frame when store tiles are absent or before the first fit: `GeoView` defaults to (0°, 0°) @ 1 px/deg, yet `wheelEvent`/`mouseMoveEvent`/`mouseReleaseEvent` project through it unguarded (bogus `hoverGeo`/`clicked` near Null Island, and wheel/pan set `user_adjusted_`), while the window status text and ctor docstring claim "pass queries still work" with an empty map — the click can't be aimed, so the claim is false as shipped — `src/survey_overview_canvas.cpp:120-172`, `src/survey_overview_window.cpp:209-213,257-262`, `src/survey_overview_window.hpp:41-44`. Recommended fix: gate geo-emitting interactions on `have_fit_`, and make the claim TRUE by fitting the view from the survey index extent when no store tiles load (extent query on SurveyIndexBridge → canvas fallback fit bounds), keeping the "No store tiles loaded" backdrop.
-- [ ] (minor, Copilot R1) Test fixture `exec()` streams sqlite3's `err` into the assertion without `sqlite3_free()` — leaks only on the failure path, still trivially fixable — `test/test_survey_index_bridge.cpp:60-65`.
+- [x] (must-fix, Copilot R2 ×6 grouped) No defined geo frame when store tiles are absent or before the first fit: `GeoView` defaults to (0°, 0°) @ 1 px/deg, yet `wheelEvent`/`mouseMoveEvent`/`mouseReleaseEvent` project through it unguarded (bogus `hoverGeo`/`clicked` near Null Island, and wheel/pan set `user_adjusted_`), while the window status text and ctor docstring claim "pass queries still work" with an empty map — the click can't be aimed, so the claim is false as shipped — `src/survey_overview_canvas.cpp:120-172`, `src/survey_overview_window.cpp:209-213,257-262`, `src/survey_overview_window.hpp:41-44`. Recommended fix: gate geo-emitting interactions on `have_fit_`, and make the claim TRUE by fitting the view from the survey index extent when no store tiles load (extent query on SurveyIndexBridge → canvas fallback fit bounds), keeping the "No store tiles loaded" backdrop.
+- [x] (minor, Copilot R1) Test fixture `exec()` streams sqlite3's `err` into the assertion without `sqlite3_free()` — leaks only on the failure path, still trivially fixable — `test/test_survey_index_bridge.cpp:60-65`.
 - [x] (must-fix, CI rollup) `build-and-test` red: missing uma sibling packages in the CI workspace — fixed in `b447700` (`.github/workflows/ci.yml`).
 
 ### False positives
 - none — all six R2 comments share the one valid root cause above; R1's leak is real (if minor).
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-15 10:35 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**Branch**: feature/issue-19 at `2780582`
+
+Addressed all open Integrated Review findings (round 1):
+- `b447700` ci: stage the full uma dependency chain (marine_autonomy,
+  marine_tiled_raster_store, marine_backscatter, marine_sidescan_mosaic,
+  marine_survey_index) — fixes the red `build-and-test` check.
+- `4a56bea` fix(overview): SurveyIndexBridge::extent() + canvas fallback
+  fit + have_fit_ event gating — resolves all six Copilot R2 comments at
+  their shared root cause; the "click-to-query without store tiles"
+  promise is now true (fitted to the index extent) instead of reworded.
+- `2780582` test(overview): sqlite3_free in the bridge fixture (Copilot
+  R1) + extent() tests (bounds pinned against gggs::GridIndex accessors;
+  empty index → nullopt).
+
+Verified: worktree build clean; 274 tests, 0 failures (was 272, +2
+extent tests); offscreen smokes with the real Massabesic index — normal
+stores path and missing-stores fallback path both survive startup.
