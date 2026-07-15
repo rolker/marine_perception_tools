@@ -57,3 +57,24 @@ issue: 21
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-15 18:01 +00:00
+**By**: Claude Code Agent (Claude Opus)
+<!-- Independent review. The name-based self-review heuristic in review-plan
+     collides here (all workspace agents share the name "Claude Code Agent"),
+     but this is a fresh-context Opus sub-agent dispatched per the #490 handoff
+     contract, distinct from the Sonnet author of ## Plan Authored — so no
+     author-self-review annotation. -->
+
+**Plan**: `.agent/work-plans/issue-21/plan.md` at `bd1a152`
+**PR**: PR-less (--issue mode)
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (suggestion) `mbes_bag_reader.cpp` is Qt-free bag ingest — belongs in the `sidescan_core` library (alongside `sidescan_bag_session.cpp`), not in the `sidescan_target_viewer` executable sources as step 6 states. Matches the established Qt-free-ingest split and lets `test_mbes_bag_reader` link `sidescan_core` (like `test_coverage_raster`) instead of recompiling the source. — `plan.md:97`
+- [ ] (suggestion) Windowed-read design decision cites the wrong precedent: `SidescanBagSession::readMbesWindow` (the directly analogous code) already uses `Reader::seek()` with a try/catch fallback to sequential scan (`sidescan_bag_session.cpp:940`); the plan justifies a pure linear scan via `bag_loader.hpp`'s note (a different consumer). Adopt the proven seek+fallback pattern. — `plan.md:41`
+- [ ] (suggestion) Reuse the world-lift helpers `rotate_by_quat` / `lookup_at_or_latest` (anon-namespace in `sidescan_bag_session.cpp`) — they do exactly the TF capture + sensor→world lift the new reader needs. Both would live in `sidescan_core`; extract/share rather than re-implement ("Only what's needed"). — `plan.md:36`
+- [ ] (suggestion) Test approach diverges from the package norm: no existing test writes a synthetic rosbag; bag-touching logic is covered by pure-math tests (`test_mbes_geometry`). A synthetic-bag test exercises framework glue — mild tension with the plan's own "test what breaks, not the framework glue" note. Consider factoring the pure world-lift (given a captured transform) into a bag-free testable function. — `plan.md:88`
+- [ ] (suggestion) Scope-count inconsistency: "Files to Change" lists 12 rows but "Estimated Scope" says "~8 files." At 12 files / 4 components the PR is at the upper single-PR bound, but the changes form one cohesive vertical slice (reader → color mode → window → wiring) — keep together; just fix the count. — `plan.md:156`
