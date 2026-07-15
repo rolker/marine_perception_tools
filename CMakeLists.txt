@@ -19,10 +19,14 @@ find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(geographic_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(marine_acoustic_msgs REQUIRED)
+find_package(marine_autonomy REQUIRED)
 find_package(marine_colormap REQUIRED)
 find_package(marine_contacts REQUIRED)
 find_package(marine_interfaces REQUIRED)
 find_package(marine_sonar_widgets REQUIRED)
+find_package(marine_survey_index REQUIRED)
+find_package(marine_tiled_raster_store REQUIRED)
+find_package(SQLite3 REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -114,20 +118,33 @@ add_executable(sidescan_probe src/sidescan_probe.cpp)
 target_link_libraries(sidescan_probe sidescan_core)
 
 # Qt app: offline georeferenced sidescan viewer + target tracker (issue #7).
+# Headless survey-index bridge (#19): map click -> pass list, reusing the
+# marine_survey_index query library. Qt-free so it unit-tests without a display.
+add_library(survey_index_bridge src/survey_index_bridge.cpp)
+target_include_directories(survey_index_bridge PUBLIC src)
+target_link_libraries(survey_index_bridge SQLite::SQLite3)
+# marine_autonomy is used directly (marine_autonomy/gggs.h) as well as
+# transitively via marine_survey_index; depend on it explicitly.
+ament_target_dependencies(survey_index_bridge marine_autonomy marine_survey_index)
+
 add_executable(sidescan_target_viewer
   src/sidescan_viewer_main.cpp
   src/sidescan_viewer_window.cpp
   src/sidescan_canvas.cpp
   src/point_cloud_view.cpp
+  src/survey_overview_canvas.cpp
+  src/survey_overview_window.cpp
 )
 target_link_libraries(sidescan_target_viewer
   sidescan_core
+  survey_index_bridge
   marine_contacts::marine_contacts
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Concurrent
   Qt${QT_VERSION_MAJOR}::Gui
   Qt${QT_VERSION_MAJOR}::OpenGL)
-ament_target_dependencies(sidescan_target_viewer marine_colormap marine_sonar_widgets)
+ament_target_dependencies(sidescan_target_viewer
+  marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
 
 install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
@@ -168,6 +185,16 @@ if(BUILD_TESTING)
   # no bag I/O; links sidescan_core (#17).
   ament_add_gtest(test_sidescan_interval test/test_sidescan_interval.cpp)
   target_link_libraries(test_sidescan_interval sidescan_core)
+
+  # Survey-overview geo<->pixel projection (pure header) — correctness-critical
+  # cos(lat) mapping (#19).
+  ament_add_gtest(test_survey_projection test/test_survey_projection.cpp)
+  target_include_directories(test_survey_projection PRIVATE src)
+
+  # Survey-index bridge: click -> pass rows against a file-backed fixture DB
+  # written through the marine_survey_index schema (#19).
+  ament_add_gtest(test_survey_index_bridge test/test_survey_index_bridge.cpp)
+  target_link_libraries(test_survey_index_bridge survey_index_bridge SQLite::SQLite3)
 
   # The contact-store test moved to the marine_contacts package (unh_marine_autonomy#243)
   # along with the builder it exercises.
