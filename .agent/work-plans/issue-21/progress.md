@@ -45,3 +45,15 @@ issue: 21
 - [ ] Plan phase: specify test coverage for multi-pass windowed reads and georeferencing correctness.
 - [ ] Implementation: confirm TF2 is used for georeferencing, consistent with the indexer (ADR-0008).
 - [ ] Implementation: update README and any existing single-pass callers of `point_cloud_view` if its interface changes.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-07-15 18:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-21/plan.md` at `bd1a152`
+**Branch**: feature/issue-21 at `bd1a152`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
