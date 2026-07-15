@@ -25,24 +25,49 @@ Current state:
 
 ## Approach
 
-1. **Add `MbesBagReader` — lightweight windowed MBES read** — new
-   `src/mbes_bag_reader.hpp` + `src/mbes_bag_reader.cpp`. Given a bag path and a
-   `[t_start_ns, t_end_ns]` window:
-   - Opens the bag (rosbag2 Reader).
-   - Linear-scans, collecting TF records first (one pass, sized `BufferCore`) then
-     MBES detections in the window. Window is bounded, so the scan covers only the
-     pass duration (seconds to minutes), not the full bag.
-   - Projects each detection's beams to world-frame `MbesSounding` via TF2
-     (consistent with `SidescanBagSession` — ADR-0008 compliance). Skips pings with
-     no TF.
-   - Returns `std::vector<MbesSounding>` (world frame) + skipped-ping count.
-   - Stateless free function `read_mbes_window(bag_path, t_start_ns, t_end_ns,
-     world_frame, m3_frame)` — no class state, easier to test.
-   - **Design decision (windowed-read strategy)**: linear skip to `t_start_ns`
-     then read until `t_end_ns`. `Reader::seek()` would be faster on long bags but
-     is already noted as a future optimisation in `bag_loader.hpp`; the linear scan
-     is proven and keeps the reader simple. Re-evaluate if load latency is
-     unacceptable in practice (a 10-minute survey pass at ~5 Hz is ~3 000 pings).
+1. **Add windowed MBES reader to `sidescan_core`** — new
+   `src/mbes_window_reader.hpp` + `src/mbes_window_reader.cpp`, built into the
+   Qt-free `sidescan_core` library (the established home for bag ingest,
+   alongside `sidescan_bag_session.cpp`). Stateless free function
+   `read_mbes_window(bag_path, t_start_ns, t_end_ns, world_frame)` returning a
+   result struct: soundings in the BAG's world frame, the captured
+   earth<-world transform (see step 1b), and a skipped-ping count. Two-phase
+   read, both phases topic-filtered (`rosbag2_storage::StorageFilter`):
+   - **TF prepass**: read only `/tf` + `/tf_static` from the bag start until
+     `t_end_ns + pad` into a `tf2::BufferCore` (must start from the beginning —
+     static transforms and the chain history live there; TF messages are tiny
+     so this is cheap). Also captures earth<-world for the window.
+   - **Detections pass**: `Reader::seek(t_start_ns - pad)` with a try/catch
+     sequential fallback — the same proven pattern as
+     `SidescanBagSession::readMbesWindow` (`sidescan_bag_session.cpp:940`),
+     which is the directly analogous precedent. For each detections message in
+     the window: `project_detections()` (existing pure function in
+     `mbes_geometry.hpp`) → lift to world via the shared TF helpers (step 1a).
+     Pings with no resolvable TF are counted and skipped.
+   - **Design decision (windowed-read strategy)**: seek + topic filters, NOT a
+     full-bag linear scan and NOT a full `SidescanBagSession` per bag — the
+     session's whole-bag metadata index (right for the scrub viewer, #17) is
+     exactly the cost a one-shot windowed pull must avoid when several bags
+     load at once.
+
+1a. **Extract shared TF-lift helpers** — move `lookup_at_or_latest` and
+   `rotate_by_quat` from `sidescan_bag_session.cpp`'s anonymous namespace into a
+   new `src/tf_lift.hpp` (sidescan_core, header-only), used by both the session
+   and the new reader. Pure/deterministic — unit-testable.
+
+1b. **Cross-bag frame consistency (design decision)** — each bag's `world_frame`
+   is a LOCAL map frame whose origin is not guaranteed identical across
+   recordings. Combining passes from different bags therefore reprojects
+   through the geo anchor: the reader captures earth<-world (the same
+   transform `SidescanBagSession` captures for `mapToGeo()`); the cloud window
+   picks the FIRST pass's bag as the reference frame and reprojects every
+   other bag's soundings via `T_ref<-earth * T_earth<-src` (one composed
+   transform per bag, applied per point — pure helper in
+   `mbes_window_reader.hpp`, unit-testable with synthetic transforms). A bag
+   with no earth<-world available: if its world frame NAME matches the
+   reference's, use identity (same-recording case); otherwise skip the pass
+   and count it visibly in the window status — never silently mis-place
+   soundings.
 
 2. **Extend `PointCloudView` for multi-pass colour** — add `ColorMode::Pass` and a
    new method `setMultiPassPoints(const std::vector<std::vector<MbesSounding>> &
@@ -84,20 +109,25 @@ Current state:
    - Keep `itemActivated` for double-click → `SidescanViewerWindow` (single-pass
      sidescan scrub, unchanged).
 
-5. **Tests**
-   - `test/test_mbes_bag_reader.cpp` (NEW): write a minimal synthetic bag with a
-     known MBES detection and a TF record; assert `read_mbes_window` returns the
-     expected sounding count and that world-frame coordinates are within tolerance.
-     Test the zero-detection and TF-miss cases.
-   - `test/test_point_cloud_view.cpp` (EXTEND): add a `MultiPassColour` test that
-     calls `setMultiPassPoints` with two passes of different colours and asserts
-     rendered pixels are non-background (mirrors the existing `RendersAndClears`
-     pattern); add a `ColorModePass` setter safety test.
+5. **Tests** — follow the package norm: pure-math units + real-data smoke, no
+   synthetic-bag fixture (no existing test writes a rosbag; bag glue is thin by
+   construction here because projection/lift/reprojection are all pure).
+   - `test/test_mbes_window_reader.cpp` (NEW, pure parts only): the cross-bag
+     reprojection composition (synthetic earth<-ref / earth<-src transforms →
+     known point mapping, including the identity same-frame case) and the
+     `tf_lift.hpp` helpers (`rotate_by_quat` against known rotations;
+     `lookup_at_or_latest` fallback behaviour with a hand-filled BufferCore).
+   - `test/test_point_cloud_view.cpp` (EXTEND): `MultiPassColour` — two passes,
+     distinct golden-angle hues, rendered pixels non-background (mirrors
+     `RendersAndClears`); `ColorModePass` setter safety; pass-hue assignment
+     function pinned for the first few indices.
+   - **Real-data smoke** (verification step, not a committed test): overview →
+     multi-select passes over a Massabesic spot → cloud window renders, status
+     reports pass/sounding counts, offscreen.
 
-6. **CMakeLists.txt** — add `src/mbes_bag_reader.cpp` and
-   `src/mbes_cloud_window.cpp` to `sidescan_target_viewer` sources; add
-   `test_mbes_bag_reader` test target linked against `rosbag2_cpp` and
-   `marine_acoustic_msgs`.
+6. **CMakeLists.txt** — add `src/mbes_window_reader.cpp` to `sidescan_core`;
+   add `src/mbes_cloud_window.cpp` to `sidescan_target_viewer` sources; add
+   `test_mbes_window_reader` gtest linked against `sidescan_core`.
 
 7. **README update** — add a "Survey explorer stage 3" section under the existing
    `sidescan_target_viewer` notes describing the multi-pass MBES cloud feature.
@@ -106,17 +136,19 @@ Current state:
 
 | File | Change |
 |------|--------|
-| `src/mbes_bag_reader.hpp` | NEW — `read_mbes_window` declaration |
-| `src/mbes_bag_reader.cpp` | NEW — windowed MBES bag read + TF2 projection |
+| `src/mbes_window_reader.hpp` | NEW (sidescan_core) — `read_mbes_window` + reprojection helper |
+| `src/mbes_window_reader.cpp` | NEW (sidescan_core) — filtered/seek windowed read + TF2 lift |
+| `src/tf_lift.hpp` | NEW (sidescan_core) — `lookup_at_or_latest` + `rotate_by_quat` extracted |
+| `src/sidescan_bag_session.cpp` | Use `tf_lift.hpp` instead of its anon-namespace copies |
 | `src/mbes_cloud_window.hpp` | NEW — `MbesCloudWindow` declaration |
 | `src/mbes_cloud_window.cpp` | NEW — multi-pass 3D viewer window |
 | `src/point_cloud_view.hpp` | Add `ColorMode::Pass`, `setMultiPassPoints()` |
 | `src/point_cloud_view.cpp` | Implement `ColorMode::Pass` in `rebuild_colors()`, `setMultiPassPoints()` |
 | `src/survey_overview_window.hpp` | Add `onViewMbesCloud()` slot |
 | `src/survey_overview_window.cpp` | Extended-select, "View MBES cloud" button, `onViewMbesCloud` |
-| `test/test_mbes_bag_reader.cpp` | NEW — windowed reader unit test |
+| `test/test_mbes_window_reader.cpp` | NEW — pure-math units (reprojection, tf_lift helpers) |
 | `test/test_point_cloud_view.cpp` | Extend with `MultiPassColour` + `ColorModePass` tests |
-| `CMakeLists.txt` | Add new sources + `test_mbes_bag_reader` target |
+| `CMakeLists.txt` | New sources into sidescan_core + viewer; `test_mbes_window_reader` target |
 | `README.md` | Stage 3 section under `sidescan_target_viewer` |
 
 ## Principles Self-Check
@@ -153,6 +185,8 @@ Current state:
 
 ## Estimated Scope
 
-Single PR. Approximately 8 files new/modified; the most complex new piece is
-`mbes_bag_reader.cpp` (windowed bag read + TF2). All changes are in
+Single PR. 14 files new/modified (upper single-PR bound, but one cohesive
+vertical slice: reader → color mode → window → overview wiring). The most
+complex new piece is `mbes_window_reader.cpp` (filtered/seek windowed read +
+TF2 lift + cross-bag reprojection). All changes are in
 `marine_perception_tools`.
