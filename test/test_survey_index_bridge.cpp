@@ -60,8 +60,10 @@ protected:
   static void exec(sqlite3 * db, const char * sql)
   {
     char * err = nullptr;
-    ASSERT_EQ(sqlite3_exec(db, sql, nullptr, nullptr, &err), SQLITE_OK)
-      << (err ? err : "unknown sqlite error");
+    const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err);
+    const std::string msg = err ? err : "unknown sqlite error";
+    sqlite3_free(err);
+    ASSERT_EQ(rc, SQLITE_OK) << msg;
   }
 
   std::string path_;
@@ -95,6 +97,31 @@ TEST_F(BridgeFixture, RadiusReachesIntoNeighbouringTile)
   const double lat_outside = tile.northLatitude() + 1e-5;
   EXPECT_FALSE(bridge.queryPoint(lat_outside, kLon, 120.0).empty());
   EXPECT_TRUE(bridge.queryPoint(lat_outside, kLon, 0.1).empty());
+}
+
+TEST_F(BridgeFixture, ExtentMatchesTheIndexedTileBounds)
+{
+  // The bridge derives tile bounds from the public gggs::levels specs (the
+  // GridIndex row/col constructor is private); pin those formulas against a
+  // real GridIndex built from coordinates so they can't drift.
+  const marine_perception_tools::SurveyIndexBridge bridge(path_);
+  const auto box = bridge.extent();
+  ASSERT_TRUE(box.has_value());
+  const auto tile = gggs::Level(14).gridIndex(kLat, kLon);
+  EXPECT_DOUBLE_EQ(box->south, tile.southLatitude());
+  EXPECT_DOUBLE_EQ(box->north, tile.northLatitude());
+  EXPECT_DOUBLE_EQ(box->west, tile.westLongitude());
+  EXPECT_DOUBLE_EQ(box->east, tile.eastLongitude());
+}
+
+TEST(SurveyIndexBridge, ExtentOfEmptyIndexIsNullopt)
+{
+  const std::string path = std::string(::testing::TempDir()) + "empty_index.db";
+  std::remove(path.c_str());
+  sqlite3_close(marine_survey_index::openIndexDb(path));
+  const marine_perception_tools::SurveyIndexBridge bridge(path);
+  EXPECT_FALSE(bridge.extent().has_value());
+  std::remove(path.c_str());
 }
 
 TEST(SurveyIndexBridge, MissingDbThrows)
