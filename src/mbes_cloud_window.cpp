@@ -61,6 +61,11 @@ MbesCloudWindow::MbesCloudWindow(
   watcher_.setFuture(QtConcurrent::run([snapshot]() {return loadPasses(snapshot);}));
 }
 
+MbesCloudWindow::~MbesCloudWindow()
+{
+  watcher_.waitForFinished();
+}
+
 MbesCloudWindow::LoadOutcome MbesCloudWindow::loadPasses(
   const std::vector<CloudPassInfo> & passes)
 {

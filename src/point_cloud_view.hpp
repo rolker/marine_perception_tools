@@ -125,6 +125,10 @@ protected:
   void wheelEvent(QWheelEvent * event) override;
 
 private:
+  // Shared body of setPoints/setMultiPassPoints: recentre, frame, colour —
+  // one colour rebuild with the final per-point pass ids.
+  void set_points_impl(
+    const std::vector<MbesSounding> & world_soundings, std::vector<int> pass_ids);
   void rebuild_colors();   // recompute the per-point colour buffer for the mode
   void upload();           // (re)upload position + colour buffers (GL-current)
   void build_arrow();      // (re)build the boat-arrow vertices (GL-current)

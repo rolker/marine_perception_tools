@@ -54,6 +54,9 @@ class MbesCloudWindow : public QMainWindow
 public:
   explicit MbesCloudWindow(
     std::vector<CloudPassInfo> passes, QWidget * parent = nullptr);
+  // The worker is self-contained (static fn + snapshot copy), but don't let
+  // its QtConcurrent thread outlive the window/QApplication at shutdown.
+  ~MbesCloudWindow() override;
 
 private:
   // Everything the worker thread hands back to the UI thread in one piece.

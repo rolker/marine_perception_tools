@@ -61,10 +61,17 @@ int main(int argc, char ** argv)
         "usage: sidescan_probe --mbes-window <bag_uri> <t_start_ns> <t_end_ns>\n");
       return 2;
     }
+    char * end_start = nullptr;
+    char * end_end = nullptr;
+    const auto t_start = std::strtoll(argv[3], &end_start, 10);
+    const auto t_end = std::strtoll(argv[4], &end_end, 10);
+    if (*argv[3] == '\0' || *end_start != '\0' || *argv[4] == '\0' || *end_end != '\0') {
+      std::fprintf(stderr, "error: t_start_ns / t_end_ns must be integers (ns)\n");
+      return 2;
+    }
     try {
       const auto t0 = std::chrono::steady_clock::now();
-      const auto res = mpt::read_mbes_window(
-        argv[2], std::strtoll(argv[3], nullptr, 10), std::strtoll(argv[4], nullptr, 10));
+      const auto res = mpt::read_mbes_window(argv[2], t_start, t_end);
       const auto t1 = std::chrono::steady_clock::now();
       std::printf(
         "mbes window: %zu soundings from %d pings (%d skipped, no TF) in %.0f ms\n"

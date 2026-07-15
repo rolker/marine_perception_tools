@@ -99,12 +99,17 @@ PointCloudView::~PointCloudView()
 
 void PointCloudView::setPoints(const std::vector<MbesSounding> & world_soundings)
 {
+  // Single-pass entry: every point belongs to pass 0.
+  set_points_impl(world_soundings, std::vector<int>(world_soundings.size(), 0));
+}
+
+void PointCloudView::set_points_impl(
+  const std::vector<MbesSounding> & world_soundings, std::vector<int> pass_ids)
+{
   pts_.clear();
   depth_.clear();
   intensity_.clear();
-  // Single-pass entry: every point belongs to pass 0. setMultiPassPoints
-  // overwrites this with the real per-pass ids after delegating here.
-  pass_of_point_.assign(world_soundings.size(), 0);
+  pass_of_point_ = std::move(pass_ids);
   if (world_soundings.empty()) {
     colors_.clear();
     buffers_dirty_ = true;
@@ -167,11 +172,7 @@ void PointCloudView::setMultiPassPoints(
     all.insert(all.end(), passes[i].begin(), passes[i].end());
     ids.insert(ids.end(), passes[i].size(), static_cast<int>(i));
   }
-  setPoints(all);   // recentre/frame; assigns pass 0 everywhere
-  pass_of_point_ = std::move(ids);
-  rebuild_colors();  // now with the real per-pass ids
-  buffers_dirty_ = true;
-  update();
+  set_points_impl(all, std::move(ids));
 }
 
 void PointCloudView::clear()

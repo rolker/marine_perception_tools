@@ -14,8 +14,10 @@
 
 #include "mbes_window_reader.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
@@ -59,6 +61,9 @@ MbesWindowResult read_mbes_window(
 {
   MbesWindowResult result;
   result.world_frame = options.world_frame;
+  if (t_end_ns < t_start_ns) {
+    std::swap(t_start_ns, t_end_ns);   // reversed window: the readMbesWindow precedent
+  }
   const std::string det_topic = options.detections_topic.empty() ?
     std::string(kMbesDetectionsTopic) : options.detections_topic;
 
