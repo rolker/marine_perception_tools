@@ -193,3 +193,20 @@ Addressed all open Integrated Review findings (round 1):
 Verified: worktree build clean; 274 tests, 0 failures (was 272, +2
 extent tests); offscreen smokes with the real Massabesic index — normal
 stores path and missing-stores fallback path both survive startup.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-15 11:43 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #20 at `936dddb` (Copilot R3 @ `c45ed7d`: 3 comments; R4 @ `936dddb`: no new comments)
+**Sources**: 2 (Copilot R3, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass — `build-and-test` GREEN at `936dddb` after the two workflow fixes (uma package chain `b447700`, geographic_info ros2-branch clone `936dddb` — released jazzy geodesy predates geodesy/geodesics.h).
+
+### Findings
+- [x] (minor, Copilot R3) Filename-parsed store level unvalidated; real failure mode is worse than flagged: by_level renders its LOWEST key, so a junk "-1_x_y.tif" wins level selection and blanks the real tiles — fixed `b768b9d` (range check vs gggs::levels at scan time) — `src/survey_overview_window.cpp`
+- [x] (trivial, Copilot R3 ×2) `::testing::TempDir()` concatenated without explicit path separator — fixed `b768b9d` — `test/test_survey_index_bridge.cpp`
+
+### False positives
+- none.
