@@ -107,3 +107,21 @@ Structurally sound, well-reasoned plan that addresses most review-issue findings
 - [ ] List `test_survey_explorer_window.cpp` in the Files table and add its `ament_add_gtest` registration to the CMakeLists change, or drop the claim.
 - [ ] Decide `queryAllNavTrack` raw-SQL vs query-library reuse; document the choice in the plan.
 - [ ] Confirm the rename target name and the dock strategy (Option A/B) with Roland before steps 1–2.
+
+## Plan Superseded and Rewritten
+**Status**: complete
+**When**: 2026-07-16 (host, at plan checkpoint)
+**By**: Claude Code Agent (Claude Fable 5)
+
+Roland corrected the architecture at the checkpoint: no shell window hosting
+QDockWidgets — SidescanViewerWindow already has the right panes; grow IT into
+the explorer. New flow: geo pane = index map (stores basemap + nav track +
+tile selection + current-pass drape + contacts, one merged canvas); tile
+selection auto-loads ALL bags' passes into the cloud (stage-4 CUBE surface
+joins that display later); a NEW timeline pane (gap-compressed UTC axis,
+pass bars sharing the cloud's golden-angle colours) picks what the
+single-pass waterfall shows. SurveyOverviewWindow/Canvas + MbesCloudWindow
+retire. The first review-plan round reviewed the superseded draft — a fresh
+review-plan round runs against this rewrite. Open checkpoint items: executable
+name (survey_explorer proposed); timeline replaces the pass list (flag if the
+tabular list should be retained).
