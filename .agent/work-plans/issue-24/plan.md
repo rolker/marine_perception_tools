@@ -86,8 +86,8 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
    stage-2 pass list (the tooltip + a status readout carry the detail the list
    showed).
 
-5. **Rename + retire scaffolding.** Executable → `survey_explorer` (**name
-   pending Roland's confirmation at checkpoint**); `sidescan_target_viewer`
+5. **Rename + retire scaffolding.** Executable → `survey_explorer`
+   (**Roland-confirmed at checkpoint 2026-07-16**); `sidescan_target_viewer`
    remains as a shim (`execv` of the sibling binary). Retire
    `SurveyOverviewWindow` (+ its canvas) — `--index` and bag modes converge on
    the one window. Update `CMakeLists.txt` (targets, install), `package.xml`
@@ -137,11 +137,10 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 
 ## Open Questions
 
-- **Executable name**: `survey_explorer` proposed — Roland confirms or supplies an
-  alternative at the plan checkpoint.
-- **Timeline vs pass list**: plan replaces the list with the timeline (+tooltips
-  and status readout). If Roland wants the tabular list retained alongside, it
-  is an additive pane — flag at checkpoint.
+None — both checkpoint items resolved by Roland 2026-07-16:
+- **Executable name**: `survey_explorer` (confirmed).
+- **Timeline vs pass list**: timeline only (confirmed); tooltips + status
+  readout carry the detail.
 
 ## Estimated Scope
 

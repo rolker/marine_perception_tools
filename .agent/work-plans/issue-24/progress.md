@@ -156,3 +156,14 @@ graded the superseded QDockWidget-shell draft).
 
 ### Summary
 Sound, technically feasible rewrite — the multi-pass cloud API (`PointCloudView::setMultiPassPoints`) and the per-bag `mapToGeo` anchor both already exist, and "grow the viewer" is cleaner than the superseded shell. The one substantive gap: step 1 mis-describes which component holds the geographic projection, so the canvas merge is really "adopt a geographic frame and reproject the per-bag coverage," reusing `survey_overview_projection.hpp`. Fold findings 1–3 into the plan (all additive) and confirm the two checkpoint questions, then ready to implement.
+
+## Plan Checkpoint
+**Status**: complete
+**When**: 2026-07-16
+**By**: Roland (decisions) / Claude Code Agent (Claude Fable 5)
+
+Roland approved the rewritten plan with review-plan round-2 findings folded in.
+Decisions: executable name = `survey_explorer`; timeline REPLACES the pass
+list (timeline only). Implementation proceeds host-inline, commit-phased
+(a) bridge+pure headers+tests, (b) canvas merge, (c) cloud in place,
+(d) timeline, (e) rename/docs/retire.
