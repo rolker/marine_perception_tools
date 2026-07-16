@@ -125,3 +125,34 @@ retire. The first review-plan round reviewed the superseded draft — a fresh
 review-plan round runs against this rewrite. Open checkpoint items: executable
 name (survey_explorer proposed); timeline replaces the pass list (flag if the
 tabular list should be retained).
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-16 18:27 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+<!-- Independence: the most recent `## Plan Authored` was by "Claude Code Agent
+(Claude Sonnet)" and the rewrite by "Claude Code Agent (Claude Fable 5)". This
+review is a fresh-context dispatch on a different model (Opus). All workspace
+agents share the name "Claude Code Agent", so the name-only self-review heuristic
+over-matches — treated as independent per the annotation's stated purpose. -->
+
+**Plan**: `.agent/work-plans/issue-24/plan.md` at `b854d81` (rewrite per checkpoint correction)
+**PR**: PR-less (`--issue` mode; gh unauthenticated this session — issue requirements
+read from the `## Issue Review` entry above and the plan's Context/Issue links)
+**Verdict**: approve-with-suggestions
+
+This is a fresh review of the **rewritten** plan (the prior `## Plan Review`
+graded the superseded QDockWidget-shell draft).
+
+### Findings
+- [ ] (must-fix) Step 1 asserts `SidescanCanvas` "already carries the geo projection" — it does NOT. `SidescanCanvas` is a per-bag map-ENU (metres) canvas (`sidescan_canvas.hpp:41`); the geographic `GeoView`/`geoToPixel` projection lives in `survey_overview_projection.hpp`, used by `SurveyOverviewCanvas` (which states the split explicitly at `survey_overview_canvas.hpp:41`). The merge means the index map adopts a geographic frame and the current-pass coverage is reprojected map-ENU→geo (anchor exists: `SidescanBagSession::mapToGeo`, used at `sidescan_viewer_window.cpp:981`). Correct the claim and add the reprojection step — `plan.md:36`, `plan.md:44`
+- [ ] (must-fix) The merged canvas needs the pure `survey_overview_projection.hpp` (already unit-tested by `test_survey_projection.cpp`), but the Files-to-Change table deletes `survey_overview_canvas.*` while staying silent on the projection header. State it is retained + reused (and its test kept) so the geographic math isn't reinvented — `plan.md:100`, `plan.md:101`
+- [ ] (suggestion) `queryAllNavTrack()` implementation unstated; the bridge contract is to reuse `marine_survey_index`'s query library, not raw SQL (`survey_index_bridge.hpp:39`). `queryNavTrackInBox(extent())` (bridge already has `extent()`) gives all-bags nav track with no new SQL — document the choice (carried from prior round, still open) — `plan.md:54`
+- [ ] (suggestion) Scope at upper bound (~16 files); the `PassTimelineWidget` (step 4) is the most self-contained additive piece and a natural follow-up split if the PR balloons — gate phase (e) as spillable — `plan.md:70`
+- [ ] (note) `queryTiles(vector<GridIndex>)` wraps `queryPasses` with tiles as direct index keys — resolves the prior round's box-detour concern — `plan.md:57`
+- [ ] (note) Integrated-window smoke: rewrite folds the prior dock-smoke concern into "existing window/GL tests … offscreen smoke of the integrated window (`--index` mode)" without naming a file — ensure the `--index` path gets an actual offscreen smoke assertion — `plan.md:109`
+- [ ] (note) Two checkpoint questions correctly gate work: executable name (`survey_explorer`) and timeline-replaces-pass-list — confirm with Roland before steps 1/4 — `plan.md:132`
+
+### Summary
+Sound, technically feasible rewrite — the multi-pass cloud API (`PointCloudView::setMultiPassPoints`) and the per-bag `mapToGeo` anchor both already exist, and "grow the viewer" is cleaner than the superseded shell. The one substantive gap: step 1 mis-describes which component holds the geographic projection, so the canvas merge is really "adopt a geographic frame and reproject the per-bag coverage," reusing `survey_overview_projection.hpp`. Fold findings 1–3 into the plan (all additive) and confirm the two checkpoint questions, then ready to implement.
