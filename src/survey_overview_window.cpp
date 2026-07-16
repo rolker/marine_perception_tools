@@ -44,6 +44,7 @@
 #include "marine_colormap/transfer.hpp"
 #include "marine_tiled_raster_store/tile_io.hpp"
 #include "mbes_cloud_window.hpp"
+#include "pass_coalesce.hpp"
 #include "sidescan_viewer_window.hpp"
 
 namespace marine_perception_tools
@@ -87,64 +88,6 @@ QImage tileToImage(
     }
   }
   return image;
-}
-
-// One physical pass over the queried spot. queryPasses returns one PassRow per
-// (pass, tile), so a transit that crosses several tiles inside the query box
-// comes back as several per-tile segments.
-struct CoalescedPass
-{
-  std::string bag_path;
-  std::string sensor_type;
-  std::string topic;
-  std::int64_t t_start_ns = 0;
-  std::int64_t t_end_ns = 0;
-  std::int64_t ping_count = 0;
-};
-
-// Merge the per-tile segments so the pass list shows one row per physical pass.
-// Segments sharing (bag, sensor, topic) whose time windows overlap or sit
-// within kSegmentGapNs are one transit across adjacent tiles (their windows are
-// back-to-back); a genuine revisit of the same spot is separated by far more,
-// so it stays a distinct entry. Ping counts of merged segments are summed.
-// Result is ordered by bag then start, matching the queryPasses contract the
-// list build relies on.
-std::vector<CoalescedPass> coalescePasses(
-  const std::vector<marine_survey_index::PassRow> & rows)
-{
-  // 5 s comfortably spans the inter-tile ping gap within one transit without
-  // bridging two separate visits (survey revisits are minutes apart).
-  constexpr std::int64_t kSegmentGapNs = 5LL * 1000000000LL;
-
-  // rows arrive ordered by bag then t_start; bucket by (bag, sensor, topic) —
-  // filtering that order per bucket keeps each bucket sorted by t_start, so a
-  // running interval-merge against the last segment is correct.
-  std::map<std::tuple<std::string, std::string, std::string>,
-    std::vector<CoalescedPass>> buckets;
-  for (const auto & row : rows) {
-    auto & merged = buckets[{row.bag_path, row.sensor_type, row.topic}];
-    if (!merged.empty() && row.t_start_ns <= merged.back().t_end_ns + kSegmentGapNs) {
-      merged.back().t_end_ns = std::max(merged.back().t_end_ns, row.t_end_ns);
-      merged.back().ping_count += row.ping_count;
-    } else {
-      merged.push_back(CoalescedPass{
-            row.bag_path, row.sensor_type, row.topic,
-            row.t_start_ns, row.t_end_ns, row.ping_count});
-    }
-  }
-
-  std::vector<CoalescedPass> passes;
-  for (auto & [key, merged] : buckets) {
-    passes.insert(passes.end(), merged.begin(), merged.end());
-  }
-  std::sort(passes.begin(), passes.end(),
-    [](const CoalescedPass & a, const CoalescedPass & b) {
-      if (a.bag_path != b.bag_path) {
-        return a.bag_path < b.bag_path;
-      }
-      return a.t_start_ns < b.t_start_ns;
-    });
-  return passes;
 }
 
 }  // namespace

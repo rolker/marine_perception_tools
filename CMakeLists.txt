@@ -194,9 +194,19 @@ if(BUILD_TESTING)
   target_include_directories(test_survey_projection PRIVATE src)
 
   # Survey-index bridge: click -> pass rows against a file-backed fixture DB
-  # written through the marine_survey_index schema (#19).
+  # written through the marine_survey_index schema (#19); tile-selection and
+  # nav-track accessors (#24).
   ament_add_gtest(test_survey_index_bridge test/test_survey_index_bridge.cpp)
   target_link_libraries(test_survey_index_bridge survey_index_bridge SQLite::SQLite3)
+
+  # Pure tile-selection math (tile_selection.hpp, #24) — header-only.
+  ament_add_gtest(test_tile_selection test/test_tile_selection.cpp)
+  target_include_directories(test_tile_selection PRIVATE src)
+
+  # Pure gap-compressed timeline axis (pass_timeline_model.hpp, #24) —
+  # header-only.
+  ament_add_gtest(test_pass_timeline_model test/test_pass_timeline_model.cpp)
+  target_include_directories(test_pass_timeline_model PRIVATE src)
 
   # Multi-pass windowed-read pure parts (#21): cross-bag frame reprojection +
   # the shared tf_lift helpers. No bag I/O; links sidescan_core.

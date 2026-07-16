@@ -16,6 +16,7 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 
@@ -49,6 +50,22 @@ protected:
       std::to_string(tile.row()) + ", " + std::to_string(tile.column()) +
       ", 'mbes-bathy', '/detections', 1000, 2000, 42);";
     exec(db, pass.c_str());
+    // A second pass on a tile ~1 km north (same bag): far enough that the
+    // stage-2 point-query tests keep their single-tile semantics, and the
+    // tile-selection queries must find exactly the selected tiles' passes.
+    const auto north_tile = gggs::Level(14).gridIndex(kLat + 0.01, kLon);
+    const std::string pass2 =
+      "INSERT INTO passes (bag_id, level, tile_row, tile_col, sensor_type,"
+      " topic, t_start_ns, t_end_ns, ping_count) VALUES (1, 14, " +
+      std::to_string(north_tile.row()) + ", " + std::to_string(north_tile.column()) +
+      ", 'sidescan-port', '/ss_port', 5000, 6000, 7);";
+    exec(db, pass2.c_str());
+    // Nav track (schema v2, #265) — inserted out of time order to prove the
+    // accessor's ordering.
+    exec(db, ("INSERT INTO nav_track (bag_id, t_ns, latitude, longitude) VALUES"
+      " (1, 1500, " + std::to_string(kLat) + ", " + std::to_string(kLon) + "),"
+      " (1, 1200, " + std::to_string(kLat + 1e-4) + ", " + std::to_string(kLon) + ");")
+      .c_str());
     sqlite3_close(db);
   }
 
@@ -107,11 +124,69 @@ TEST_F(BridgeFixture, ExtentMatchesTheIndexedTileBounds)
   const marine_perception_tools::SurveyIndexBridge bridge(path_);
   const auto box = bridge.extent();
   ASSERT_TRUE(box.has_value());
-  const auto tile = gggs::Level(14).gridIndex(kLat, kLon);
-  EXPECT_DOUBLE_EQ(box->south, tile.southLatitude());
-  EXPECT_DOUBLE_EQ(box->north, tile.northLatitude());
-  EXPECT_DOUBLE_EQ(box->west, tile.westLongitude());
-  EXPECT_DOUBLE_EQ(box->east, tile.eastLongitude());
+  const auto home = gggs::Level(14).gridIndex(kLat, kLon);
+  const auto far_north = gggs::Level(14).gridIndex(kLat + 0.01, kLon);
+  EXPECT_DOUBLE_EQ(box->south, home.southLatitude());
+  EXPECT_DOUBLE_EQ(box->north, far_north.northLatitude());
+  EXPECT_DOUBLE_EQ(box->west, std::min(home.westLongitude(), far_north.westLongitude()));
+  EXPECT_DOUBLE_EQ(box->east, std::max(home.eastLongitude(), far_north.eastLongitude()));
+}
+
+TEST_F(BridgeFixture, IndexedTileBoundsMatchGridIndex)
+{
+  // The selectable-tile bounds come from the same public gggs::levels
+  // formulas as extent(); pin them against real GridIndex accessors.
+  const marine_perception_tools::SurveyIndexBridge bridge(path_);
+  const auto tiles = bridge.indexedTiles();
+  ASSERT_EQ(tiles.size(), 2u);
+  const auto home = gggs::Level(14).gridIndex(kLat, kLon);
+  const auto & first = tiles[0];   // ordered by (level, row, col): home is south
+  EXPECT_EQ(first.level, 14);
+  EXPECT_EQ(first.row, home.row());
+  EXPECT_EQ(first.col, home.column());
+  EXPECT_DOUBLE_EQ(first.south, home.southLatitude());
+  EXPECT_DOUBLE_EQ(first.north, home.northLatitude());
+  EXPECT_DOUBLE_EQ(first.west, home.westLongitude());
+  EXPECT_DOUBLE_EQ(first.east, home.eastLongitude());
+}
+
+TEST_F(BridgeFixture, QueryTilesReturnsExactlyTheSelectedTilesPasses)
+{
+  const marine_perception_tools::SurveyIndexBridge bridge(path_);
+  const auto tiles = bridge.indexedTiles();
+  ASSERT_EQ(tiles.size(), 2u);
+
+  // Selecting only the home (southern) tile finds only its mbes pass.
+  const auto home_rows = bridge.queryTiles({tiles[0]});
+  ASSERT_EQ(home_rows.size(), 1u);
+  EXPECT_EQ(home_rows[0].sensor_type, "mbes-bathy");
+
+  // Selecting both tiles finds both passes.
+  EXPECT_EQ(bridge.queryTiles(tiles).size(), 2u);
+
+  // An empty selection finds nothing.
+  EXPECT_TRUE(bridge.queryTiles({}).empty());
+}
+
+TEST_F(BridgeFixture, NavTrackIsTimeOrdered)
+{
+  const marine_perception_tools::SurveyIndexBridge bridge(path_);
+  const auto track = bridge.navTrack();
+  ASSERT_EQ(track.size(), 2u);
+  EXPECT_EQ(track[0].t_ns, 1200);
+  EXPECT_EQ(track[1].t_ns, 1500);
+  EXPECT_EQ(track[0].bag_id, track[1].bag_id);
+}
+
+TEST(SurveyIndexBridge, NavTrackOfEmptyIndexIsEmpty)
+{
+  const std::string path = std::string(::testing::TempDir()) + "/empty_track.db";
+  std::remove(path.c_str());
+  sqlite3_close(marine_survey_index::openIndexDb(path));
+  const marine_perception_tools::SurveyIndexBridge bridge(path);
+  EXPECT_TRUE(bridge.navTrack().empty());
+  EXPECT_TRUE(bridge.indexedTiles().empty());
+  std::remove(path.c_str());
 }
 
 TEST(SurveyIndexBridge, ExtentOfEmptyIndexIsNullopt)

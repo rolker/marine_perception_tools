@@ -15,6 +15,7 @@
 #ifndef SURVEY_INDEX_BRIDGE_HPP_
 #define SURVEY_INDEX_BRIDGE_HPP_
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -30,6 +31,20 @@ namespace marine_perception_tools
 // covered GGGS tiles).
 struct GeoExtent
 {
+  double south = 0.0;
+  double west = 0.0;
+  double north = 0.0;
+  double east = 0.0;
+};
+
+// One distinct indexed tile: its GGGS key plus its geographic bounds (derived
+// from the public gggs::levels specs — the GridIndex row/col constructor is
+// private; the formulas are pinned against GridIndex accessors in the test).
+struct IndexedTile
+{
+  std::uint8_t level = 0;
+  std::uint32_t row = 0;
+  std::uint32_t col = 0;
   double south = 0.0;
   double west = 0.0;
   double north = 0.0;
@@ -63,6 +78,20 @@ public:
   // overview fits its view to when no store tiles are available, so the map
   // click can still be aimed. nullopt when the index holds no passes.
   std::optional<GeoExtent> extent() const;
+
+  // Every distinct indexed pass tile with its bounds — the selectable tile
+  // grid the explorer map draws (#24). Ordered by (level, row, col).
+  std::vector<IndexedTile> indexedTiles() const;
+
+  // Passes covering exactly the given tiles (the map's selection — the tiles
+  // ARE index keys, no bounding-box detour), ordered by bag and time.
+  std::vector<marine_survey_index::PassRow> queryTiles(
+    const std::vector<IndexedTile> & tiles) const;
+
+  // The whole survey's decimated nav track (schema v2, #265), ordered by bag
+  // then time — segment into per-bag polylines at bag_id changes. Empty when
+  // the index predates the track table's population or holds no posed pings.
+  std::vector<marine_survey_index::NavPoint> navTrack() const;
 
 private:
   sqlite3 * db_ = nullptr;

@@ -64,7 +64,7 @@ std::vector<marine_survey_index::PassRow> SurveyIndexBridge::queryPoint(
   return marine_survey_index::queryPasses(db_, tiles, "");
 }
 
-std::optional<GeoExtent> SurveyIndexBridge::extent() const
+std::vector<IndexedTile> SurveyIndexBridge::indexedTiles() const
 {
   // gggs::GridIndex knows its own bounds but its (level, row, col) constructor
   // is private, so mirror its accessors using the public gggs::levels specs.
@@ -72,42 +72,86 @@ std::optional<GeoExtent> SurveyIndexBridge::extent() const
   // the bridge test pins them against a GridIndex built from coordinates.
   sqlite3_stmt * stmt = nullptr;
   if (sqlite3_prepare_v2(
-      db_, "SELECT DISTINCT level, tile_row, tile_col FROM passes;",
+      db_,
+      "SELECT DISTINCT level, tile_row, tile_col FROM passes"
+      " ORDER BY level, tile_row, tile_col;",
       -1, &stmt, nullptr) != SQLITE_OK)
   {
     throw std::runtime_error(
-      std::string("survey index extent query failed: ") + sqlite3_errmsg(db_));
+      std::string("survey index tile scan failed: ") + sqlite3_errmsg(db_));
   }
-  std::optional<GeoExtent> box;
+  std::vector<IndexedTile> tiles;
   int rc;
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     const auto level = sqlite3_column_int64(stmt, 0);
     const auto row = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 1));
     const auto col = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 2));
     if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size()) {
-      continue;   // out-of-contract row; the schema check already vouched for v1
+      continue;   // out-of-contract row; the schema check already vouched
     }
     const auto & spec = gggs::levels[level];
-    const double south = std::clamp(-96.0 + row * spec.grid_angular_span, -90.0, 90.0);
-    const double north = std::clamp(-96.0 + (row + 1) * spec.grid_angular_span, -90.0, 90.0);
+    IndexedTile tile;
+    tile.level = static_cast<std::uint8_t>(level);
+    tile.row = row;
+    tile.col = col;
+    tile.south = std::clamp(-96.0 + row * spec.grid_angular_span, -90.0, 90.0);
+    tile.north = std::clamp(-96.0 + (row + 1) * spec.grid_angular_span, -90.0, 90.0);
     const double lon_span = spec.gridLongitudinalSpan(row);
-    const double west = -180.0 + col * lon_span;
-    const double east = -180.0 + (col + 1) * lon_span;
-    if (!box) {
-      box = GeoExtent{south, west, north, east};
-    } else {
-      box->south = std::min(box->south, south);
-      box->west = std::min(box->west, west);
-      box->north = std::max(box->north, north);
-      box->east = std::max(box->east, east);
-    }
+    tile.west = -180.0 + col * lon_span;
+    tile.east = -180.0 + (col + 1) * lon_span;
+    tiles.push_back(tile);
   }
   sqlite3_finalize(stmt);
   if (rc != SQLITE_DONE) {
     throw std::runtime_error(
-      std::string("survey index extent scan failed: ") + sqlite3_errmsg(db_));
+      std::string("survey index tile scan failed: ") + sqlite3_errmsg(db_));
+  }
+  return tiles;
+}
+
+std::optional<GeoExtent> SurveyIndexBridge::extent() const
+{
+  std::optional<GeoExtent> box;
+  for (const auto & tile : indexedTiles()) {
+    if (!box) {
+      box = GeoExtent{tile.south, tile.west, tile.north, tile.east};
+    } else {
+      box->south = std::min(box->south, tile.south);
+      box->west = std::min(box->west, tile.west);
+      box->north = std::max(box->north, tile.north);
+      box->east = std::max(box->east, tile.east);
+    }
   }
   return box;
+}
+
+std::vector<marine_survey_index::PassRow> SurveyIndexBridge::queryTiles(
+  const std::vector<IndexedTile> & tiles) const
+{
+  // The selection's tiles are already index keys. GridIndex's (level, row,
+  // col) constructor is private, so rebuild each key from its centre — the
+  // centre of a tile's own bounds always maps back to that tile.
+  std::vector<gggs::GridIndex> keys;
+  keys.reserve(tiles.size());
+  for (const auto & tile : tiles) {
+    keys.push_back(gggs::Level(tile.level).gridIndex(
+        (tile.south + tile.north) / 2.0, (tile.west + tile.east) / 2.0));
+  }
+  return marine_survey_index::queryPasses(db_, keys, "");
+}
+
+std::vector<marine_survey_index::NavPoint> SurveyIndexBridge::navTrack() const
+{
+  // Nav points are posed pings' ground origins, and every posed ping put its
+  // footprint tile in the index — so the pass-tile extent always covers the
+  // track. An empty index (or a pre-#265 one regenerated without pings) has
+  // no extent and no track.
+  const auto box = extent();
+  if (!box) {
+    return {};
+  }
+  return marine_survey_index::queryNavTrackInBox(
+    db_, box->south, box->west, box->north, box->east);
 }
 
 }  // namespace marine_perception_tools
