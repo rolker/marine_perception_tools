@@ -65,3 +65,45 @@ Per the consequences map:
 ### Open questions
 - [ ] Rename target name: plan proposes `survey_explorer` — needs Roland's confirmation before implementation begins.
 - [ ] Dock strategy for `SidescanViewerWindow`: Option A (wrap QMainWindow in QDockWidget) vs Option B (refactor to QWidget) — confirm acceptable before step 2.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-16 18:10 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+<!-- Independence: `## Plan Authored` was by "Claude Code Agent (Claude Sonnet)"; this
+review is a fresh-context dispatch on a different model (Opus). All workspace agents
+share the name "Claude Code Agent", so the name-only self-review heuristic over-matches
+here — treated as an independent review per the annotation's stated purpose. -->
+
+**Plan**: `.agent/work-plans/issue-24/plan.md` at `1a0b90d`
+**PR**: PR-less (`--issue` mode; gh unauthenticated this session — issue requirements
+read from the `## Issue Review` entry above and the plan's Context/Issue links)
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (must-fix) `.agents/README.md` omitted from the Files-to-Change table — its Package Inventory row and CLI examples name `sidescan_target_viewer` as the tool; review-issue explicitly listed it. Update to name `survey_explorer` primary + note the shim — `plan.md:68` (Files table), `plan.md:63`
+- [ ] (must-fix) New dock smoke test `test_survey_explorer_window.cpp` is named in the Principles table but absent from the Files-to-Change table and the CMakeLists change description (no `ament_add_gtest` registration listed). Reconcile: add the file + register the target, or drop the claim — `plan.md:90`, `plan.md:77`
+- [ ] (suggestion) `queryAllNavTrack()` uses raw SQL against `nav_track`, contradicting the bridge's stated contract ("reusing marine_survey_index's query library … not by re-implementing the SQL", `survey_index_bridge.hpp:39`). The library exposes `queryNavTrack(bag_id)` and `queryNavTrackInBox(...)`; prefer reusing them (loop distinct bag_ids, or box=index extent) or add a true all-bags accessor to the library — `plan.md:54`
+- [ ] (suggestion) `queryTileBox(south,west,north,east)` takes a box, but the plan describes it as "expands the union of selected-tile bounds"; the union must be computed at the window/canvas (owner of `tiles_`) from the emitted indices, not in the bridge. Clarify the boundary — `plan.md:48`
+- [ ] (note) Two open-question checkpoints (rename name; dock strategy A vs B) correctly gate steps 1 and 2 — get Roland's confirmation before those steps — `plan.md:112`
+
+### Evaluation
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | ~8–10 files, 2 new sources, single PR. Upper bound but coherent — docking depends on the rename; the tile-selection signal change is the same signal the dock connection reads. |
+| Issue alignment | Good | All four issue items covered. review-issue's item-3 (nav track) gate is resolved: `unh_marine_autonomy#265` has landed (`queryNavTrack`/`queryNavTrackInBox` present, prod index holds v2 data), and graceful degradation + empty-table test are planned. |
+| File targeting | Needs work | Right source files identified, but `.agents/README.md` (a review-issue-flagged consequence) is missing and the named dock smoke-test file is not listed. |
+| Consequences | Needs work | Consequences table covers the rename's `CMakeLists`/`package.xml`/`README.md`, but omits `.agents/README.md` (Package Inventory + CLI + layout table). |
+| Principle alignment | Good | "A change includes its consequences" mostly satisfied (gap = `.agents/README.md`); "Only what's needed" respected (reuses query API, no new schema); shim preserves backward compat. |
+| ADR compliance | Good | ADR-0008 install rule already correct (`lib/${PROJECT_NAME}`); no new `exec_depend` needed for a local exe; ADR-0013 entry types correct. No new ADR required for the snake_case rename. |
+| ROS conventions | Good | Executable rename + install(TARGETS) + package.xml handled per ROS 2 conventions; Qt5-version-agnostic targets preserved. |
+
+### Summary
+Structurally sound, well-reasoned plan that addresses most review-issue findings and resolves the nav-track dependency gate. Two completeness gaps remain — the `.agents/README.md` rename consequence and the unlisted dock smoke-test target — both additive (they don't change the approach) and should be folded into the plan before/during implementation. Ready to implement once those are folded in and the two checkpoint questions are confirmed with Roland.
+
+### Recommended Actions
+- [ ] Add `.agents/README.md` to the Files-to-Change + Consequences tables (Package Inventory, CLI examples, layout).
+- [ ] List `test_survey_explorer_window.cpp` in the Files table and add its `ament_add_gtest` registration to the CMakeLists change, or drop the claim.
+- [ ] Decide `queryAllNavTrack` raw-SQL vs query-library reuse; document the choice in the plan.
+- [ ] Confirm the rename target name and the dock strategy (Option A/B) with Roland before steps 1–2.
