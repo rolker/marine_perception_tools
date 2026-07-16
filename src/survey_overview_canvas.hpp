@@ -21,21 +21,11 @@
 
 #include <vector>
 
+#include "sidescan_canvas.hpp"   // OverviewTile (moved there in #24)
 #include "survey_overview_projection.hpp"
 
 namespace marine_perception_tools
 {
-
-// One store tile rendered on the overview: a colormapped image plus its
-// geographic bounds (GGGS grid corners, degrees).
-struct OverviewTile
-{
-  QImage image;
-  double south = 0.0;
-  double west = 0.0;
-  double north = 0.0;
-  double east = 0.0;
-};
 
 // Survey-wide, north-up map canvas: draws store tiles in lat/lon space via the
 // pure GeoView projection (survey_overview_projection.hpp — cos(lat) aspect

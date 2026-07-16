@@ -16,14 +16,21 @@
 #define SIDESCAN_CANVAS_HPP_
 
 #include <QImage>
+#include <QPoint>
 #include <QPointF>
+#include <QPolygonF>
 #include <QRectF>
 #include <QString>
 #include <QVector>
 #include <QWidget>
 
+#include <cstddef>
 #include <optional>
+#include <set>
+#include <utility>
 #include <vector>
+
+#include "tile_selection.hpp"
 
 namespace marine_perception_tools
 {
@@ -38,11 +45,54 @@ struct ContactMarker
   QString id;
 };
 
-// North-up 2D map view in the bizzy/map ENU plane (metres). Displays a rendered
-// coverage image (painted swath) at its true map position, a boat track polyline,
-// and a subtle measuring grid at a configurable spacing. Supports wheel zoom
-// (about the cursor) and drag pan. Map east = +x (screen right), map north = +y
-// (screen up), so the view is north-up.
+// One store tile rendered on the map: a colormapped image plus its geographic
+// bounds (GGGS grid corners, degrees). (Moved here from the retired
+// SurveyOverviewCanvas, #24.)
+struct OverviewTile
+{
+  QImage image;
+  double south = 0.0;
+  double west = 0.0;
+  double north = 0.0;
+  double east = 0.0;
+};
+
+// A geographic rect for a selectable index tile (degrees).
+struct GeoRect
+{
+  double south = 0.0;
+  double west = 0.0;
+  double north = 0.0;
+  double east = 0.0;
+};
+
+// The map-ENU -> geographic anchor for a bag with an earth reference:
+// first-order (affine) expansion of the session's mapToGeo about the map
+// origin — exact to millimetres over survey scales, and invertible, which
+// mapToGeo itself is not.
+struct MapGeoAffine
+{
+  double lat0 = 0.0;      // geo of map (0, 0)
+  double lon0 = 0.0;
+  double dlat_dx = 0.0;   // degrees per map metre
+  double dlat_dy = 0.0;
+  double dlon_dx = 0.0;
+  double dlon_dy = 0.0;
+};
+
+// North-up 2D map canvas (#24: the explorer's index map). Internally it works
+// in "canvas metres":
+//  - Without a geographic origin (bag-only, no survey index) canvas metres ARE
+//    the bag's map-ENU metres — the historical per-bag behaviour, unchanged.
+//  - With a geographic origin (survey index loaded) canvas metres are a local
+//    equirectangular plane about that origin; geographic layers (store-tile
+//    basemap, nav track, selectable index tiles) place directly, and the
+//    per-bag layers (coverage image, boat track, contacts, linked cursor)
+//    place through the bag's MapGeoAffine anchor. A bag without a geo anchor
+//    cannot be placed on the survey map: its layers are hidden and the
+//    map-frame signals are suppressed rather than emitted with garbage.
+// Wheel zoom (about the cursor) and drag pan; ctrl-click toggles the index
+// tile under the cursor and ctrl-drag rubber-bands tiles.
 class SidescanCanvas : public QWidget
 {
   Q_OBJECT
@@ -50,6 +100,33 @@ class SidescanCanvas : public QWidget
 public:
   explicit SidescanCanvas(QWidget * parent = nullptr);
 
+  // --- geographic frame (survey/index mode) -------------------------------
+  // Establish the geographic origin of the canvas-metre plane. Set BEFORE any
+  // geographic layer; changing it re-derives all stored layer geometry.
+  void setGeoOrigin(double lat_deg, double lon_deg);
+  bool hasGeoOrigin() const {return geo_mode_;}
+
+  // The bag's map-ENU -> geo anchor (nullopt: bag has no earth reference).
+  void setMapAnchor(const std::optional<MapGeoAffine> & anchor);
+  bool mapPlaceable() const {return !geo_mode_ || map_anchor_.has_value();}
+
+  // Store-tile basemap (geo bounds per tile).
+  void setStoreTiles(std::vector<OverviewTile> tiles);
+
+  // Decimated nav track, pre-segmented per bag, as (lat, lon) polylines.
+  void setNavTrack(std::vector<std::vector<std::pair<double, double>>> segments);
+
+  // Selectable index tiles. Replaces the set and clears the selection.
+  void setIndexTiles(const std::vector<GeoRect> & tiles);
+  const std::set<std::size_t> & selectedTiles() const {return selected_tiles_;}
+  void clearTileSelection();
+
+  // Fit the view to a geographic box (applied at the next laid-out paint, and
+  // re-applied on resize until the user pans/zooms — the ctor-time widget
+  // size is pre-layout, so an immediate fit would mis-scale).
+  void fitGeo(double south, double west, double north, double east);
+
+  // --- per-bag layers (map-ENU metres, unchanged contracts) ---------------
   // Set the rendered coverage image and the map extent it covers. `origin_x/y` is
   // the south-west corner (min east, min north); the image is north-up (row 0 =
   // north edge). `res_m` is metres per pixel.
@@ -61,10 +138,12 @@ public:
   void setGridSpacing(double metres);
 
   // Recenter the view on a map point (metres) without changing zoom — used to keep
-  // the scrubbed window centred ("follow the playhead").
+  // the scrubbed window centred ("follow the playhead"). No-op when the bag is
+  // not placeable on the survey map.
   void setCenter(double map_x, double map_y);
 
-  // Fit the current coverage extent (or track) into the widget.
+  // Fit the current bag content (coverage or track); with a geographic fit
+  // pending and no bag content, refits the survey bounds instead.
   void resetView();
 
   // In mark mode, left-drag draws a contact box (instead of panning) and emits
@@ -84,40 +163,85 @@ signals:
   // Hovered map position (metres), for a cross-pane linked cursor (always valid).
   void hoverWorld(double map_x, double map_y, bool valid);
 
+  // Hovered geographic position (only in geo mode), for a status readout.
+  void hoverGeo(double lat, double lon);
+
   // Middle-click map position (metres), for click-to-seek.
   void seekWorld(double map_x, double map_y);
 
+  // The set of selected index tiles changed (ctrl-click / rubber band).
+  void tileSelectionChanged();
+
 protected:
   void paintEvent(QPaintEvent * event) override;
+  void resizeEvent(QResizeEvent * event) override;
   void wheelEvent(QWheelEvent * event) override;
   void mousePressEvent(QMouseEvent * event) override;
   void mouseMoveEvent(QMouseEvent * event) override;
   void mouseReleaseEvent(QMouseEvent * event) override;
 
 private:
+  // canvas metres <-> screen pixels (view transform).
   QPointF mapToScreen(double mx, double my) const;
   QPointF screenToMap(double sx, double sy) const;
-  void drawGrid(QPainter & painter) const;
+  // geographic <-> canvas metres (local equirectangular about the geo origin).
+  QPointF geoToCanvas(double lat, double lon) const;
+  std::pair<double, double> canvasToGeo(double mx, double my) const;
+  // bag map-ENU <-> canvas metres (through the anchor; identity without geo mode).
+  QPointF bagToCanvas(double x, double y) const;
+  std::optional<QPointF> canvasToBag(double mx, double my) const;
 
+  void rebuildGeoLayerGeometry();   // re-derive canvas-metre rects/polylines
+  void applyPendingFit();
+  void drawGrid(QPainter & painter) const;
+  void drawNavTrack(QPainter & painter) const;
+  void drawIndexTiles(QPainter & painter) const;
+
+  // --- geographic frame ---
+  bool geo_mode_ = false;
+  double geo_lat0_ = 0.0;
+  double geo_lon0_ = 0.0;
+  double lon_scale_ = 1.0;   // cos(geo_lat0_), floored
+  std::optional<MapGeoAffine> map_anchor_;
+
+  std::vector<OverviewTile> store_tiles_;
+  std::vector<QRectF> store_tile_rects_;   // canvas metres (x0..x1, y0..y1 via QRectF)
+
+  std::vector<std::vector<std::pair<double, double>>> nav_segments_geo_;
+  std::vector<QPolygonF> nav_segments_;    // canvas metres
+
+  std::vector<GeoRect> index_tiles_geo_;
+  std::vector<SelectableRect> index_tiles_;   // canvas metres
+  std::set<std::size_t> selected_tiles_;
+
+  bool fit_pending_ = false;
+  bool user_adjusted_ = false;
+  double fit_south_ = 0.0, fit_west_ = 0.0, fit_north_ = 0.0, fit_east_ = 0.0;
+
+  bool band_selecting_ = false;   // mid ctrl-drag rubber band
+  QPoint band_start_;
+  QPoint band_cur_;
+
+  // --- per-bag layers ---
   QImage coverage_;
-  double cov_origin_x_ = 0.0;   // SW corner east (m)
-  double cov_origin_y_ = 0.0;   // SW corner north (m)
+  double cov_origin_x_ = 0.0;   // SW corner east (m, map frame)
+  double cov_origin_y_ = 0.0;   // SW corner north (m, map frame)
   double cov_res_m_ = 1.0;      // metres per coverage pixel
   bool have_coverage_ = false;
 
-  std::vector<QPointF> track_;
+  std::vector<QPointF> track_;  // map frame
 
   double grid_spacing_m_ = 10.0;
   double px_per_m_ = 4.0;       // zoom
-  QPointF center_map_{0.0, 0.0};  // map point shown at the widget centre
+  QPointF center_map_{0.0, 0.0};  // canvas point shown at the widget centre
 
   QPoint last_drag_pos_;
 
   bool mark_mode_ = false;
-  bool marking_ = false;        // mid box-drag
+  bool marking_ = false;        // mid contact box-drag
   QPoint mark_start_;           // screen px
   QPoint mark_cur_;             // screen px
-  QVector<ContactMarker> contacts_;
+  QVector<ContactMarker> contacts_;              // map frame
   std::optional<QPointF> cursor_world_;   // cross-pane linked cursor (map metres)
 };
 
