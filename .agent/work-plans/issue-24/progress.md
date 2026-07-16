@@ -52,3 +52,16 @@ Per the consequences map:
 - [ ] Enumerate rename consequences in the plan (CMakeLists.txt, .agents/README.md, README.md, package.xml) and confirm shim strategy.
 - [ ] Gate or split item 3 (nav track) on `unh_marine_autonomy#265` dependency.
 - [ ] Name test targets for QDockWidget re-parenting and tile-selection interaction in the plan.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-07-16 15:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-24/plan.md` at `1a0b90d`
+**Branch**: feature/issue-24 at `1a0b90d`
+**Phases**: single
+
+### Open questions
+- [ ] Rename target name: plan proposes `survey_explorer` — needs Roland's confirmation before implementation begins.
+- [ ] Dock strategy for `SidescanViewerWindow`: Option A (wrap QMainWindow in QDockWidget) vs Option B (refactor to QWidget) — confirm acceptable before step 2.
