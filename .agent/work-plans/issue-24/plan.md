@@ -32,10 +32,16 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 
 ## Approach
 
-1. **Unified geo canvas (index map).** Fold `SurveyOverviewCanvas`'s layers into
-   `SidescanCanvas` (the integrated one — it already carries the geo projection,
-   the per-bag coverage image, and contact marking), then retire
-   `SurveyOverviewCanvas`. Layer order, bottom-up: store tiles → nav track
+1. **Unified geo canvas (index map).** Merge the two canvases into one
+   **geographic-frame** canvas and retire `SurveyOverviewCanvas`. Frame
+   correction (review-plan finding): `SidescanCanvas` is a per-bag **map-ENU
+   (metres)** canvas; the geographic `GeoView`/`geoToPixel` projection lives in
+   `survey_overview_projection.hpp` (pure, unit-tested — **retained and
+   reused**, along with `test_survey_projection.cpp`). The merged canvas adopts
+   the geographic frame; the per-bag sidescan coverage image and contact
+   overlays are reprojected map-ENU→geo via the existing
+   `SidescanBagSession::mapToGeo` anchor (already used for contact geometry at
+   sidescan_viewer_window.cpp:981). Layer order, bottom-up: store tiles → nav track
    (per-bag polylines, arrowheads every ~30 px, white 60 % alpha, segment at
    bag_id changes) → index-tile grid + selection tint → current-pass sidescan
    coverage image → contacts/crosshair. Interaction:
@@ -49,8 +55,10 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 
 2. **Index integration in the viewer.** Move `--index`/`--stores` handling from
    `SurveyOverviewWindow` into `SidescanViewerWindow`: it owns a
-   `SurveyIndexBridge`, loads store tiles + nav track
-   (new `queryAllNavTrack()` on the bridge) at startup, and on
+   `SurveyIndexBridge`, loads store tiles + nav track at startup — the
+   all-bags track comes from the query library, not raw SQL:
+   `queryNavTrackInBox(extent())` using the bridge's existing `extent()`
+   (review-plan finding; keeps the bridge's reuse-the-library contract), and on
    `tileSelectionChanged` runs `queryPasses` over the selected tiles (new bridge
    helper `queryTiles(vector<GridIndex>)` — the tiles are already index keys, no
    bounding-box detour). Bag-only invocation (no `--index`) keeps working: map
@@ -91,14 +99,14 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 
 | File | Change |
 |------|--------|
-| `src/sidescan_canvas.hpp/.cpp` | Absorb overview layers: store tiles, nav track, tile grid + selection, fallback fit; `tileSelectionChanged` signal |
+| `src/sidescan_canvas.hpp/.cpp` | Adopt geographic frame (reuse `survey_overview_projection.hpp`); absorb overview layers: store tiles, nav track, tile grid + selection, fallback fit; reproject per-bag coverage via `mapToGeo`; `tileSelectionChanged` signal |
 | NEW `src/tile_selection.hpp` | Pure hit-test / rubber-band-intersection / selection-set math |
 | NEW `src/pass_timeline_widget.hpp/.cpp` | Timeline pane: rows per sensor, gap-compressed UTC axis, pass bars, activate signal |
 | NEW `src/pass_timeline_model.hpp` | Pure interval → x mapping with gap compression (unit-testable) |
 | `src/sidescan_viewer_window.hpp/.cpp` | Own SurveyIndexBridge; wire tile selection → cloud auto-load + timeline; embed legend; layout: timeline row under the scrub controls |
 | `src/point_cloud_view.*` | (already has multi-pass API from stage 3 — no change expected) |
 | `src/survey_index_bridge.hpp/.cpp` | Add `queryTiles(vector<GridIndex>)`, `queryAllNavTrack()` |
-| DELETE `src/survey_overview_window.*`, `src/survey_overview_canvas.*`, `src/mbes_cloud_window.*` | Absorbed |
+| DELETE `src/survey_overview_window.*`, `src/survey_overview_canvas.*`, `src/mbes_cloud_window.*` | Absorbed (`survey_overview_projection.hpp` + its test are RETAINED) |
 | `src/sidescan_viewer_main.cpp` → `src/survey_explorer_main.cpp` | Rename; `--index`/`--stores` route into the one window |
 | NEW `src/sidescan_target_viewer_shim.cpp` | Back-compat shim |
 | `CMakeLists.txt` | Target renames, shim, deletions |
@@ -106,7 +114,7 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 | `test/test_survey_index_bridge.cpp` | `queryTiles`, `queryAllNavTrack` (populated + empty) |
 | NEW `test/test_tile_selection.cpp` | Hit-test + rubber-band math pins |
 | NEW `test/test_pass_timeline_model.cpp` | Gap compression, interval mapping, activation lookup pins |
-| existing window/GL tests | Update for renamed class/retired windows; offscreen smoke of the integrated window (`--index` mode) |
+| existing window/GL tests | Update for renamed class/retired windows; NEW `test_survey_explorer_window.cpp` offscreen smoke asserting the `--index` path constructs, loads tiles+track, and survives a synthetic tile selection |
 
 ## Principles Self-Check
 
@@ -137,6 +145,8 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 
 ## Estimated Scope
 
-Single PR, commit-phased (5 phases above). ~16 files (3 new sources, 3 new
+Single PR, commit-phased (5 phases above). If the PR balloons, the
+`PassTimelineWidget` (phase d) is the designated spill — self-contained and
+additive, it can split into an immediate follow-up without breaking the arc. ~16 files (3 new sources, 3 new
 tests, 3 retired). The canvas merge and the selection→cloud auto-load wiring are
 the most involved pieces.
