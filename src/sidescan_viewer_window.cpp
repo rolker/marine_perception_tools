@@ -83,7 +83,6 @@
 #include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "marine_tiled_raster_store/tile_io.hpp"
 #include "pass_coalesce.hpp"
-#include "pass_timeline_widget.hpp"
 #include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
@@ -868,17 +867,18 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   srow->addWidget(status_, 1);
   srow->addWidget(hover_geo_);
 
-  // Pass timeline (phase d): the tile selection's passes on a gap-compressed
-  // UTC axis, under the scrub controls; hidden until a selection exists.
-  timeline_ = new PassTimelineWidget(this);
-  timeline_->setObjectName("pass_timeline");
-  timeline_->setVisible(false);
+  // GeoZui-style time bar (replaced phase d's gap-compressed axis at desk
+  // verify): zoomable tape + extent scrollbar under the scrub controls, with
+  // the selection's pass bars on it; hidden until there is a time extent.
+  time_bar_ = new TimeBarWidget(this);
+  time_bar_->setObjectName("time_bar");
+  time_bar_->setVisible(false);
 
   auto * central = new QWidget(this);
   auto * col = new QVBoxLayout(central);
   col->addWidget(outer_split_, 1);
   col->addWidget(controls);
-  col->addWidget(timeline_);
+  col->addWidget(time_bar_);
   col->addWidget(status_row);
   setCentralWidget(central);
 
@@ -918,8 +918,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       hover_geo_->setText(
         QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
     });
-  connect(timeline_, &PassTimelineWidget::passActivated,
+  connect(time_bar_, &TimeBarWidget::passActivated,
     this, &SidescanViewerWindow::onTimelinePassActivated);
+  connect(time_bar_, &TimeBarWidget::timeSelected,
+    this, &SidescanViewerWindow::onTimeSelected);
   connect(scrub_, &QSlider::valueChanged, this, &SidescanViewerWindow::onScrubChanged);
   connect(grid_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, &SidescanViewerWindow::onGridSpacingChanged);
@@ -1212,6 +1214,15 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
         [this](double x, double y, double & lat, double & lon, double & alt) {
           return session_->mapToGeo(x, y, lat, lon, alt);
         }));
+    // Time bar: without a selection, the bar's extent is this bag's span (a
+    // selection's campaign extent stays authoritative while it exists).
+    if (selection_passes_.empty()) {
+      const double t0 = session_->timeAtDistance(0.0);
+      const double t1 = session_->timeAtDistance(session_->totalDistance());
+      time_bar_->setExtent(
+        static_cast<std::int64_t>(t0 * 1e9), static_cast<std::int64_t>(t1 * 1e9));
+      time_bar_->setVisible(time_bar_->hasExtent());
+    }
     status_->setText(QString(
         "%1 pings (%2 port, %3 stbd, %4 down) • %5 m track • alt: %6 • geo: %7")
       .arg(session_->pingCount())
@@ -1520,6 +1531,12 @@ void SidescanViewerWindow::onRenderFinished()
 
   last_win_lo_ = r.win_lo;   // for the echogram linked-cursor along-track mapping
   last_win_hi_ = r.win_hi;
+  // Keep the time bar's centre cursor on the scrub position (it ignores this
+  // mid-interaction, so the operator's hand wins).
+  if (session_ && time_bar_->hasExtent()) {
+    time_bar_->setCurrentTime(
+      static_cast<std::int64_t>(session_->timeAtDistance(r.head_m) * 1e9));
+  }
   canvas_->setCoverage(r.image, r.origin_x, r.origin_y, r.res_m);
   // Rebuild the sidescan waterfall for this window: size the scrollback to the
   // window so none of its rows are evicted (the lib widget's default 200-row history
@@ -1828,8 +1845,9 @@ void SidescanViewerWindow::onTileSelectionChanged()
     }
     timeline_passes.push_back(std::move(bar));
   }
-  timeline_->setPasses(std::move(timeline_passes));
-  timeline_->setVisible(true);
+  selection_passes_ = timeline_passes;   // time->bag lookup for time-bar cues
+  time_bar_->setPasses(std::move(timeline_passes));
+  time_bar_->setVisible(true);
 
   // Selection mode: the cloud pane belongs to the selection until it clears.
   selection_cloud_ = true;
@@ -1868,9 +1886,18 @@ void SidescanViewerWindow::onTileSelectionChanged()
 
 void SidescanViewerWindow::exitSelectionCloud()
 {
-  if (timeline_) {
-    timeline_->clearPasses();
-    timeline_->setVisible(false);
+  selection_passes_.clear();
+  if (time_bar_) {
+    time_bar_->clearPasses();
+    // With a bag still open the bar keeps navigating its span; otherwise it
+    // has no extent and hides.
+    if (session_ && !loading_) {
+      const double t0 = session_->timeAtDistance(0.0);
+      const double t1 = session_->timeAtDistance(session_->totalDistance());
+      time_bar_->setExtent(
+        static_cast<std::int64_t>(t0 * 1e9), static_cast<std::int64_t>(t1 * 1e9));
+    }
+    time_bar_->setVisible(time_bar_->hasExtent());
   }
   if (!selection_cloud_) {
     return;
@@ -1917,6 +1944,40 @@ void SidescanViewerWindow::onTimelinePassActivated(
     return;
   }
   openBag(bag, static_cast<int64_t>(t_start_ns), static_cast<int64_t>(t_end_ns));
+}
+
+void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)
+{
+  // The operator committed a time on the time bar: cue there. A 5 s window
+  // around the instant (the pass-coalescing gap scale) tolerates ping gaps.
+  const auto t0 = static_cast<int64_t>(t_ns) - 2500000000LL;
+  const auto t1 = static_cast<int64_t>(t_ns) + 2500000000LL;
+
+  // Open bag first: a direct scrub jump beats a re-open.
+  if (session_ && !loading_) {
+    const auto snapshot = session_->snapshot();
+    const auto interval =
+      snapshot ? distance_interval(*snapshot, t0, t1) : std::nullopt;
+    if (interval) {
+      const double head = std::min(interval->first + window_len_m_, interval->second);
+      scrub_->setValue(std::clamp(
+          static_cast<int>(std::lround(head)), scrub_->minimum(), scrub_->maximum()));
+      return;
+    }
+  }
+  // Otherwise: the selection pass covering that time (skipping the open bag,
+  // which just answered "nothing there").
+  for (const auto & p : selection_passes_) {
+    if (t_ns >= p.t_start_ns && t_ns <= p.t_end_ns && p.bag_path != current_bag_uri_) {
+      openBag(p.bag_path, t0, t1);
+      return;
+    }
+  }
+  const QString when = QDateTime::fromMSecsSinceEpoch(
+    static_cast<qint64>(t_ns / 1000000LL), QTimeZone::utc())
+    .toString("yyyy-MM-dd HH:mm:ss");
+  status_->setText(
+    QString("No data at %1 in the open bag or selection.").arg(when));
 }
 
 void SidescanViewerWindow::onCloudPassesLoaded()

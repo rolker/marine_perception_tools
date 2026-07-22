@@ -32,6 +32,7 @@
 #include "sidescan_bag_session.hpp"
 #include "sidescan_canvas.hpp"   // OverviewTile/GeoRect (index-map layer types)
 #include "survey_index_bridge.hpp"
+#include "time_bar_widget.hpp"   // TimelinePassInfo (pass bars on the time bar)
 
 class QLabel;
 class QSlider;
@@ -52,7 +53,7 @@ namespace marine_perception_tools
 
 class SidescanCanvas;
 class PointCloudView;
-class PassTimelineWidget;
+class TimeBarWidget;
 }  // namespace marine_perception_tools
 
 namespace marine_sonar_widgets {class WaterfallWidget; class EchogramWidget;}
@@ -172,6 +173,7 @@ private slots:
   void onCloudPassesLoaded();
   void onBasemapLoaded();
   void onTimelinePassActivated(const QString & bag_path, qlonglong t_start_ns, qlonglong t_end_ns);
+  void onTimeSelected(qlonglong t_ns);   // time-bar centre committed: cue there
 
 private:
   // Cross-pane linked cursor + click-to-seek coordination. A world map point is the
@@ -268,7 +270,8 @@ private:
   std::uint64_t cloud_gen_ = 0;                 // bumped per selection change
   std::vector<CloudPassInfo> cloud_passes_;     // passes of the in-flight/last load
   bool selection_cloud_ = false;   // cloud pane shows the tile selection, not the scrub window
-  PassTimelineWidget * timeline_ = nullptr;     // selection's passes on a UTC axis (phase d)
+  TimeBarWidget * time_bar_ = nullptr;   // GeoZui-style time navigator (replaced phase d's axis)
+  std::vector<TimelinePassInfo> selection_passes_;   // for time->bag lookup on cue
   std::string current_bag_uri_;    // open bag; a same-bag timeline cue skips the re-open
 
   // Basemap controls (#24 follow-up from desk verify): store layer + colormap,

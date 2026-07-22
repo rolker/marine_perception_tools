@@ -131,11 +131,21 @@ One window, two modes that compose:
   with direction arrows, and the selectable index-tile grid. Ctrl-click /
   ctrl-drag selects tiles: every `mbes-bathy` pass of the selection loads into
   the 3D cloud (one golden-angle colour per pass, legend beside the pane,
-  cross-bag reprojection through the `earth` anchor), and the **pass
-  timeline** under the scrub controls shows all the selection's passes on a
-  gap-compressed UTC axis — click a bar to cue the single-pass waterfall.
+  cross-bag reprojection through the `earth` anchor), and the **time bar**
+  under the scrub controls fills with the selection's passes.
   Both modes together (`--index` + a bag argument) place the open bag's
   coverage on the survey map through its earth anchor.
+
+The **time bar** (ported from GeoZui4D's TimeControl; navigation-only for
+now) is how you go to a specific time: a zoomable tape with a
+multi-resolution tick ladder (ms → years) and the current time at a centre
+cursor, over a full-extent scrollbar whose translucent thumb shows the
+visible window. Drag the tape to pan time (pull vertically to stretch the
+scale), wheel to zoom (ctrl = coarse, shift = fine), double- or middle-click
+to jump, drag the thumb or click the trough to page through the extent.
+Committing a time cues the scrub there — switching bags through the index
+selection when the time falls in another recording. Clicking a pass bar
+cues that pass directly.
 
 The index is produced by `marine_survey_index` (unh_marine_autonomy); see its
 `docs/survey_index_schema.md` for the schema contract.

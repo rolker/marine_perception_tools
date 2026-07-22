@@ -39,16 +39,16 @@
 
 #include "marine_autonomy/gggs.h"
 #include "marine_survey_index/schema.hpp"
-#include "pass_timeline_widget.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_viewer_window.hpp"
+#include "time_bar_widget.hpp"
 
 namespace
 {
 
-using marine_perception_tools::PassTimelineWidget;
 using marine_perception_tools::SidescanCanvas;
 using marine_perception_tools::SidescanViewerWindow;
+using marine_perception_tools::TimeBarWidget;
 
 constexpr double kLat = 43.02;
 constexpr double kLon = -71.36;
@@ -176,13 +176,13 @@ TEST_F(ExplorerWindowFixture, IndexModeSurvivesTileSelectionAndClear)
   auto * legend = window.findChild<QTreeWidget *>("cloud_legend");
   ASSERT_NE(legend, nullptr);
   EXPECT_FALSE(legend->isVisible());
-  auto * timeline = window.findChild<PassTimelineWidget *>("pass_timeline");
+  auto * timeline = window.findChild<TimeBarWidget *>("time_bar");
   ASSERT_NE(timeline, nullptr);
   EXPECT_FALSE(timeline->isVisible());
 
   // Select both indexed tiles: the mbes-bathy pass heads for the cloud; its
   // bag is missing, so the loader's error path must land in the legend (one
-  // zero-count row) and the window must stay alive. The timeline shows BOTH
+  // zero-count row) and the window must stay alive. The time bar shows BOTH
   // passes (mbes + sidescan).
   canvas->selectTiles({0, 1});
   ASSERT_TRUE(process_until([legend]() {return legend->topLevelItemCount() > 0;}))

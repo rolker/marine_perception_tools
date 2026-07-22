@@ -136,7 +136,7 @@ add_executable(survey_explorer
   src/sidescan_canvas.cpp
   src/point_cloud_view.cpp
   src/mbes_pass_loader.cpp
-  src/pass_timeline_widget.cpp
+  src/time_bar_widget.cpp
 )
 target_link_libraries(survey_explorer
   sidescan_core
@@ -207,10 +207,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_tile_selection test/test_tile_selection.cpp)
   target_include_directories(test_tile_selection PRIVATE src)
 
-  # Pure gap-compressed timeline axis (pass_timeline_model.hpp, #24) —
-  # header-only.
-  ament_add_gtest(test_pass_timeline_model test/test_pass_timeline_model.cpp)
-  target_include_directories(test_pass_timeline_model PRIVATE src)
+  # Pure multi-resolution tick ladder for the GeoZui-style time bar
+  # (time_bar_model.hpp, #24) — header-only.
+  ament_add_gtest(test_time_bar_model test/test_time_bar_model.cpp)
+  target_include_directories(test_time_bar_model PRIVATE src)
 
   # Multi-pass windowed-read pure parts (#21): cross-bag frame reprojection +
   # the shared tf_lift helpers. No bag I/O; links sidescan_core.
@@ -259,7 +259,7 @@ if(BUILD_TESTING)
     src/sidescan_canvas.cpp
     src/point_cloud_view.cpp
     src/mbes_pass_loader.cpp
-    src/pass_timeline_widget.cpp)
+    src/time_bar_widget.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
   ament_target_dependencies(test_survey_explorer_window
     marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
