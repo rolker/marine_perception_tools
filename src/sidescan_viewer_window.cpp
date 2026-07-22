@@ -18,6 +18,7 @@
 #include <QAbstractSpinBox>
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
@@ -769,6 +770,15 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   basemap_cmap_ = make_cmap_combo();
   basemap_cmap_->setToolTip("Basemap colormap (percentile-scaled per layer)");
   basemap_cmap_->setVisible(false);
+  show_track_check_ = new QCheckBox("track", this);
+  show_track_check_->setChecked(true);
+  show_track_check_->setToolTip("Show the campaign nav track");
+  show_track_check_->setVisible(false);
+  show_grid_check_ = new QCheckBox("grid", this);
+  show_grid_check_->setChecked(true);
+  show_grid_check_->setToolTip(
+    "Show the index-tile grid (selected tiles stay visible)");
+  show_grid_check_->setVisible(false);
   // Apply each combo's initial palette to its widget (combos don't fire on init).
   waterfall_->set_color_map(marine_colormap::palette(sidescan_cmap_->currentIndex()));
   mbes_waterfall_->set_color_map(marine_colormap::palette(mbes_cmap_->currentIndex()));
@@ -838,7 +848,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   // Left-to-right: contacts | map | 2x2 grid, all resizable. The map pane
   // header carries the basemap layer/colormap combos (survey mode only).
-  auto * map_pane = make_pane("Map", canvas_, {basemap_layer_, basemap_cmap_});
+  auto * map_pane = make_pane(
+    "Map", canvas_,
+    {basemap_layer_, basemap_cmap_, show_track_check_, show_grid_check_});
   outer_split_ = new QSplitter(Qt::Horizontal, this);
   outer_split_->addWidget(contacts_pane);
   outer_split_->addWidget(map_pane);
@@ -896,6 +908,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, [this](int) {requestBasemapLoad();});
   connect(basemap_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {requestBasemapLoad();});
+  connect(show_track_check_, &QCheckBox::toggled,
+    this, [this](bool on) {canvas_->setNavTrackVisible(on);});
+  connect(show_grid_check_, &QCheckBox::toggled,
+    this, [this](bool on) {canvas_->setIndexTilesVisible(on);});
   connect(canvas_, &SidescanCanvas::tileSelectionChanged,
     this, &SidescanViewerWindow::onTileSelectionChanged);
   connect(canvas_, &SidescanCanvas::hoverGeo, this, [this](double lat, double lon) {
@@ -1614,6 +1630,8 @@ void SidescanViewerWindow::openSurveyIndex(
   discoverBasemapLayers(
     std::filesystem::path(index_path).parent_path().string(), stores_dir);
   requestBasemapLoad();
+  show_track_check_->setVisible(true);
+  show_grid_check_->setVisible(true);
 }
 
 void SidescanViewerWindow::discoverBasemapLayers(
@@ -1723,9 +1741,12 @@ void SidescanViewerWindow::onBasemapLoaded()
   if (ticket.generation != basemap_gen_) {
     return;   // a newer layer/colormap choice superseded this load
   }
-  // Empty index: the first basemap with tiles establishes the geo origin and
-  // the initial fit so the map is still usable from stores alone.
-  if (!canvas_->hasGeoOrigin() && !ticket.tiles.empty()) {
+  // The basemap bounds are the best fit box: the index extent can be blown
+  // out by outlier tiles (junk-GPS passes index far from the survey — the
+  // Massabesic extent spans kilometres of nothing, shrinking the lake to a
+  // speck). Refit to the tiles unless the operator already took the view
+  // over; with an empty index this also establishes the geo origin.
+  if (!ticket.tiles.empty()) {
     double s = ticket.tiles.front().south;
     double w = ticket.tiles.front().west;
     double n = ticket.tiles.front().north;
@@ -1736,8 +1757,12 @@ void SidescanViewerWindow::onBasemapLoaded()
       n = std::max(n, t.north);
       e = std::max(e, t.east);
     }
-    canvas_->setGeoOrigin(0.5 * (s + n), 0.5 * (w + e));
-    canvas_->fitGeo(s, w, n, e);
+    if (!canvas_->hasGeoOrigin()) {
+      canvas_->setGeoOrigin(0.5 * (s + n), 0.5 * (w + e));
+    }
+    if (!canvas_->viewAdjustedByUser()) {
+      canvas_->fitGeo(s, w, n, e);
+    }
   }
   const auto n_tiles = ticket.tiles.size();
   canvas_->setStoreTiles(std::move(ticket.tiles));

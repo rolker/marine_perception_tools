@@ -106,6 +106,14 @@ public:
   // Decimated nav track, pre-segmented per bag, as (lat, lon) polylines.
   void setNavTrack(std::vector<std::vector<std::pair<double, double>>> segments);
 
+  // Overlay visibility (#24 desk-verify follow-up): a whole campaign's track
+  // and tile grid blanket the surveyed area at overview zoom, hiding the
+  // basemap under them — let the operator switch them off. Hiding the tile
+  // grid keeps SELECTED tiles visible (the selection state must stay
+  // answerable at a glance).
+  void setNavTrackVisible(bool on);
+  void setIndexTilesVisible(bool on);
+
   // Selectable index tiles. Replaces the set and clears the selection.
   void setIndexTiles(const std::vector<GeoRect> & tiles);
   const std::set<std::size_t> & selectedTiles() const {return selected_tiles_;}
@@ -120,6 +128,10 @@ public:
   // re-applied on resize until the user pans/zooms — the ctor-time widget
   // size is pre-layout, so an immediate fit would mis-scale).
   void fitGeo(double south, double west, double north, double east);
+  // Whether the user has taken the view over (pan/zoom/explicit bag fit) —
+  // callers use this to avoid re-fitting out from under the operator when a
+  // better fit box becomes available (e.g. the async basemap arriving).
+  bool viewAdjustedByUser() const {return user_adjusted_;}
 
   // --- per-bag layers (map-ENU metres, unchanged contracts) ---------------
   // Set the rendered coverage image and the map extent it covers. `origin_x/y` is
@@ -208,6 +220,8 @@ private:
   std::vector<GeoRect> index_tiles_geo_;
   std::vector<SelectableRect> index_tiles_;   // canvas metres
   std::set<std::size_t> selected_tiles_;
+  bool show_nav_track_ = true;
+  bool show_index_tiles_ = true;
 
   bool fit_pending_ = false;
   bool user_adjusted_ = false;

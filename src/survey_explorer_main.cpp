@@ -17,6 +17,7 @@
 #include <QDateTime>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 
 #include <cstdint>
 #include <cstdio>
@@ -95,10 +96,19 @@ int main(int argc, char ** argv)
   const QCommandLineOption stores_opt(
     "stores", "Directory of GGGS store GeoTIFF tiles for the explorer basemap "
     "(default: <index dir>/bathymetry/survey).", "dir");
+  const QCommandLineOption snapshot_opt(
+    "snapshot", "Headless debugging: grab the window into this PNG after "
+    "--snapshot-delay seconds, then exit (pair with "
+    "QT_QPA_PLATFORM=offscreen).", "png");
+  const QCommandLineOption snapshot_delay_opt(
+    "snapshot-delay", "Seconds to let loads settle before --snapshot "
+    "(default 6).", "s", "6");
   parser.addOption(start_opt);
   parser.addOption(end_opt);
   parser.addOption(index_opt);
   parser.addOption(stores_opt);
+  parser.addOption(snapshot_opt);
+  parser.addOption(snapshot_delay_opt);
   parser.process(app);
 
   const bool has_start = parser.isSet(start_opt);
@@ -154,6 +164,17 @@ int main(int argc, char ** argv)
   window.show();
   if (!positional.isEmpty()) {
     window.openBag(positional.first().toStdString(), cue_start_ns, cue_end_ns);
+  }
+  if (parser.isSet(snapshot_opt)) {
+    const QString png = parser.value(snapshot_opt);
+    const int delay_ms =
+      std::max(0, parser.value(snapshot_delay_opt).toInt()) * 1000;
+    QTimer::singleShot(delay_ms, &window, [&window, png]() {
+        const bool ok = window.grab().save(png);
+        std::fprintf(stderr, "snapshot %s: %s\n",
+          png.toUtf8().constData(), ok ? "saved" : "FAILED");
+        QApplication::exit(ok ? 0 : 1);
+      });
   }
   return app.exec();
 }

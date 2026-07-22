@@ -40,6 +40,7 @@ class QSpinBox;
 class QProgressBar;
 class QPushButton;
 class QListWidget;
+class QCheckBox;
 class QComboBox;
 class QRectF;
 class QCloseEvent;
@@ -270,9 +271,12 @@ private:
   PassTimelineWidget * timeline_ = nullptr;     // selection's passes on a UTC axis (phase d)
   std::string current_bag_uri_;    // open bag; a same-bag timeline cue skips the re-open
 
-  // Basemap controls (#24 follow-up from desk verify): store layer + colormap.
+  // Basemap controls (#24 follow-up from desk verify): store layer + colormap,
+  // and declutter toggles for the overlays that otherwise blanket the basemap.
   QComboBox * basemap_layer_ = nullptr;
   QComboBox * basemap_cmap_ = nullptr;
+  QCheckBox * show_track_check_ = nullptr;
+  QCheckBox * show_grid_check_ = nullptr;
   std::vector<std::pair<QString, std::string>> basemap_layers_;   // {label, dir}
   QFutureWatcher<BasemapLoadTicket> basemap_watcher_;
   std::uint64_t basemap_gen_ = 0;

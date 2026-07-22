@@ -124,6 +124,22 @@ void SidescanCanvas::selectTiles(const std::set<std::size_t> & indices)
   emit tileSelectionChanged();
 }
 
+void SidescanCanvas::setNavTrackVisible(bool on)
+{
+  if (show_nav_track_ != on) {
+    show_nav_track_ = on;
+    update();
+  }
+}
+
+void SidescanCanvas::setIndexTilesVisible(bool on)
+{
+  if (show_index_tiles_ != on) {
+    show_index_tiles_ = on;
+    update();
+  }
+}
+
 void SidescanCanvas::fitGeo(double south, double west, double north, double east)
 {
   fit_south_ = south;
@@ -391,13 +407,15 @@ void SidescanCanvas::drawGrid(QPainter & painter) const
 
 void SidescanCanvas::drawNavTrack(QPainter & painter) const
 {
-  if (nav_segments_.empty()) {
+  if (nav_segments_.empty() || !show_nav_track_) {
     return;
   }
-  QPen pen(QColor(255, 255, 255, 153));   // white, 60 % alpha
-  pen.setWidthF(1.2);
+  // Light-handed: a campaign's worth of overlapping passes must read as a
+  // veil over the basemap, not a blanket (and the toggle removes it wholly).
+  QPen pen(QColor(255, 255, 255, 90));
+  pen.setWidthF(1.0);
   painter.setPen(pen);
-  painter.setBrush(QColor(255, 255, 255, 153));
+  painter.setBrush(QColor(255, 255, 255, 90));
   for (const auto & seg : nav_segments_) {
     if (seg.size() < 2) {
       continue;
@@ -439,10 +457,16 @@ void SidescanCanvas::drawIndexTiles(QPainter & painter) const
     return;
   }
   const QRectF viewport(0, 0, width(), height());
-  QPen outline(QColor(0, 200, 255, 60));
+  QPen outline(QColor(0, 200, 255, 45));
   outline.setWidthF(1.0);
   for (std::size_t i = 0; i < index_tiles_.size(); ++i) {
     const auto & t = index_tiles_[i];
+    const bool selected = selected_tiles_.count(i) > 0;
+    // The unselected grid is a declutterable overlay; the selection is state
+    // and stays visible even with the grid switched off.
+    if (!selected && !show_index_tiles_) {
+      continue;
+    }
     // Canvas y grows north, screen y grows down: NW corner is (x0, y1).
     const QPointF nw = mapToScreen(t.x0, t.y1);
     const QPointF se = mapToScreen(t.x1, t.y0);
@@ -450,9 +474,17 @@ void SidescanCanvas::drawIndexTiles(QPainter & painter) const
     if (!r.intersects(viewport)) {
       continue;
     }
-    const bool selected = selected_tiles_.count(i) > 0;
-    painter.setPen(selected ? QPen(QColor(0, 255, 255, 220), 1.5) : outline);
-    painter.setBrush(selected ? QColor(0, 255, 255, 70) : Qt::NoBrush);
+    // NOTE: no ternary for the brush — `cond ? QColor(...) : Qt::NoBrush`
+    // compiles by converting the enum through QColor(QRgb) into OPAQUE BLACK,
+    // silently filling every unselected tile (the desk-verified basemap
+    // occlusion bug).
+    if (selected) {
+      painter.setPen(QPen(QColor(0, 255, 255, 220), 1.5));
+      painter.setBrush(QColor(0, 255, 255, 70));
+    } else {
+      painter.setPen(outline);
+      painter.setBrush(Qt::NoBrush);
+    }
     painter.drawRect(r);
   }
   painter.setBrush(Qt::NoBrush);
