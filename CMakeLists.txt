@@ -108,6 +108,7 @@ set(SIDESCAN_CORE_DEPS
 )
 add_library(sidescan_core
   src/sidescan_bag_session.cpp
+  src/session_index_io.cpp
   src/coverage_raster.cpp
   src/mbes_window_reader.cpp
 )
@@ -217,6 +218,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_nav_track_lookup test/test_nav_track_lookup.cpp)
   target_include_directories(test_nav_track_lookup PRIVATE src)
   ament_target_dependencies(test_nav_track_lookup marine_survey_index)
+
+  # Bag-index cache serialization (#24): round-trip + identity/version/
+  # truncation invalidation — links sidescan_core (SessionIndex).
+  ament_add_gtest(test_session_index_io test/test_session_index_io.cpp)
+  target_link_libraries(test_session_index_io sidescan_core)
 
   # Multi-pass windowed-read pure parts (#21): cross-bag frame reprojection +
   # the shared tf_lift helpers. No bag I/O; links sidescan_core.

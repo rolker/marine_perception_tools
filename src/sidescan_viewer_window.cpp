@@ -85,6 +85,7 @@
 #include "nav_track_lookup.hpp"
 #include "pass_coalesce.hpp"
 #include "point_cloud_view.hpp"
+#include "session_index_io.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
 
@@ -1015,6 +1016,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onEchogramSeek);
 
   canvas_->setGridSpacing(grid_spin_->value());
+  cache_dir_ = defaultCacheDir();   // --cache-dir overrides via setCacheDir
   resize(1100, 760);
 
   // Watch app-wide key presses so scrub keys work regardless of which pane has
@@ -1172,7 +1174,27 @@ void SidescanViewerWindow::openBag(
   // Index off the UI thread; the progress callback emits a queued signal so the UI
   // grows the range + track as the bag resolves. The session is captured (shared_ptr)
   // so it outlives the task; index_watcher_ is waited on in the destructor.
-  index_watcher_.setFuture(QtConcurrent::run([this, session, epoch]() {
+  // Bag-index cache (#24): a valid cache replaces the whole-bag metadata scan
+  // with a file read; a miss scans as before and saves for next time.
+  const std::string cache_path =
+    cache_dir_.empty() ? std::string() : cachePathFor(cache_dir_, bag_uri);
+  index_watcher_.setFuture(QtConcurrent::run([this, session, epoch, bag_uri, cache_path]() {
+      if (!cache_path.empty()) {
+        const auto identity = bagIdentity(bag_uri);
+        if (auto cached = loadSessionIndex(cache_path, identity)) {
+          const double total = cached->total_distance_m;
+          session->adoptIndex(std::move(*cached));
+          Q_EMIT indexProgress(epoch, total, true);
+          return;
+        }
+        session->buildIndex([this, epoch](double resolved_m, bool done) {
+          Q_EMIT indexProgress(epoch, resolved_m, done);
+        });
+        if (const auto snap = session->snapshot()) {
+          saveSessionIndex(cache_path, identity, *snap);   // best-effort
+        }
+        return;
+      }
       session->buildIndex([this, epoch](double resolved_m, bool done) {
         Q_EMIT indexProgress(epoch, resolved_m, done);
       });

@@ -147,6 +147,14 @@ Committing a time cues the scrub there — switching bags through the index
 selection when the time falls in another recording. Clicking a pass bar
 cues that pass directly.
 
+Bag opens are accelerated by a **bag-index cache** (`--cache-dir`, default
+`$XDG_CACHE_HOME/survey_explorer`): the whole-bag metadata scan runs once per
+bag and is then a file read, keyed by the bag's size+mtime (bags are never
+written to). Pre-build the whole campaign with
+`survey_explorer --index survey_index.db --warm-cache` (headless: set
+`QT_QPA_PLATFORM=offscreen`), after which any time-bar or timeline cue opens
+its bag in about a second.
+
 The index is produced by `marine_survey_index` (unh_marine_autonomy); see its
 `docs/survey_index_schema.md` for the schema contract.
 

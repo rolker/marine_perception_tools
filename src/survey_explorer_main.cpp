@@ -24,7 +24,10 @@
 #include <filesystem>
 #include <string>
 
+#include "session_index_io.hpp"
+#include "sidescan_bag_session.hpp"
 #include "sidescan_viewer_window.hpp"
+#include "survey_index_bridge.hpp"
 
 namespace
 {
@@ -103,13 +106,78 @@ int main(int argc, char ** argv)
   const QCommandLineOption snapshot_delay_opt(
     "snapshot-delay", "Seconds to let loads settle before --snapshot "
     "(default 6).", "s", "6");
+  const QCommandLineOption cache_dir_opt(
+    "cache-dir", "Bag-index cache directory (default: "
+    "$XDG_CACHE_HOME/survey_explorer). An empty value disables the cache.",
+    "dir");
+  const QCommandLineOption warm_opt(
+    "warm-cache", "With --index: build the bag-index cache for every bag in "
+    "the survey index, then exit (run under QT_QPA_PLATFORM=offscreen on a "
+    "headless host). Later opens of those bags skip the whole-bag scan.");
   parser.addOption(start_opt);
   parser.addOption(end_opt);
   parser.addOption(index_opt);
   parser.addOption(stores_opt);
   parser.addOption(snapshot_opt);
   parser.addOption(snapshot_delay_opt);
+  parser.addOption(cache_dir_opt);
+  parser.addOption(warm_opt);
   parser.process(app);
+
+  const std::string cache_dir = parser.isSet(cache_dir_opt) ?
+    parser.value(cache_dir_opt).toStdString() :
+    marine_perception_tools::defaultCacheDir();
+
+  if (parser.isSet(warm_opt)) {
+    if (!parser.isSet(index_opt) || cache_dir.empty()) {
+      std::fprintf(stderr, "error: --warm-cache needs --index and a cache dir\n");
+      return 2;
+    }
+    try {
+      const marine_perception_tools::SurveyIndexBridge bridge(
+        parser.value(index_opt).toStdString());
+      int hits = 0;
+      int built = 0;
+      int failed = 0;
+      const auto bags = bridge.bagPaths();
+      for (const auto & [bag_id, path] : bags) {
+        const auto identity = marine_perception_tools::bagIdentity(path);
+        const auto cache_path = marine_perception_tools::cachePathFor(cache_dir, path);
+        if (identity.size_bytes == 0) {
+          std::fprintf(stderr, "  unreadable: %s\n", path.c_str());
+          ++failed;
+          continue;
+        }
+        if (marine_perception_tools::loadSessionIndex(cache_path, identity)) {
+          ++hits;
+          continue;
+        }
+        std::fprintf(stderr, "  indexing %s …\n", path.c_str());
+        try {
+          marine_perception_tools::SidescanBagSession session(path);
+          session.buildIndex();
+          const auto snap = session.snapshot();
+          if (snap &&
+            marine_perception_tools::saveSessionIndex(cache_path, identity, *snap))
+          {
+            ++built;
+          } else {
+            ++failed;
+          }
+        } catch (const std::exception & e) {
+          std::fprintf(stderr, "  failed: %s (%s)\n", path.c_str(), e.what());
+          ++failed;
+        }
+      }
+      std::fprintf(stderr,
+        "warm-cache: %d built, %d already cached, %d failed (of %zu bags)\n",
+        built, hits, failed, bags.size());
+      return failed == 0 ? 0 : 1;
+    } catch (const std::exception & e) {
+      std::fprintf(stderr, "error: opening survey index: %s\n", e.what());
+      return 1;
+    }
+  }
 
   const bool has_start = parser.isSet(start_opt);
   const bool has_end = parser.isSet(end_opt);
@@ -145,6 +213,7 @@ int main(int argc, char ** argv)
   // explorer's index map; a bag positional (with or without --index) opens in
   // the same window.
   marine_perception_tools::SidescanViewerWindow window;
+  window.setCacheDir(cache_dir);
   if (parser.isSet(index_opt)) {
     const std::string index_path = parser.value(index_opt).toStdString();
     std::string stores_dir;

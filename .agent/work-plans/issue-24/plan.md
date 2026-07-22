@@ -157,3 +157,14 @@ Single PR, commit-phased (5 phases above). If the PR balloons, the
 additive, it can split into an immediate follow-up without breaking the arc. ~16 files (3 new sources, 3 new
 tests, 3 retired). The canvas merge and the selection→cloud auto-load wiring are
 the most involved pieces.
+
+**Bag-index cache (Roland-decided 2026-07-22, same PR):** `session_index_io.{hpp,cpp}`
+serializes the complete `SessionIndex` (field-by-field binary, versioned, atomic
+rename) keyed by bag identity (uri + total size + newest mtime — the bags-table
+fields); caches live in `$XDG_CACHE_HOME/survey_explorer` (never in bag dirs —
+data-of-record), `--cache-dir` overrides. `openBag` loads a valid cache via the new
+`SidescanBagSession::adoptIndex` (readers are snapshot-based, so adoption is just
+publishing a complete snapshot) or scans + saves. `--warm-cache` pre-builds every
+indexed bag. Measured: June-15 bag 90 s scan -> ~1 s cached open (126 MB cache).
+This is what makes campaign-wide time-bar release-cues acceptable without
+decoupling browsing from loading.

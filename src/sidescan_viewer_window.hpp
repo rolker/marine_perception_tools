@@ -278,6 +278,13 @@ private:
   // an openable bag through them.
   std::vector<marine_survey_index::NavPoint> nav_track_points_;
   std::vector<std::pair<std::int64_t, std::string>> bag_paths_;
+  // Bag-index cache directory (session_index_io); empty disables caching.
+  std::string cache_dir_;
+
+public:
+  void setCacheDir(const std::string & dir) {cache_dir_ = dir;}
+
+private:
   std::string current_bag_uri_;    // open bag; a same-bag timeline cue skips the re-open
 
   // Basemap controls (#24 follow-up from desk verify): store layer + colormap,
