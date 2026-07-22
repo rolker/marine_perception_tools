@@ -500,31 +500,6 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
   if (geo_mode_) {
     drawNavTrack(painter);
     drawIndexTiles(painter);
-    // Time-bar position arrow: the boat at the bar's centre time, in the
-    // 3D pane's boat-arrow orange for consistent iconography.
-    if (time_arrow_) {
-      const QPointF c = geoToCanvas(time_arrow_->lat, time_arrow_->lon);
-      const QPointF s = mapToScreen(c.x(), c.y());
-      // Heading is CW from north; screen y grows downward, so the north-up
-      // rotation is the same angle about the screen point.
-      const double a = time_arrow_->heading_rad;
-      const double ca = std::cos(a);
-      const double sa = std::sin(a);
-      const auto rot = [&](double fwd, double right) {
-          // forward = north(-y on screen), right = east(+x on screen).
-          return s + QPointF(
-            right * ca + fwd * sa,
-            right * sa - fwd * ca);
-        };
-      constexpr double kL = 12.0;   // arrow length, px
-      QPolygonF arrow;
-      arrow << rot(kL, 0.0) << rot(-0.5 * kL, 0.55 * kL)
-            << rot(-0.2 * kL, 0.0) << rot(-0.5 * kL, -0.55 * kL);
-      painter.setPen(QPen(QColor(20, 20, 20), 1.0));
-      painter.setBrush(QColor(255, 140, 0));   // boat-arrow orange
-      painter.drawPolygon(arrow);
-      painter.setBrush(Qt::NoBrush);
-    }
   }
 
   const bool bag_placeable = mapPlaceable();
@@ -586,6 +561,34 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
         painter.drawText(QPointF(r.left(), r.top() - 2), c.id);
       }
     }
+  }
+
+  // Time-bar position arrow: the boat at the bar's centre time, in the 3D
+  // pane's boat-arrow orange for consistent iconography. Drawn near the TOP
+  // of the stack — it is a transient indicator and must never hide under the
+  // coverage imagery or other layers (desk-verify finding).
+  if (geo_mode_ && time_arrow_) {
+    const QPointF c = geoToCanvas(time_arrow_->lat, time_arrow_->lon);
+    const QPointF s = mapToScreen(c.x(), c.y());
+    // Heading is CW from north; screen y grows downward, so the north-up
+    // rotation is the same angle about the screen point.
+    const double a = time_arrow_->heading_rad;
+    const double ca = std::cos(a);
+    const double sa = std::sin(a);
+    const auto rot = [&](double fwd, double right) {
+        // forward = north(-y on screen), right = east(+x on screen).
+        return s + QPointF(
+          right * ca + fwd * sa,
+          right * sa - fwd * ca);
+      };
+    constexpr double kL = 12.0;   // arrow length, px
+    QPolygonF arrow;
+    arrow << rot(kL, 0.0) << rot(-0.5 * kL, 0.55 * kL)
+          << rot(-0.2 * kL, 0.0) << rot(-0.5 * kL, -0.55 * kL);
+    painter.setPen(QPen(QColor(20, 20, 20), 1.0));
+    painter.setBrush(QColor(255, 140, 0));   // boat-arrow orange
+    painter.drawPolygon(arrow);
+    painter.setBrush(Qt::NoBrush);
   }
 
   // Cross-pane linked cursor (cyan cross at the shared map point).
