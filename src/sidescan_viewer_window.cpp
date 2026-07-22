@@ -675,6 +675,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     "both renders more pings and refines the map.");
 
   status_ = new QLabel("Open a bag to begin (File → Open Bag).", this);
+  // The status line must never dictate the window size: a long load note was
+  // resizing the whole window (desk finding). Long text clips instead.
+  status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
   // Indeterminate "busy" bar shown only while a bag loads off-thread.
   progress_ = new QProgressBar(this);
@@ -1279,9 +1282,10 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
         [this](double x, double y, double & lat, double & lon, double & alt) {
           return session_->mapToGeo(x, y, lat, lon, alt);
         }));
-    // Time bar: without a selection, the bar's extent is this bag's span (a
-    // selection's campaign extent stays authoritative while it exists).
-    if (selection_passes_.empty()) {
+    // Time bar: only BAG-ONLY mode uses the bag's span — with an index the
+    // campaign extent is authoritative, and replacing it on a cross-bag cue
+    // left the whole extent a few pixels wide at campaign zoom (desk finding).
+    if (selection_passes_.empty() && nav_track_points_.empty()) {
       const double t0 = session_->timeAtDistance(0.0);
       const double t1 = session_->timeAtDistance(session_->totalDistance());
       time_bar_->setExtent(
@@ -2161,9 +2165,16 @@ void SidescanViewerWindow::onCloudPassesLoaded()
     message += QString(", %1 pings without TF").arg(out.skipped_pings);
   }
   if (!out.notes.isEmpty()) {
-    message += " — " + out.notes.join("; ");
+    // A many-pass clip can produce a note per pass; summarize past the
+    // first few (the full list is not actionable from a status line).
+    QStringList shown = out.notes.mid(0, 3);
+    if (out.notes.size() > 3) {
+      shown << QString("(+%1 more)").arg(out.notes.size() - 3);
+    }
+    message += " — " + shown.join("; ");
   }
   status_->setText(message);
+  status_->setToolTip(out.notes.join("\n"));   // the full list, on hover
 }
 
 }  // namespace marine_perception_tools
