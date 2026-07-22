@@ -1630,12 +1630,17 @@ void SidescanViewerWindow::onRenderFinished()
   // window so none of its rows are evicted (the lib widget's default 200-row history
   // is smaller than a dense window), then clear and append oldest-first so the newest
   // ping scrolls to the top (matching the live plugin).
+  // GL history caps (#24 desk crash): a huge Max-pings window uploads one
+  // texture row per ping; bound what reaches the GPU and keep the NEWEST rows.
+  constexpr std::size_t kMaxGlRows = 4000;
+  const std::size_t ss_first =
+    r.sidescan_rows.size() > kMaxGlRows ? r.sidescan_rows.size() - kMaxGlRows : 0;
   if (!r.sidescan_rows.empty()) {
-    waterfall_->set_history(r.sidescan_rows.size());
+    waterfall_->set_history(r.sidescan_rows.size() - ss_first);
   }
   waterfall_->clear();
-  for (const auto & row : r.sidescan_rows) {
-    waterfall_->add_row(row);
+  for (std::size_t i = ss_first; i < r.sidescan_rows.size(); ++i) {
+    waterfall_->add_row(r.sidescan_rows[i]);
   }
   // The 3D cloud keeps its own palette (set in the ctor and via cloud_palette_);
   // setPoints recolours with that stored palette, so no per-render setColorMap here.
@@ -1649,12 +1654,14 @@ void SidescanViewerWindow::onRenderFinished()
   // sidescan pane): the lib's default 200-row history is smaller than a dense
   // detections window, so without this the oldest MBES pings are evicted and the
   // backscatter pane falls out of lockstep with the other panes on the same scrub.
+  const std::size_t bs_first = r.mbes_backscatter_rows.size() > kMaxGlRows ?
+    r.mbes_backscatter_rows.size() - kMaxGlRows : 0;
   if (!r.mbes_backscatter_rows.empty()) {
-    mbes_waterfall_->set_history(r.mbes_backscatter_rows.size());
+    mbes_waterfall_->set_history(r.mbes_backscatter_rows.size() - bs_first);
   }
   mbes_waterfall_->clear();
-  for (const auto & row : r.mbes_backscatter_rows) {
-    mbes_waterfall_->add_row(row);
+  for (std::size_t i = bs_first; i < r.mbes_backscatter_rows.size(); ++i) {
+    mbes_waterfall_->add_row(r.mbes_backscatter_rows[i]);
   }
   // Echogram has no clear(); sizing history to the window count makes the new
   // pings evict the previous window's, so the curtain shows just this window.
@@ -1663,12 +1670,15 @@ void SidescanViewerWindow::onRenderFinished()
     echogram_->addPings(r.down_images);
   }
   if (r.has_center) {canvas_->setCenter(r.center_x, r.center_y);}
-  status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted")
+  status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted%6")
     .arg(r.head_m, 0, 'f', 1)
     .arg(r.total_m, 0, 'f', 1)
     .arg(r.win_lo, 0, 'f', 1)
     .arg(r.win_hi, 0, 'f', 1)
-    .arg(r.npings));
+    .arg(r.npings)
+    .arg(cloud_->decimationStride() > 1 ?
+    QString(" • cloud 1/%1 (render budget)").arg(cloud_->decimationStride()) :
+    QString()));
 
   // A scrub arrived while we were rendering — render once more with the latest.
   if (render_pending_) {
@@ -2184,6 +2194,10 @@ void SidescanViewerWindow::onCloudPassesLoaded()
 
   QString message = QString("%1 soundings from %2 pass%3")
     .arg(total).arg(cloud_passes_.size()).arg(cloud_passes_.size() == 1 ? "" : "es");
+  if (cloud_->decimationStride() > 1) {
+    message += QString(" — showing 1/%1 (render budget)")
+      .arg(cloud_->decimationStride());
+  }
   if (out.skipped_passes > 0) {
     message += QString(", %1 pass%2 skipped")
       .arg(out.skipped_passes).arg(out.skipped_passes == 1 ? "" : "es");

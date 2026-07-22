@@ -106,11 +106,35 @@ void PointCloudView::setPoints(const std::vector<MbesSounding> & world_soundings
 void PointCloudView::set_points_impl(
   const std::vector<MbesSounding> & world_soundings, std::vector<int> pass_ids)
 {
+  // Hard render budget (#24 desk crash): an unbounded upload — a huge
+  // Max-pings window or many unclipped passes — can exhaust GPU memory and
+  // take the desktop session down with it. Above the budget, uniform stride
+  // decimation keeps the cloud representative; decimationStride() lets the
+  // caller surface "showing 1/N" instead of capping silently.
+  constexpr std::size_t kMaxRenderPoints = 4000000;
+  decimation_stride_ = 1;
+  std::vector<MbesSounding> kept;
+  if (world_soundings.size() > kMaxRenderPoints) {
+    decimation_stride_ = static_cast<int>(
+      (world_soundings.size() + kMaxRenderPoints - 1) / kMaxRenderPoints);
+    std::vector<int> kept_ids;
+    kept.reserve(world_soundings.size() / decimation_stride_ + 1);
+    kept_ids.reserve(world_soundings.size() / decimation_stride_ + 1);
+    for (std::size_t i = 0; i < world_soundings.size();
+      i += static_cast<std::size_t>(decimation_stride_))
+    {
+      kept.push_back(world_soundings[i]);
+      kept_ids.push_back(i < pass_ids.size() ? pass_ids[i] : 0);
+    }
+    pass_ids = std::move(kept_ids);
+  }
+  const auto & in_pts = kept.empty() ? world_soundings : kept;
+
   pts_.clear();
   depth_.clear();
   intensity_.clear();
   pass_of_point_ = std::move(pass_ids);
-  if (world_soundings.empty()) {
+  if (in_pts.empty()) {
     colors_.clear();
     buffers_dirty_ = true;
     update();
@@ -121,21 +145,21 @@ void PointCloudView::set_points_impl(
   double sx = 0.0;
   double sy = 0.0;
   double sz = 0.0;
-  for (const auto & s : world_soundings) {
+  for (const auto & s : in_pts) {
     sx += s.x;
     sy += s.y;
     sz += s.z;
   }
-  const double n = static_cast<double>(world_soundings.size());
+  const double n = static_cast<double>(in_pts.size());
   center_x_ = static_cast<float>(sx / n);
   center_y_ = static_cast<float>(sy / n);
   center_z_ = static_cast<float>(sz / n);
 
-  pts_.reserve(world_soundings.size());
-  depth_.reserve(world_soundings.size());
-  intensity_.reserve(world_soundings.size());
+  pts_.reserve(in_pts.size());
+  depth_.reserve(in_pts.size());
+  intensity_.reserve(in_pts.size());
   float max_r2 = 0.0f;
-  for (const auto & s : world_soundings) {
+  for (const auto & s : in_pts) {
     const float rx = static_cast<float>(s.x) - center_x_;
     const float ry = static_cast<float>(s.y) - center_y_;
     const float rz = static_cast<float>(s.z) - center_z_;
