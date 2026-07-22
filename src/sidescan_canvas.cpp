@@ -58,6 +58,7 @@ void SidescanCanvas::setGeoOrigin(double lat_deg, double lon_deg)
   // Floored like GeoView::lonScale so a nonsensical polar origin cannot make
   // the plane non-invertible.
   lon_scale_ = std::max(0.01, std::cos(lat_deg * M_PI / 180.0));
+  layer_cache_valid_ = false;
   rebuildGeoLayerGeometry();
   update();
 }
@@ -71,6 +72,7 @@ void SidescanCanvas::setMapAnchor(const std::optional<MapGeoAffine> & anchor)
 void SidescanCanvas::setStoreTiles(std::vector<OverviewTile> tiles)
 {
   store_tiles_ = std::move(tiles);
+  layer_cache_valid_ = false;
   rebuildGeoLayerGeometry();
   update();
 }
@@ -79,6 +81,7 @@ void SidescanCanvas::setNavTrack(
   std::vector<std::vector<std::pair<double, double>>> segments)
 {
   nav_segments_geo_ = std::move(segments);
+  layer_cache_valid_ = false;
   rebuildGeoLayerGeometry();
   update();
 }
@@ -86,6 +89,7 @@ void SidescanCanvas::setNavTrack(
 void SidescanCanvas::setIndexTiles(const std::vector<GeoRect> & tiles)
 {
   index_tiles_geo_ = tiles;
+  layer_cache_valid_ = false;
   const bool had_selection = !selected_tiles_.empty();
   selected_tiles_.clear();
   rebuildGeoLayerGeometry();
@@ -125,6 +129,7 @@ void SidescanCanvas::setNavTrackVisible(bool on)
 {
   if (show_nav_track_ != on) {
     show_nav_track_ = on;
+    layer_cache_valid_ = false;
     update();
   }
 }
@@ -133,6 +138,7 @@ void SidescanCanvas::setIndexTilesVisible(bool on)
 {
   if (show_index_tiles_ != on) {
     show_index_tiles_ = on;
+    layer_cache_valid_ = false;
     update();
   }
 }
@@ -281,6 +287,7 @@ void SidescanCanvas::setGridSpacing(double metres)
 {
   if (metres > 0.0) {
     grid_spacing_m_ = metres;
+    layer_cache_valid_ = false;
     update();
   }
 }
@@ -415,8 +422,9 @@ void SidescanCanvas::drawNavTrack(QPainter & painter) const
   }
   // Light-handed: a campaign's worth of overlapping passes must read as a
   // veil over the basemap, not a blanket (and the toggle removes it wholly).
-  // No per-track arrowheads — the time-bar arrow gives direction on demand;
-  // arrowheads everywhere were half the clutter over the basemap.
+  // No per-track arrowheads — the time-bar arrow gives direction on demand.
+  // Sparse: skip points that advance the polyline by less than ~2 screen px
+  // (46.5k campaign points collapse to a few thousand at survey zooms).
   QPen pen(QColor(255, 255, 255, 90));
   pen.setWidthF(1.0);
   painter.setPen(pen);
@@ -427,60 +435,74 @@ void SidescanCanvas::drawNavTrack(QPainter & painter) const
     }
     QPolygonF screen;
     screen.reserve(seg.size());
-    for (const auto & p : seg) {
-      screen << mapToScreen(p.x(), p.y());
+    QPointF last = mapToScreen(seg.front().x(), seg.front().y());
+    screen << last;
+    for (int i = 1; i < seg.size(); ++i) {
+      const QPointF pt = mapToScreen(seg[i].x(), seg[i].y());
+      if (i == seg.size() - 1 ||
+        std::abs(pt.x() - last.x()) + std::abs(pt.y() - last.y()) >= 2.0)
+      {
+        screen << pt;
+        last = pt;
+      }
     }
     painter.drawPolyline(screen);
   }
 }
 
-void SidescanCanvas::drawIndexTiles(QPainter & painter) const
+void SidescanCanvas::drawIndexTileGrid(QPainter & painter) const
 {
-  if (index_tiles_.empty()) {
+  if (index_tiles_.empty() || !show_index_tiles_) {
+    return;
+  }
+  // Sparse: below ~3 px per tile the outlines are unreadable haze — skip.
+  if ((index_tiles_.front().x1 - index_tiles_.front().x0) * px_per_m_ < 3.0) {
     return;
   }
   const QRectF viewport(0, 0, width(), height());
   QPen outline(QColor(0, 200, 255, 45));
   outline.setWidthF(1.0);
-  for (std::size_t i = 0; i < index_tiles_.size(); ++i) {
-    const auto & t = index_tiles_[i];
-    const bool selected = selected_tiles_.count(i) > 0;
-    // The unselected grid is a declutterable overlay; the selection is state
-    // and stays visible even with the grid switched off.
-    if (!selected && !show_index_tiles_) {
-      continue;
-    }
-    // Canvas y grows north, screen y grows down: NW corner is (x0, y1).
+  painter.setPen(outline);
+  painter.setBrush(Qt::NoBrush);
+  for (const auto & t : index_tiles_) {
     const QPointF nw = mapToScreen(t.x0, t.y1);
     const QPointF se = mapToScreen(t.x1, t.y0);
     const QRectF r(nw, se);
-    if (!r.intersects(viewport)) {
+    if (r.intersects(viewport)) {
+      painter.drawRect(r);
+    }
+  }
+}
+
+void SidescanCanvas::drawSelectedTiles(QPainter & painter) const
+{
+  if (selected_tiles_.empty()) {
+    return;
+  }
+  const QRectF viewport(0, 0, width(), height());
+  painter.setPen(QPen(QColor(0, 255, 255, 220), 1.5));
+  painter.setBrush(QColor(0, 255, 255, 70));
+  for (const auto i : selected_tiles_) {
+    if (i >= index_tiles_.size()) {
       continue;
     }
-    // NOTE: no ternary for the brush — `cond ? QColor(...) : Qt::NoBrush`
-    // compiles by converting the enum through QColor(QRgb) into OPAQUE BLACK,
-    // silently filling every unselected tile (the desk-verified basemap
-    // occlusion bug).
-    if (selected) {
-      painter.setPen(QPen(QColor(0, 255, 255, 220), 1.5));
-      painter.setBrush(QColor(0, 255, 255, 70));
-    } else {
-      painter.setPen(outline);
-      painter.setBrush(Qt::NoBrush);
+    const auto & t = index_tiles_[i];
+    const QPointF nw = mapToScreen(t.x0, t.y1);
+    const QPointF se = mapToScreen(t.x1, t.y0);
+    const QRectF r(nw, se);
+    if (r.intersects(viewport)) {
+      painter.drawRect(r);
     }
-    painter.drawRect(r);
   }
   painter.setBrush(Qt::NoBrush);
 }
 
-void SidescanCanvas::paintEvent(QPaintEvent * event)
+void SidescanCanvas::rebuildLayerCache()
 {
-  Q_UNUSED(event);
-  QPainter painter(this);
-  painter.fillRect(rect(), QColor(20, 24, 28));
-  applyPendingFit();
+  layer_cache_ = QPixmap(size());
+  QPainter painter(&layer_cache_);
+  painter.fillRect(layer_cache_.rect(), QColor(20, 24, 28));
 
-  // Survey layers (geo mode), bottom-up: store basemap, nav track, tile grid.
   if (geo_mode_ && !store_tile_rects_.empty()) {
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     for (std::size_t i = 0; i < store_tile_rects_.size(); ++i) {
@@ -488,7 +510,7 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
       const QPointF nw = mapToScreen(r.left(), r.top() + r.height());
       const QPointF se = mapToScreen(r.left() + r.width(), r.top());
       const QRectF target(nw, se);
-      if (!target.intersects(rect())) {
+      if (!target.intersects(layer_cache_.rect())) {
         continue;
       }
       painter.drawImage(target, store_tiles_[i].image);
@@ -499,7 +521,44 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
   drawGrid(painter);
   if (geo_mode_) {
     drawNavTrack(painter);
-    drawIndexTiles(painter);
+    drawIndexTileGrid(painter);
+  }
+
+  layer_cache_valid_ = true;
+  cache_px_per_m_ = px_per_m_;
+  cache_center_ = center_map_;
+  cache_size_ = size();
+}
+
+void SidescanCanvas::paintEvent(QPaintEvent * event)
+{
+  Q_UNUSED(event);
+  QPainter painter(this);
+  applyPendingFit();
+
+  // Static layers from the cache (see rebuildLayerCache): a same-view repaint
+  // is a blit; a mid-pan repaint blits the stale cache translated and rebuilds
+  // on release; anything else (zoom, resize, data change) rebuilds now.
+  const bool view_matches = layer_cache_valid_ && cache_size_ == size() &&
+    cache_px_per_m_ == px_per_m_ && cache_center_ == center_map_;
+  const bool pan_blit = panning_ && layer_cache_valid_ &&
+    cache_size_ == size() && cache_px_per_m_ == px_per_m_;
+  if (view_matches) {
+    painter.drawPixmap(0, 0, layer_cache_);
+  } else if (pan_blit) {
+    painter.fillRect(rect(), QColor(20, 24, 28));
+    const QPointF off(
+      (cache_center_.x() - center_map_.x()) * px_per_m_,
+      (center_map_.y() - cache_center_.y()) * px_per_m_);
+    painter.drawPixmap(off, layer_cache_);
+  } else {
+    rebuildLayerCache();
+    painter.drawPixmap(0, 0, layer_cache_);
+  }
+
+  // --- dynamic overlays, cheap per frame ---
+  if (geo_mode_) {
+    drawSelectedTiles(painter);
   }
 
   const bool bag_placeable = mapPlaceable();
@@ -673,6 +732,7 @@ void SidescanCanvas::mousePressEvent(QMouseEvent * event)
     update();
   } else {
     last_drag_pos_ = event->pos();
+    panning_ = true;   // repaint via the translated cache until release
   }
 }
 
@@ -713,6 +773,10 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
 void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
 {
   if (event->button() != Qt::LeftButton) {return;}
+  if (panning_) {
+    panning_ = false;
+    update();   // rebuild the layer cache at the settled view
+  }
   if (band_selecting_) {
     band_selecting_ = false;
     bool changed = false;

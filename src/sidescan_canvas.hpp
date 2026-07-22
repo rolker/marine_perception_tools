@@ -16,8 +16,10 @@
 #define SIDESCAN_CANVAS_HPP_
 
 #include <QImage>
+#include <QPixmap>
 #include <QPoint>
 #include <QPointF>
+#include <QSize>
 #include <QPolygonF>
 #include <QRectF>
 #include <QString>
@@ -200,6 +202,22 @@ protected:
   void mouseReleaseEvent(QMouseEvent * event) override;
 
 private:
+  // Static-layer cache (#24 desk finding: full repaints at mouse-move rate
+  // made everything sluggish). The basemap tiles, measuring grid, decimated
+  // nav track, and unselected tile-grid outlines render ONCE per view into a
+  // pixmap; a normal repaint is blit + dynamic overlays (selection, coverage,
+  // contacts, arrow, cursor, bands). During a pan the stale pixmap is blitted
+  // translated and the rebuild happens on release (slippy-map style). Data
+  // setters invalidate; a view change is detected by comparing the cached
+  // view parameters.
+  void rebuildLayerCache();
+  QPixmap layer_cache_;
+  bool layer_cache_valid_ = false;
+  double cache_px_per_m_ = 0.0;
+  QPointF cache_center_;
+  QSize cache_size_;
+  bool panning_ = false;
+
   // canvas metres <-> screen pixels (view transform).
   QPointF mapToScreen(double mx, double my) const;
   QPointF screenToMap(double sx, double sy) const;
@@ -213,8 +231,9 @@ private:
   void rebuildGeoLayerGeometry();   // re-derive canvas-metre rects/polylines
   void applyPendingFit();
   void drawGrid(QPainter & painter) const;
-  void drawNavTrack(QPainter & painter) const;
-  void drawIndexTiles(QPainter & painter) const;
+  void drawNavTrack(QPainter & painter) const;      // decimated; cache only
+  void drawIndexTileGrid(QPainter & painter) const;   // unselected; cache only
+  void drawSelectedTiles(QPainter & painter) const;   // dynamic overlay
 
   // --- geographic frame ---
   bool geo_mode_ = false;
