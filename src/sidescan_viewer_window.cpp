@@ -19,11 +19,15 @@
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
+#include <QColor>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
@@ -32,6 +36,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPixmap>
 #include <QPointF>
 #include <QCloseEvent>
 #include <QProgressBar>
@@ -42,7 +47,10 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QString>
+#include <QStringList>
 #include <QtConcurrent>
+#include <QTimeZone>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -51,19 +59,28 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
+#include <limits>
+#include <map>
+#include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "marine_autonomy/gggs.h"
 #include "marine_contacts/contact_store.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
+#include "map_geo_anchor.hpp"
 #include "marine_colormap/colormap.hpp"
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
 #include "marine_interfaces/msg/contact.hpp"
 #include "marine_sonar_widgets/echogram_widget.hpp"
 #include "marine_sonar_widgets/waterfall_widget.hpp"
+#include "marine_tiled_raster_store/tile_io.hpp"
+#include "pass_coalesce.hpp"
 #include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
@@ -72,6 +89,43 @@ namespace marine_perception_tools
 {
 namespace
 {
+
+QString isoUtc(std::int64_t t_ns)
+{
+  return QDateTime::fromMSecsSinceEpoch(t_ns / 1000000LL, QTimeZone::utc())
+         .toString("yyyy-MM-dd HH:mm:ss");
+}
+
+// Colormap one store tile's band 0 (depth) into an RGBA image: finite values
+// span the given range, NaN (store NoData) stays transparent so gaps read as
+// gaps instead of painting as the deepest colour.
+QImage tileToImage(
+  const marine_tiled_raster_store::TiledRasterTile<double> & tile,
+  double lo, double hi, const std::vector<marine_colormap::Rgba8> & lut)
+{
+  const auto & band = tile.band(0);
+  const int rows = marine_tiled_raster_store::TiledRasterTile<double>::edge;
+  const int cols = marine_tiled_raster_store::TiledRasterTile<double>::edge;
+  QImage image(cols, rows, QImage::Format_ARGB32);
+  image.fill(Qt::transparent);
+  const double span = (hi > lo) ? (hi - lo) : 1.0;
+  for (int r = 0; r < rows; ++r) {
+    // Store row 0 is the SOUTH edge (GGGS rows grow northward); QImage row 0
+    // is drawn at the TOP (north) of the target rect, so flip vertically.
+    QRgb * out = reinterpret_cast<QRgb *>(image.scanLine(rows - 1 - r));
+    for (int c = 0; c < cols; ++c) {
+      const double v = band[static_cast<std::size_t>(r) * cols + c];
+      if (std::isnan(v)) {
+        continue;
+      }
+      const double t = std::clamp((v - lo) / span, 0.0, 1.0);
+      const auto & rgba =
+        lut[static_cast<std::size_t>(t * static_cast<double>(lut.size() - 1) + 0.5)];
+      out[c] = qRgba(rgba.r, rgba.g, rgba.b, 255);
+    }
+  }
+  return image;
+}
 
 // Maximum slant range (≈ far ground range) of a ping's last sample, used to pad
 // the swath bounding box.
@@ -586,8 +640,21 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   auto * ss_pane = make_pane("Sidescan", waterfall_, {sidescan_cmap_});
   auto * bs_pane = make_pane("MBES Backscatter", mbes_waterfall_, {mbes_cmap_});
   auto * wc_pane = make_pane("Water Column", echogram_, {echo_cmap_});
+  // The cloud pane carries a pass legend beside the 3D view (#24): hidden in
+  // scrub mode, shown when a tile selection drives the cloud (per-pass colours).
+  cloud_legend_ = new QTreeWidget(this);
+  cloud_legend_->setObjectName("cloud_legend");
+  cloud_legend_->setHeaderLabels({"Pass", "Soundings"});
+  cloud_legend_->setRootIsDecorated(false);
+  cloud_legend_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+  cloud_legend_->setVisible(false);
+  cloud_split_ = new QSplitter(Qt::Horizontal, this);
+  cloud_split_->addWidget(cloud_);
+  cloud_split_->addWidget(cloud_legend_);
+  cloud_split_->setStretchFactor(0, 1);
   auto * cloud_pane = make_pane(
-    "MBES 3D", cloud_, {cloud_color_combo_, zexag_spin_, point_size_spin_, cloud_palette_});
+    "MBES 3D", cloud_split_,
+    {cloud_color_combo_, zexag_spin_, point_size_spin_, cloud_palette_});
 
   // 2x2 grid of the four sonar views, each pane independently resizable:
   //   sidescan waterfall (UL) | MBES backscatter (UR)
@@ -615,11 +682,20 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   outer_split_->setStretchFactor(1, 3);
   outer_split_->setStretchFactor(2, 4);
 
+  // Status row: the main readout plus a right-aligned lat/lon hover readout
+  // (populated only in survey/geo mode).
+  hover_geo_ = new QLabel(this);
+  auto * status_row = new QWidget(this);
+  auto * srow = new QHBoxLayout(status_row);
+  srow->setContentsMargins(0, 0, 0, 0);
+  srow->addWidget(status_, 1);
+  srow->addWidget(hover_geo_);
+
   auto * central = new QWidget(this);
   auto * col = new QVBoxLayout(central);
   col->addWidget(outer_split_, 1);
   col->addWidget(controls);
-  col->addWidget(status_);
+  col->addWidget(status_row);
   setCentralWidget(central);
 
   auto * file_menu = menuBar()->addMenu("&File");
@@ -640,6 +716,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onIndexProgress);
   connect(&render_watcher_, &QFutureWatcher<SidescanRenderResult>::finished,
     this, &SidescanViewerWindow::onRenderFinished);
+  connect(&cloud_watcher_, &QFutureWatcher<CloudLoadTicket>::finished,
+    this, &SidescanViewerWindow::onCloudPassesLoaded);
+  connect(canvas_, &SidescanCanvas::tileSelectionChanged,
+    this, &SidescanViewerWindow::onTileSelectionChanged);
+  connect(canvas_, &SidescanCanvas::hoverGeo, this, [this](double lat, double lon) {
+      hover_geo_->setText(
+        QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
+    });
   connect(scrub_, &QSlider::valueChanged, this, &SidescanViewerWindow::onScrubChanged);
   connect(grid_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, &SidescanViewerWindow::onGridSpacingChanged);
@@ -750,6 +834,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   restore_split(grid_split_, "split_grid");
   restore_split(grid_top_split_, "split_grid_top");
   restore_split(grid_bot_split_, "split_grid_bot");
+  restore_split(cloud_split_, "split_cloud");
 }
 
 SidescanViewerWindow::~SidescanViewerWindow()
@@ -759,6 +844,7 @@ SidescanViewerWindow::~SidescanViewerWindow()
   // already-queued indexProgress events targeted at this window).
   if (index_watcher_.isRunning()) {index_watcher_.waitForFinished();}
   if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
+  if (cloud_watcher_.isRunning()) {cloud_watcher_.waitForFinished();}
 }
 
 void SidescanViewerWindow::closeEvent(QCloseEvent * event)
@@ -771,6 +857,7 @@ void SidescanViewerWindow::closeEvent(QCloseEvent * event)
   if (grid_split_) {settings.setValue("split_grid", grid_split_->saveState());}
   if (grid_top_split_) {settings.setValue("split_grid_top", grid_top_split_->saveState());}
   if (grid_bot_split_) {settings.setValue("split_grid_bot", grid_bot_split_->saveState());}
+  if (cloud_split_) {settings.setValue("split_cloud", cloud_split_->saveState());}
   QMainWindow::closeEvent(event);
 }
 
@@ -848,6 +935,10 @@ void SidescanViewerWindow::openBag(
   ++session_epoch_;   // any render in flight for the previous bag is now stale
 
   // Reset the views for the new bag; the scrub range grows on each progress tick.
+  // The geo anchor of the previous bag no longer applies — until this bag's
+  // index resolves one, its layers are hidden on the survey map (geo mode) and
+  // draw as before in bag-only mode.
+  canvas_->setMapAnchor(std::nullopt);
   canvas_->setTrack({});
   canvas_->resetView();
   cloud_->resetView();
@@ -901,6 +992,13 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
   if (done) {
     loading_ = false;
     progress_->setVisible(false);
+    // Place this bag on the survey map (#24): probe the session's mapToGeo
+    // into an affine anchor. nullopt (no earth reference in the bag) keeps the
+    // bag's layers hidden in geo mode rather than placing them by guesswork.
+    canvas_->setMapAnchor(probe_map_anchor(
+        [this](double x, double y, double & lat, double & lon, double & alt) {
+          return session_->mapToGeo(x, y, lat, lon, alt);
+        }));
     status_->setText(QString(
         "%1 pings (%2 port, %3 stbd, %4 down) • %5 m track • alt: %6 • geo: %7")
       .arg(session_->pingCount())
@@ -1223,8 +1321,12 @@ void SidescanViewerWindow::onRenderFinished()
   }
   // The 3D cloud keeps its own palette (set in the ctor and via cloud_palette_);
   // setPoints recolours with that stored palette, so no per-render setColorMap here.
-  cloud_->setPoints(r.mbes_soundings);
-  cloud_->setBoat(r.boat_x, r.boat_y, r.boat_z, r.boat_heading, r.boat_valid);
+  // With a tile selection driving the cloud (#24) the scrub render leaves the
+  // pane alone — the selection cloud spans bags and would be clobbered.
+  if (!selection_cloud_) {
+    cloud_->setPoints(r.mbes_soundings);
+    cloud_->setBoat(r.boat_x, r.boat_y, r.boat_z, r.boat_heading, r.boat_valid);
+  }
   // Size the MBES backscatter scrollback to the window too (same reason as the
   // sidescan pane): the lib's default 200-row history is smaller than a dense
   // detections window, so without this the oldest MBES pings are evicted and the
@@ -1255,6 +1357,359 @@ void SidescanViewerWindow::onRenderFinished()
     render_pending_ = false;
     requestRender();
   }
+}
+
+// --- survey-explorer mode (#24) ---------------------------------------------
+
+void SidescanViewerWindow::openSurveyIndex(
+  const std::string & index_path, const std::string & stores_dir)
+{
+  bridge_ = std::make_unique<SurveyIndexBridge>(index_path);   // throws on a bad DB
+  setWindowTitle(QString("Sidescan Target Viewer — %1")
+    .arg(QString::fromStdString(index_path)));
+
+  QString note;
+  auto tiles = loadStoreTileImages(stores_dir, note);
+
+  // The canvas-metre plane needs a geographic origin before any layer is set:
+  // the index extent's centre, or the store tiles' centre when the index holds
+  // no passes but tiles exist. (Both empty: nothing to explore — say so.)
+  const auto box = bridge_->extent();
+  double olat = 0.0;
+  double olon = 0.0;
+  double fit_s = 0.0, fit_w = 0.0, fit_n = 0.0, fit_e = 0.0;
+  bool have_fit = false;
+  if (!tiles.empty()) {
+    // Store tiles are the visual frame the operator aims by — fit to them.
+    fit_s = tiles.front().south;
+    fit_w = tiles.front().west;
+    fit_n = tiles.front().north;
+    fit_e = tiles.front().east;
+    for (const auto & t : tiles) {
+      fit_s = std::min(fit_s, t.south);
+      fit_w = std::min(fit_w, t.west);
+      fit_n = std::max(fit_n, t.north);
+      fit_e = std::max(fit_e, t.east);
+    }
+    have_fit = true;
+  }
+  if (box) {
+    if (!have_fit) {
+      fit_s = box->south;
+      fit_w = box->west;
+      fit_n = box->north;
+      fit_e = box->east;
+      have_fit = true;
+    }
+    olat = 0.5 * (box->south + box->north);
+    olon = 0.5 * (box->west + box->east);
+  } else if (have_fit) {
+    olat = 0.5 * (fit_s + fit_n);
+    olon = 0.5 * (fit_w + fit_e);
+  }
+  canvas_->setGeoOrigin(olat, olon);
+  canvas_->setStoreTiles(std::move(tiles));
+
+  // Nav track (schema v2, #265): one polyline per bag, segmented at bag_id
+  // changes (the accessor orders by bag then time).
+  std::vector<std::vector<std::pair<double, double>>> segments;
+  {
+    std::int64_t cur_bag = -1;
+    for (const auto & p : bridge_->navTrack()) {
+      if (p.bag_id != cur_bag) {
+        segments.emplace_back();
+        cur_bag = p.bag_id;
+      }
+      segments.back().emplace_back(p.latitude, p.longitude);
+    }
+  }
+  canvas_->setNavTrack(std::move(segments));
+
+  // Selectable index-tile grid; canvas selection indices map into indexed_tiles_.
+  indexed_tiles_ = bridge_->indexedTiles();
+  std::vector<GeoRect> rects;
+  rects.reserve(indexed_tiles_.size());
+  for (const auto & t : indexed_tiles_) {
+    rects.push_back(GeoRect{t.south, t.west, t.north, t.east});
+  }
+  canvas_->setIndexTiles(rects);
+
+  if (have_fit) {
+    canvas_->fitGeo(fit_s, fit_w, fit_n, fit_e);
+    status_->setText(
+      QString("Survey index: %1 tiles indexed%2 — ctrl-click or ctrl-drag "
+        "tiles to load their passes into the 3D cloud.")
+      .arg(indexed_tiles_.size()).arg(note));
+  } else {
+    status_->setText(
+      QString("Survey index holds no passes%1 — nothing to explore.").arg(note));
+  }
+}
+
+std::vector<OverviewTile> SidescanViewerWindow::loadStoreTileImages(
+  const std::string & stores_dir, QString & note) const
+{
+  // The tile level is encoded in the filenames (<level>_<row>_<col>.tif). A
+  // store should hold a single level; scan every tile so we render one level
+  // deterministically (the lowest) and can warn when the directory mixes
+  // levels — otherwise the other levels vanish silently. A missing or empty
+  // directory degrades to an empty basemap (the caller fits to the index
+  // extent), so tile selection works from the index alone.
+  std::error_code ec;
+  std::map<int, std::vector<std::string>> by_level;   // level -> tile paths
+  for (const auto & entry : std::filesystem::directory_iterator(stores_dir, ec)) {
+    const auto name = entry.path().filename().string();
+    if (entry.path().extension() != ".tif" || name.find('_') == std::string::npos) {
+      continue;
+    }
+    try {
+      const int level = std::stoi(name.substr(0, name.find('_')));
+      // Reject non-GGGS levels here: by_level renders its LOWEST key, so one
+      // junk "-1_x_y.tif" would otherwise win level selection and blank the
+      // real tiles (gggs::Level itself throws only at load time, per tile).
+      if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size()) {
+        continue;
+      }
+      by_level[level].push_back(entry.path().string());
+    } catch (const std::exception &) {
+      continue;
+    }
+  }
+  if (by_level.empty()) {
+    note += QString(" (no store tiles under %1)").arg(QString::fromStdString(stores_dir));
+    return {};
+  }
+
+  const int level = by_level.begin()->first;   // render the lowest level
+  const auto & level_paths = by_level.begin()->second;
+
+  // Warn when the store mixes levels: only `level` is rendered, so name the
+  // ignored ones instead of dropping them without a trace. (loadTiles() would
+  // throw on the off-level tiles, so this loads the chosen level tile-by-tile.)
+  if (by_level.size() > 1) {
+    QStringList others;
+    for (const auto & [lvl, paths] : by_level) {
+      if (lvl != level) {
+        others << QString::number(lvl);
+      }
+    }
+    note += QString(" (mixed store: ignoring levels %1)").arg(others.join(", "));
+  }
+
+  // Load per-tile with a per-tile guard: tileRasterCount/loadTile @throw on a
+  // corrupt or unreadable tile, and one bad tile must cost only itself — not
+  // the whole map, and certainly not the window (graceful degradation; the
+  // pass query works regardless).
+  std::map<gggs::GridIndex, marine_tiled_raster_store::TiledRasterTile<double>> tiles;
+  int failed_tiles = 0;
+  for (const auto & path : level_paths) {
+    try {
+      const int band_count = marine_tiled_raster_store::tileRasterCount(path);
+      if (band_count < 1) {
+        ++failed_tiles;
+        continue;
+      }
+      auto tile = marine_tiled_raster_store::loadTile<double>(
+        path, gggs::Level(static_cast<std::uint8_t>(level)),
+        static_cast<std::size_t>(band_count));
+      tiles.emplace(tile.index(), std::move(tile));
+    } catch (const std::exception &) {
+      ++failed_tiles;
+    }
+  }
+  if (failed_tiles > 0) {
+    note += QString(" (%1 unreadable tile%2 skipped)")
+      .arg(failed_tiles).arg(failed_tiles == 1 ? "" : "s");
+  }
+  if (tiles.empty()) {
+    return {};
+  }
+
+  // One shared depth range across the survey so colours are comparable
+  // between tiles.
+  double lo = std::numeric_limits<double>::max();
+  double hi = std::numeric_limits<double>::lowest();
+  for (const auto & [index, tile] : tiles) {
+    for (const double v : tile.band(0)) {
+      if (!std::isnan(v)) {
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+      }
+    }
+  }
+  if (lo > hi) {
+    note += " (store tiles hold no finite depths)";
+    return {};
+  }
+  const auto lut = marine_colormap::bake_lut(
+    marine_colormap::palette(0), marine_colormap::TransferParams{}, 256);
+
+  std::vector<OverviewTile> overview;
+  overview.reserve(tiles.size());
+  for (const auto & [index, tile] : tiles) {
+    OverviewTile out;
+    out.image = tileToImage(tile, lo, hi, lut);
+    out.south = index.southLatitude();
+    out.west = index.westLongitude();
+    out.north = index.northLatitude();
+    out.east = index.eastLongitude();
+    overview.push_back(std::move(out));
+  }
+  note += QString(" (%1 store tiles, L%2, depth %3–%4 m)")
+    .arg(overview.size()).arg(level).arg(lo, 0, 'f', 1).arg(hi, 0, 'f', 1);
+  return overview;
+}
+
+void SidescanViewerWindow::onTileSelectionChanged()
+{
+  if (!bridge_) {
+    return;
+  }
+  std::vector<IndexedTile> selection;
+  for (const auto idx : canvas_->selectedTiles()) {
+    if (idx < indexed_tiles_.size()) {
+      selection.push_back(indexed_tiles_[idx]);
+    }
+  }
+  if (selection.empty()) {
+    exitSelectionCloud();
+    status_->setText("Tile selection cleared.");
+    return;
+  }
+
+  std::vector<marine_survey_index::PassRow> rows;
+  try {
+    rows = bridge_->queryTiles(selection);
+  } catch (const std::exception & e) {
+    status_->setText(QString("Pass query failed: %1").arg(e.what()));
+    return;
+  }
+  const auto passes = coalescePasses(rows);
+
+  // The cloud loads every mbes-bathy pass of the selection, across bags —
+  // sidescan stays single-pass by design (#258: blending kills shadows); its
+  // passes will drive the waterfall through the timeline pane (phase d).
+  std::vector<CloudPassInfo> cloud_passes;
+  for (const auto & p : passes) {
+    if (p.sensor_type != "mbes-bathy") {
+      continue;
+    }
+    CloudPassInfo info;
+    info.bag_path = p.bag_path;
+    info.t_start_ns = p.t_start_ns;
+    info.t_end_ns = p.t_end_ns;
+    info.label = QString("%1  (%2)")
+      .arg(isoUtc(p.t_start_ns))
+      .arg(QFileInfo(QString::fromStdString(p.bag_path)).fileName())
+      .toStdString();
+    cloud_passes.push_back(std::move(info));
+  }
+
+  // Selection mode: the cloud pane belongs to the selection until it clears.
+  selection_cloud_ = true;
+  cloud_->setColorMode(PointCloudView::ColorMode::Pass);
+  cloud_color_combo_->setEnabled(false);
+  cloud_legend_->clear();
+  cloud_legend_->setVisible(true);
+  ++cloud_gen_;   // any load in flight is for a stale selection
+
+  if (cloud_passes.empty()) {
+    cloud_->resetView();
+    cloud_->setMultiPassPoints({});
+    cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
+    status_->setText(
+      QString("%1 tile%2 selected, %3 pass%4 — none mbes-bathy; nothing to "
+        "load into the cloud.")
+      .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
+      .arg(passes.size()).arg(passes.size() == 1 ? "" : "es"));
+    return;
+  }
+
+  cloud_passes_ = cloud_passes;
+  status_->setText(
+    QString("Loading %1 mbes-bathy pass%2 from %3 selected tile%4…")
+    .arg(cloud_passes.size()).arg(cloud_passes.size() == 1 ? "" : "es")
+    .arg(selection.size()).arg(selection.size() == 1 ? "" : "s"));
+  const auto gen = cloud_gen_;
+  const auto snapshot = std::move(cloud_passes);   // worker owns its own copy
+  cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen]() {
+      CloudLoadTicket ticket;
+      ticket.generation = gen;
+      ticket.outcome = load_cloud_passes(snapshot);
+      return ticket;
+    }));
+}
+
+void SidescanViewerWindow::exitSelectionCloud()
+{
+  if (!selection_cloud_) {
+    return;
+  }
+  selection_cloud_ = false;
+  ++cloud_gen_;   // an in-flight selection load must not apply any more
+  cloud_legend_->clear();
+  cloud_legend_->setVisible(false);
+  cloud_color_combo_->setEnabled(true);
+  cloud_->setColorMode(cloud_color_combo_->currentIndex() == 1 ?
+    PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
+  // Hand the pane back to the scrub window: re-render if a bag is open,
+  // otherwise leave it empty.
+  cloud_->resetView();
+  if (session_) {
+    requestRender();
+  } else {
+    cloud_->setPoints({});
+    cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
+  }
+}
+
+void SidescanViewerWindow::onCloudPassesLoaded()
+{
+  const CloudLoadTicket ticket = cloud_watcher_.result();
+  if (ticket.generation != cloud_gen_) {
+    return;   // a newer selection (or a cleared one) superseded this load
+  }
+  const CloudLoadOutcome & out = ticket.outcome;
+
+  cloud_->resetView();
+  cloud_->setMultiPassPoints(out.pass_clouds);
+  // The selection cloud sits in the reference pass's world frame — the scrub
+  // bag's boat arrow would be in the wrong frame, so hide it.
+  cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
+
+  cloud_legend_->clear();
+  int total = 0;
+  for (std::size_t i = 0; i < cloud_passes_.size(); ++i) {
+    const int count = (i < out.sounding_counts.size()) ? out.sounding_counts[i] : 0;
+    auto * item = new QTreeWidgetItem(cloud_legend_, {
+        QString::fromStdString(cloud_passes_[i].label),
+        QString::number(count)});
+    QPixmap swatch(12, 12);
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    pass_color(static_cast<int>(i), r, g, b);
+    swatch.fill(QColor::fromRgbF(r, g, b));
+    item->setIcon(0, swatch);
+    if (count == 0) {
+      item->setDisabled(true);
+    }
+    total += count;
+  }
+
+  QString message = QString("%1 soundings from %2 pass%3")
+    .arg(total).arg(cloud_passes_.size()).arg(cloud_passes_.size() == 1 ? "" : "es");
+  if (out.skipped_passes > 0) {
+    message += QString(", %1 pass%2 skipped")
+      .arg(out.skipped_passes).arg(out.skipped_passes == 1 ? "" : "es");
+  }
+  if (out.skipped_pings > 0) {
+    message += QString(", %1 pings without TF").arg(out.skipped_pings);
+  }
+  if (!out.notes.isEmpty()) {
+    message += " — " + out.notes.join("; ");
+  }
+  status_->setText(message);
 }
 
 }  // namespace marine_perception_tools

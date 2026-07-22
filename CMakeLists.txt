@@ -133,6 +133,7 @@ add_executable(sidescan_target_viewer
   src/sidescan_viewer_window.cpp
   src/sidescan_canvas.cpp
   src/point_cloud_view.cpp
+  src/mbes_pass_loader.cpp
   src/survey_overview_canvas.cpp
   src/survey_overview_window.cpp
   src/mbes_cloud_window.cpp
@@ -226,6 +227,45 @@ if(BUILD_TESTING)
   target_link_libraries(test_point_cloud_view
     Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::OpenGL)
   set_tests_properties(test_point_cloud_view PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;LIBGL_ALWAYS_SOFTWARE=1")
+
+  # Pure map-ENU -> geo anchor probe (map_geo_anchor.hpp, #24) — header-only.
+  ament_add_gtest(test_map_geo_anchor test/test_map_geo_anchor.cpp)
+  target_include_directories(test_map_geo_anchor PRIVATE src)
+
+  # Multi-pass cloud loader (#24): error paths (missing bag, empty input) —
+  # the happy path needs a real bag and is covered by test_mbes_window_reader's
+  # units plus the window smoke below. QtCore only (QStringList notes).
+  ament_add_gtest(test_mbes_pass_loader
+    test/test_mbes_pass_loader.cpp
+    src/mbes_pass_loader.cpp)
+  target_include_directories(test_mbes_pass_loader PRIVATE src)
+  target_link_libraries(test_mbes_pass_loader sidescan_core Qt${QT_VERSION_MAJOR}::Core)
+
+  # Survey-explorer window smoke (#24; offscreen GL, self-skips headless):
+  # --index path constructs against a fixture DB, loads tiles + track, and
+  # survives a programmatic tile selection driving the cloud loader.
+  # (The executable rename to survey_explorer lands in phase e; the test name
+  # already reflects its role.)
+  ament_add_gtest(test_survey_explorer_window
+    test/test_survey_explorer_window.cpp
+    src/sidescan_viewer_window.cpp
+    src/sidescan_canvas.cpp
+    src/point_cloud_view.cpp
+    src/mbes_pass_loader.cpp)
+  target_include_directories(test_survey_explorer_window PRIVATE src)
+  ament_target_dependencies(test_survey_explorer_window
+    marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
+  target_link_libraries(test_survey_explorer_window
+    sidescan_core
+    survey_index_bridge
+    marine_contacts::marine_contacts
+    SQLite::SQLite3
+    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Concurrent
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::OpenGL)
+  set_tests_properties(test_survey_explorer_window PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;LIBGL_ALWAYS_SOFTWARE=1")
 
   find_package(ament_lint_auto REQUIRED)

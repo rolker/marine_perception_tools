@@ -25,20 +25,11 @@
 #include <vector>
 
 #include "mbes_geometry.hpp"
+#include "mbes_pass_loader.hpp"
 #include "point_cloud_view.hpp"
 
 namespace marine_perception_tools
 {
-
-// One pass to load into the cloud: the bag it lives in, its time window (from
-// the survey index), and a human label for the legend.
-struct CloudPassInfo
-{
-  std::string bag_path;
-  std::string label;
-  std::int64_t t_start_ns = 0;
-  std::int64_t t_end_ns = 0;
-};
 
 // The multi-pass MBES drill-down (#21, explorer stage 3): the selected passes'
 // soundings in one 3D PointCloudView, coloured per pass (golden-angle hues), a
@@ -59,23 +50,12 @@ public:
   ~MbesCloudWindow() override;
 
 private:
-  // Everything the worker thread hands back to the UI thread in one piece.
-  struct LoadOutcome
-  {
-    std::vector<std::vector<MbesSounding>> pass_clouds;  // reference world frame
-    std::vector<int> sounding_counts;   // per input pass (0 = empty/skipped)
-    QStringList notes;                  // per-pass problems, human-readable
-    int skipped_passes = 0;             // passes dropped (frame not resolvable)
-    int skipped_pings = 0;              // pings dropped (no TF), summed
-  };
-
-  static LoadOutcome loadPasses(const std::vector<CloudPassInfo> & passes);
   void onLoaded();
 
   std::vector<CloudPassInfo> passes_;
   PointCloudView * view_ = nullptr;
   QTreeWidget * legend_ = nullptr;
-  QFutureWatcher<LoadOutcome> watcher_;
+  QFutureWatcher<CloudLoadOutcome> watcher_;
 };
 
 }  // namespace marine_perception_tools

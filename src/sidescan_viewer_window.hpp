@@ -27,7 +27,10 @@
 
 #include "marine_contacts/contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
+#include "mbes_pass_loader.hpp"
 #include "sidescan_bag_session.hpp"
+#include "sidescan_canvas.hpp"   // OverviewTile/GeoRect (index-map layer types)
+#include "survey_index_bridge.hpp"
 
 class QLabel;
 class QSlider;
@@ -40,6 +43,7 @@ class QComboBox;
 class QRectF;
 class QCloseEvent;
 class QSplitter;
+class QTreeWidget;
 
 namespace marine_perception_tools
 {
@@ -87,11 +91,22 @@ struct SidescanRenderResult
   double win_hi = 0.0;
 };
 
+// A multi-pass cloud load in flight: the generation ties the result to the
+// selection that requested it, so a superseded load can never clobber a newer
+// selection's cloud.
+struct CloudLoadTicket
+{
+  std::uint64_t generation = 0;
+  CloudLoadOutcome outcome;
+};
+
 // Offline sidescan viewer main window: File->Open a bag, then scrub along
 // distance travelled. A rolling ~window of pings is painted (quality-wins) into a
 // coverage raster at true map position and shown north-up on the canvas, with the
-// boat track and a measuring grid. PR2 scope: the geo-map pane + scrub; the target
-// list / echogram panes come in later PRs.
+// boat track and a measuring grid. With a survey index (#24) the map becomes the
+// explorer's index map — store-tile basemap, nav track, selectable index tiles —
+// and selecting tiles auto-loads every mbes-bathy pass of the selection into the
+// 3D cloud pane (per-pass colours + legend).
 class SidescanViewerWindow : public QMainWindow
 {
   Q_OBJECT
@@ -99,6 +114,12 @@ class SidescanViewerWindow : public QMainWindow
 public:
   explicit SidescanViewerWindow(QWidget * parent = nullptr);
   ~SidescanViewerWindow() override;
+
+  // Enter survey-explorer mode (#24): open `survey_index.db`, place the store
+  // tiles / nav track / selectable index tiles on the map, and drive the cloud
+  // pane from the tile selection. Throws std::runtime_error on a missing or
+  // incompatible index (the bridge's regenerate hint propagates).
+  void openSurveyIndex(const std::string & index_path, const std::string & stores_dir);
 
   // Open a bag directly (e.g. from a CLI argument). Non-zero cue bounds
   // (UNIX ns) jump the scrub to the along-track window those stamps cover once
@@ -135,6 +156,8 @@ private slots:
   void onSaveContacts();
   void onLoadContacts();
   void onExportGeoJson();
+  void onTileSelectionChanged();
+  void onCloudPassesLoaded();
 
 private:
   // Cross-pane linked cursor + click-to-seek coordination. A world map point is the
@@ -145,6 +168,13 @@ private:
   void onEchogramSeek(double frac);                             // echogram-sourced seek
 
   void refreshContacts();   // push the store to the map overlay + the list
+
+  // Load the store-tile GeoTIFFs into colormapped basemap images; appends any
+  // degradation notes (missing dir, mixed levels, unreadable tiles) to `note`.
+  std::vector<OverviewTile> loadStoreTileImages(
+    const std::string & stores_dir, QString & note) const;
+  // Leave selection-cloud mode: restore the scrub-window cloud + colour mode.
+  void exitSelectionCloud();
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
   // if a render is in flight, just flag a pending one and re-launch on finish
   // with the latest scrub position.
@@ -206,6 +236,17 @@ private:
   // 0 = no cue pending.
   int64_t pending_cue_start_ns_ = 0;
   int64_t pending_cue_end_ns_ = 0;
+
+  // --- survey-explorer mode (#24) ---
+  std::unique_ptr<SurveyIndexBridge> bridge_;   // null in bag-only mode
+  std::vector<IndexedTile> indexed_tiles_;      // canvas selection indices map here
+  QTreeWidget * cloud_legend_ = nullptr;        // per-pass colours + counts
+  QSplitter * cloud_split_ = nullptr;           // [cloud | legend]
+  QLabel * hover_geo_ = nullptr;                // lat/lon readout (geo mode)
+  QFutureWatcher<CloudLoadTicket> cloud_watcher_;
+  std::uint64_t cloud_gen_ = 0;                 // bumped per selection change
+  std::vector<CloudPassInfo> cloud_passes_;     // passes of the in-flight/last load
+  bool selection_cloud_ = false;   // cloud pane shows the tile selection, not the scrub window
 };
 
 }  // namespace marine_perception_tools

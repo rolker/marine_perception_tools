@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "map_geo_anchor.hpp"
 #include "tile_selection.hpp"
 
 namespace marine_perception_tools
@@ -66,19 +67,8 @@ struct GeoRect
   double east = 0.0;
 };
 
-// The map-ENU -> geographic anchor for a bag with an earth reference:
-// first-order (affine) expansion of the session's mapToGeo about the map
-// origin — exact to millimetres over survey scales, and invertible, which
-// mapToGeo itself is not.
-struct MapGeoAffine
-{
-  double lat0 = 0.0;      // geo of map (0, 0)
-  double lon0 = 0.0;
-  double dlat_dx = 0.0;   // degrees per map metre
-  double dlat_dy = 0.0;
-  double dlon_dx = 0.0;
-  double dlon_dy = 0.0;
-};
+// (MapGeoAffine — the map-ENU -> geographic anchor for a bag with an earth
+// reference — lives in map_geo_anchor.hpp with the probe that derives it.)
 
 // North-up 2D map canvas (#24: the explorer's index map). Internally it works
 // in "canvas metres":
@@ -120,6 +110,11 @@ public:
   void setIndexTiles(const std::vector<GeoRect> & tiles);
   const std::set<std::size_t> & selectedTiles() const {return selected_tiles_;}
   void clearTileSelection();
+
+  // Programmatic selection (same contract as ctrl-click): indices into the
+  // setIndexTiles order. Out-of-range indices are dropped; emits
+  // tileSelectionChanged only when the selection actually changes.
+  void selectTiles(const std::set<std::size_t> & indices);
 
   // Fit the view to a geographic box (applied at the next laid-out paint, and
   // re-applied on resize until the user pans/zooms — the ctor-time widget

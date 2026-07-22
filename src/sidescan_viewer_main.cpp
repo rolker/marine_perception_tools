@@ -25,7 +25,6 @@
 #include <string>
 
 #include "sidescan_viewer_window.hpp"
-#include "survey_overview_window.hpp"
 
 namespace
 {
@@ -86,11 +85,12 @@ int main(int argc, char ** argv)
     "end", "Cue window end: UNIX nanoseconds or ISO-8601 (UTC assumed when "
     "no offset is given).", "time");
   const QCommandLineOption index_opt(
-    "index", "survey_index.db to open the survey overview window (explorer "
-    "stage 2): store-tile map, click to list the passes that saw a spot.",
+    "index", "survey_index.db to open in survey-explorer mode (#24): the map "
+    "becomes the index — store-tile basemap, nav track, selectable tiles; "
+    "selecting tiles loads their mbes-bathy passes into the 3D cloud.",
     "db");
   const QCommandLineOption stores_opt(
-    "stores", "Directory of GGGS store GeoTIFF tiles for the overview basemap "
+    "stores", "Directory of GGGS store GeoTIFF tiles for the explorer basemap "
     "(default: <index dir>/bathymetry/survey).", "dir");
   parser.addOption(start_opt);
   parser.addOption(end_opt);
@@ -128,9 +128,10 @@ int main(int argc, char ** argv)
     }
   }
 
-  // With --index the survey overview is the primary window (no bag needed);
-  // a bag positional still opens a viewer alongside it.
-  std::unique_ptr<marine_perception_tools::SurveyOverviewWindow> overview;
+  // One window for both modes (#24): --index turns the map into the survey
+  // explorer's index map; a bag positional (with or without --index) opens in
+  // the same window.
+  marine_perception_tools::SidescanViewerWindow window;
   if (parser.isSet(index_opt)) {
     const std::string index_path = parser.value(index_opt).toStdString();
     std::string stores_dir;
@@ -141,19 +142,12 @@ int main(int argc, char ** argv)
         "bathymetry" / "survey").string();
     }
     try {
-      overview = std::make_unique<marine_perception_tools::SurveyOverviewWindow>(
-        index_path, stores_dir);
+      window.openSurveyIndex(index_path, stores_dir);
     } catch (const std::exception & e) {
       std::fprintf(stderr, "error: opening survey index: %s\n", e.what());
       return 1;
     }
-    overview->show();
-    if (positional.isEmpty()) {
-      return app.exec();
-    }
   }
-
-  marine_perception_tools::SidescanViewerWindow window;
   window.show();
   if (!positional.isEmpty()) {
     window.openBag(positional.first().toStdString(), cue_start_ns, cue_end_ns);

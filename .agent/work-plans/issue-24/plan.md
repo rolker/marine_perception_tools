@@ -101,6 +101,8 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 |------|--------|
 | `src/sidescan_canvas.hpp/.cpp` | Adopt geographic frame (reuse `survey_overview_projection.hpp`); absorb overview layers: store tiles, nav track, tile grid + selection, fallback fit; reproject per-bag coverage via `mapToGeo`; `tileSelectionChanged` signal |
 | NEW `src/tile_selection.hpp` | Pure hit-test / rubber-band-intersection / selection-set math |
+| NEW `src/map_geo_anchor.hpp` | `MapGeoAffine` + the pure `probe_map_anchor` (moved out of the canvas header so the probe unit-tests without Qt) |
+| NEW `src/mbes_pass_loader.hpp/.cpp` | Multi-pass cloud loader extracted from `MbesCloudWindow` (single source of truth until its phase-e retirement) |
 | NEW `src/pass_timeline_widget.hpp/.cpp` | Timeline pane: rows per sensor, gap-compressed UTC axis, pass bars, activate signal |
 | NEW `src/pass_timeline_model.hpp` | Pure interval → x mapping with gap compression (unit-testable) |
 | `src/sidescan_viewer_window.hpp/.cpp` | Own SurveyIndexBridge; wire tile selection → cloud auto-load + timeline; embed legend; layout: timeline row under the scrub controls |
@@ -113,6 +115,8 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 | `package.xml`, `README.md`, `.agents/README.md` | Docs under the new name |
 | `test/test_survey_index_bridge.cpp` | `queryTiles`, `queryAllNavTrack` (populated + empty) |
 | NEW `test/test_tile_selection.cpp` | Hit-test + rubber-band math pins |
+| NEW `test/test_map_geo_anchor.cpp` | Probe recovers a synthetic affine mapping; partial/non-finite probes yield no anchor |
+| NEW `test/test_mbes_pass_loader.cpp` | Loader error paths: empty input, missing bag costs only its own pass |
 | NEW `test/test_pass_timeline_model.cpp` | Gap compression, interval mapping, activation lookup pins |
 | existing window/GL tests | Update for renamed class/retired windows; NEW `test_survey_explorer_window.cpp` offscreen smoke asserting the `--index` path constructs, loads tiles+track, and survives a synthetic tile selection |
 

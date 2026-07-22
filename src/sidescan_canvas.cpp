@@ -108,6 +108,22 @@ void SidescanCanvas::clearTileSelection()
   emit tileSelectionChanged();
 }
 
+void SidescanCanvas::selectTiles(const std::set<std::size_t> & indices)
+{
+  std::set<std::size_t> valid;
+  for (const auto idx : indices) {
+    if (idx < index_tiles_.size()) {
+      valid.insert(idx);
+    }
+  }
+  if (valid == selected_tiles_) {
+    return;
+  }
+  selected_tiles_ = std::move(valid);
+  update();
+  emit tileSelectionChanged();
+}
+
 void SidescanCanvas::fitGeo(double south, double west, double north, double east)
 {
   fit_south_ = south;

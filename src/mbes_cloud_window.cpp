@@ -25,8 +25,6 @@
 #include <utility>
 #include <vector>
 
-#include "mbes_window_reader.hpp"
-
 namespace marine_perception_tools
 {
 
@@ -55,10 +53,11 @@ MbesCloudWindow::MbesCloudWindow(
     QString("Loading %1 pass%2…").arg(passes_.size())
     .arg(passes_.size() == 1 ? "" : "es"));
 
-  connect(&watcher_, &QFutureWatcher<LoadOutcome>::finished,
+  connect(&watcher_, &QFutureWatcher<CloudLoadOutcome>::finished,
     this, &MbesCloudWindow::onLoaded);
   const auto snapshot = passes_;   // worker owns its own copy
-  watcher_.setFuture(QtConcurrent::run([snapshot]() {return loadPasses(snapshot);}));
+  watcher_.setFuture(
+    QtConcurrent::run([snapshot]() {return load_cloud_passes(snapshot);}));
 }
 
 MbesCloudWindow::~MbesCloudWindow()
@@ -66,79 +65,9 @@ MbesCloudWindow::~MbesCloudWindow()
   watcher_.waitForFinished();
 }
 
-MbesCloudWindow::LoadOutcome MbesCloudWindow::loadPasses(
-  const std::vector<CloudPassInfo> & passes)
-{
-  LoadOutcome out;
-  out.pass_clouds.resize(passes.size());
-  out.sounding_counts.assign(passes.size(), 0);
-
-  // The FIRST pass's bag defines the reference world frame; other bags'
-  // soundings reproject through the earth anchor (plan #21 design decision —
-  // local map origins are not guaranteed identical across recordings).
-  bool have_ref = false;
-  std::string ref_bag;
-  std::string ref_frame;
-  bool ref_has_geo = false;
-  geometry_msgs::msg::TransformStamped ref_earth_from_world;
-
-  for (std::size_t i = 0; i < passes.size(); ++i) {
-    const auto & pass = passes[i];
-    MbesWindowResult res;
-    try {
-      res = read_mbes_window(pass.bag_path, pass.t_start_ns, pass.t_end_ns);
-    } catch (const std::exception & e) {
-      ++out.skipped_passes;
-      out.notes << QString("%1: bag read failed (%2)")
-        .arg(QString::fromStdString(pass.label)).arg(e.what());
-      continue;
-    }
-    out.skipped_pings += res.skipped_pings;
-    if (res.world_soundings.empty()) {
-      out.notes << QString("%1: no soundings in window")
-        .arg(QString::fromStdString(pass.label));
-      continue;
-    }
-
-    if (!have_ref) {
-      have_ref = true;
-      ref_bag = pass.bag_path;
-      ref_frame = res.world_frame;
-      ref_has_geo = res.has_geo;
-      ref_earth_from_world = res.earth_from_world;
-    }
-
-    FrameReprojection reproject;   // identity by default
-    if (pass.bag_path != ref_bag) {
-      if (ref_has_geo && res.has_geo) {
-        reproject = make_reprojection(ref_earth_from_world, res.earth_from_world);
-      } else if (res.world_frame != ref_frame) {
-        // No geo anchor and a different frame: placement would be a guess —
-        // skip visibly rather than mis-place soundings.
-        ++out.skipped_passes;
-        out.notes << QString("%1: no geo anchor to relate frame '%2' to '%3' — skipped")
-          .arg(QString::fromStdString(pass.label))
-          .arg(QString::fromStdString(res.world_frame))
-          .arg(QString::fromStdString(ref_frame));
-        continue;
-      }
-      // Same frame NAME without geo anchors: assume the shared local frame
-      // (single-deployment recordings); identity.
-    }
-
-    auto & cloud = out.pass_clouds[i];
-    cloud = std::move(res.world_soundings);
-    for (auto & s : cloud) {
-      apply_reprojection(reproject, s.x, s.y, s.z);
-    }
-    out.sounding_counts[i] = static_cast<int>(cloud.size());
-  }
-  return out;
-}
-
 void MbesCloudWindow::onLoaded()
 {
-  const LoadOutcome out = watcher_.result();
+  const CloudLoadOutcome out = watcher_.result();
 
   view_->resetView();
   view_->setMultiPassPoints(out.pass_clouds);
