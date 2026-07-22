@@ -135,6 +135,11 @@ void SidescanCanvas::fitGeo(double south, double west, double north, double east
   update();
 }
 
+// Local equirectangular about the geo origin. No antimeridian wrap handling:
+// a survey straddling ±180° would split across the plane. That is a known,
+// accepted restriction of the display-grade projection (the survey-index
+// bridge's box queries already throw on antimeridian boxes — full split
+// support is deferred deliberately, not overlooked).
 QPointF SidescanCanvas::geoToCanvas(double lat, double lon) const
 {
   return QPointF(

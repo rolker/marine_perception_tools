@@ -854,6 +854,9 @@ SidescanViewerWindow::~SidescanViewerWindow()
   // index/render to finish before the members tear down (~QObject then discards any
   // already-queued indexProgress events targeted at this window).
   if (index_watcher_.isRunning()) {index_watcher_.waitForFinished();}
+  for (auto & f : superseded_index_futures_) {
+    f.waitForFinished();   // orphaned indexers also captured `this`
+  }
   if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
   if (cloud_watcher_.isRunning()) {cloud_watcher_.waitForFinished();}
 }
@@ -939,7 +942,18 @@ void SidescanViewerWindow::openBag(
   pending_cue_end_ns_ = has_cue ? cue_end_ns : 0;
 
   // A previously-running indexer keeps running on its own captured session; bump the
-  // epoch so its queued progress is ignored from here on.
+  // epoch so its queued progress is ignored from here on. Its lambda captures
+  // `this`, so remember the superseded future for the destructor to wait out
+  // (setFuture alone stops watching but neither cancels nor waits), pruning
+  // any that already finished.
+  if (index_watcher_.isRunning()) {
+    superseded_index_futures_.push_back(index_watcher_.future());
+  }
+  superseded_index_futures_.erase(
+    std::remove_if(
+      superseded_index_futures_.begin(), superseded_index_futures_.end(),
+      [](const QFuture<void> & f) {return f.isFinished();}),
+    superseded_index_futures_.end());
   ++index_epoch_;
   const quint64 epoch = index_epoch_;
   session_ = session;

@@ -20,7 +20,6 @@
 
 #include <cstdint>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "pass_timeline_model.hpp"
@@ -75,8 +74,10 @@ protected:
   void leaveEvent(QEvent * event) override;
 
 private:
-  // Axis-fraction x and lane row under a widget point; row -1 = off-lane.
-  std::pair<double, int> hitCoords(double px, double py) const;
+  // The bar under a widget point, or -1. Tests the DRAWN rects (barRect
+  // floors short bars to 3 px) so every visible bar is clickable; overlaps
+  // resolve narrowest-wins, mirroring the pure hitPass rule.
+  int barAt(const QPointF & pos) const;
   int laneOf(const std::string & sensor_type) const;
   QRectF barRect(std::size_t i) const;
 

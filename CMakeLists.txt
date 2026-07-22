@@ -248,8 +248,6 @@ if(BUILD_TESTING)
   # Survey-explorer window smoke (#24; offscreen GL, self-skips headless):
   # --index path constructs against a fixture DB, loads tiles + track, and
   # survives a programmatic tile selection driving the cloud loader.
-  # (The executable rename to survey_explorer lands in phase e; the test name
-  # already reflects its role.)
   ament_add_gtest(test_survey_explorer_window
     test/test_survey_explorer_window.cpp
     src/sidescan_viewer_window.cpp

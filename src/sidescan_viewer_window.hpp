@@ -222,6 +222,11 @@ private:
   int contact_counter_ = 0;
 
   QFutureWatcher<void> index_watcher_;   // background index build (buildIndex)
+  // Index workers superseded by a newer openBag. Their lambdas capture `this`
+  // for the progress emit, and setFuture neither cancels nor waits the old
+  // future — so the destructor must wait these out too, or an orphaned
+  // indexer's emit dereferences a freed window (found in #24 review).
+  std::vector<QFuture<void>> superseded_index_futures_;
   uint64_t index_epoch_ = 0;             // bumped per opened bag; guards stale progress
   QFutureWatcher<SidescanRenderResult> render_watcher_;
   bool loading_ = false;

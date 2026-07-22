@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 #include "point_cloud_view.hpp"   // pass_color (shared with the cloud legend)
@@ -150,15 +151,26 @@ QRectF PassTimelineWidget::barRect(std::size_t i) const
   return QRectF(px0, y, px1 - px0, kLaneHeight);
 }
 
-std::pair<double, int> PassTimelineWidget::hitCoords(double px, double py) const
+int PassTimelineWidget::barAt(const QPointF & pos) const
 {
-  const double axis_w = std::max(1.0, width() - kLabelMargin - kRightMargin);
-  const double x = (px - kLabelMargin) / axis_w;
-  const double lane_f = (py - kTopMargin) / (kLaneHeight + kLaneGap);
-  const int lane = static_cast<int>(std::floor(lane_f));
-  const bool in_lane = lane >= 0 && lane < static_cast<int>(lanes_.size()) &&
-    (py - kTopMargin) - lane * (kLaneHeight + kLaneGap) <= kLaneHeight;
-  return {x, in_lane ? lane : -1};
+  // Hit-test against the drawn rects, not the raw axis fractions: barRect
+  // floors a short pass's bar at 3 px, and a fraction-space test (hitPass)
+  // would leave most of that visible bar dead — a zero-duration pass would
+  // be un-clickable entirely. Narrowest-wins keeps a small bar reachable
+  // under a big one, same rule as the pure model's hitPass.
+  int best = -1;
+  double best_w = std::numeric_limits<double>::max();
+  for (std::size_t i = 0; i < infos_.size() && i < layout_.pass_x.size(); ++i) {
+    const QRectF r = barRect(i);
+    if (!r.contains(pos)) {
+      continue;
+    }
+    if (r.width() < best_w) {
+      best_w = r.width();
+      best = static_cast<int>(i);
+    }
+  }
+  return best;
 }
 
 void PassTimelineWidget::paintEvent(QPaintEvent * event)
@@ -237,11 +249,7 @@ void PassTimelineWidget::mousePressEvent(QMouseEvent * event)
   if (event->button() != Qt::LeftButton || infos_.empty()) {
     return;
   }
-  const auto [x, lane] = hitCoords(event->pos().x(), event->pos().y());
-  if (lane < 0) {
-    return;
-  }
-  const int hit = hitPass(model_passes_, layout_, x, lane);
+  const int hit = barAt(event->pos());
   if (hit < 0) {
     return;
   }
@@ -257,8 +265,7 @@ void PassTimelineWidget::mouseMoveEvent(QMouseEvent * event)
   if (infos_.empty()) {
     return;
   }
-  const auto [x, lane] = hitCoords(event->pos().x(), event->pos().y());
-  const int hit = (lane >= 0) ? hitPass(model_passes_, layout_, x, lane) : -1;
+  const int hit = barAt(event->pos());
   if (hit != hover_) {
     hover_ = hit;
     setCursor(hover_ >= 0 ? Qt::PointingHandCursor : Qt::ArrowCursor);

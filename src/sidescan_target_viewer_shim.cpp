@@ -29,8 +29,25 @@ int main(int argc, char ** argv)
 {
   std::error_code ec;
   std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe", ec);
-  if (ec && argc > 0) {
-    self = std::filesystem::path(argv[0]);
+  if (ec) {
+    // Fallback without /proc: a path-ful argv[0] (./x or /x) resolves against
+    // the CWD; a bare PATH-found name carries no directory, so the sibling
+    // cannot be located — fail loudly below rather than exec'ing a
+    // CWD-relative "survey_explorer" that isn't ours.
+    self.clear();
+    if (argc > 0 && std::string(argv[0]).find('/') != std::string::npos) {
+      std::error_code abs_ec;
+      self = std::filesystem::absolute(argv[0], abs_ec);
+      if (abs_ec) {
+        self.clear();
+      }
+    }
+  }
+  if (self.empty() || !self.has_parent_path()) {
+    std::fprintf(stderr,
+      "sidescan_target_viewer: cannot resolve own location to find the "
+      "sibling survey_explorer binary (run it directly instead)\n");
+    return 127;
   }
   const std::string target = (self.parent_path() / "survey_explorer").string();
 

@@ -102,6 +102,7 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 | `src/sidescan_canvas.hpp/.cpp` | Adopt geographic frame (reuse `survey_overview_projection.hpp`); absorb overview layers: store tiles, nav track, tile grid + selection, fallback fit; reproject per-bag coverage via `mapToGeo`; `tileSelectionChanged` signal |
 | NEW `src/tile_selection.hpp` | Pure hit-test / rubber-band-intersection / selection-set math |
 | NEW `src/map_geo_anchor.hpp` | `MapGeoAffine` + the pure `probe_map_anchor` (moved out of the canvas header so the probe unit-tests without Qt) |
+| NEW `src/pass_coalesce.hpp` | Pure per-tile→per-physical-pass segment coalescing, extracted from the stage-2 overview window; shared by the timeline and the cloud loader |
 | NEW `src/mbes_pass_loader.hpp/.cpp` | Multi-pass cloud loader extracted from `MbesCloudWindow` (single source of truth until its phase-e retirement) |
 | NEW `src/pass_timeline_widget.hpp/.cpp` | Timeline pane: rows per sensor, gap-compressed UTC axis, pass bars, activate signal |
 | NEW `src/pass_timeline_model.hpp` | Pure interval → x mapping with gap compression (unit-testable) |
