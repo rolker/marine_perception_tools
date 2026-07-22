@@ -61,18 +61,22 @@ int64_t parseCueBound(const QString & text, bool & ok)
 
 }  // namespace
 
-// Offline georeferenced sidescan viewer + target tracker. Optionally takes a
-// bag directory to open on launch, and a --start/--end time window to cue the
-// scrub to once indexing completes (the survey-index jump-to-pass bridge —
-// pass the interval straight from a `survey_index_query --json` row).
+// The survey explorer (#24; formerly sidescan_target_viewer, which remains
+// as an exec shim): offline georeferenced sidescan/MBES viewer + target
+// tracker, and with --index the tile-granular survey-data explorer.
+// Optionally takes a bag directory to open on launch, and a --start/--end
+// time window to cue the scrub to once indexing completes (the survey-index
+// jump-to-pass bridge — pass the interval straight from a
+// `survey_index_query --json` row).
 int main(int argc, char ** argv)
 {
   QApplication app(argc, argv);
-  QApplication::setApplicationName("sidescan_target_viewer");
+  QApplication::setApplicationName("survey_explorer");
 
   QCommandLineParser parser;
   parser.setApplicationDescription(
-    "Offline georeferenced sidescan/MBES viewer + target tracker.\n"
+    "Survey explorer: offline georeferenced sidescan/MBES viewer + target\n"
+    "tracker; with --index, the tile-granular survey-data explorer.\n"
     "With --start/--end, cues the scrub to that time window once the bag is\n"
     "indexed (jump-to-pass: values come from survey_index_query output).");
   parser.addHelpOption();

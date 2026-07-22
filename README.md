@@ -7,7 +7,7 @@ Operator-station tools for marine perception. Lives in the `ui_ws` layer
 
 | Package | Description |
 |---------|-------------|
-| `marine_perception_tools` | Build target for `sea_surface_tuner` (below). |
+| `marine_perception_tools` | Build target for `sea_surface_tuner` and `survey_explorer` (below). |
 
 ## sea_surface_tuner
 
@@ -109,6 +109,40 @@ costmap), so File → Open targets one such bag.
 
 **Future work**: `nav2_overlay.yaml` parameter export (save tuned values back
 out). See [#1](https://github.com/rolker/marine_perception_tools/issues/1).
+
+## survey_explorer
+
+An offline C++/Qt **survey-data explorer** for georeferenced sidescan and MBES
+recordings ([unh_marine_autonomy#258](https://github.com/rolker/unh_marine_autonomy/issues/258)
+umbrella; grew out of the sidescan target viewer,
+[#7](https://github.com/rolker/marine_perception_tools/issues/7)/[#8](https://github.com/rolker/marine_perception_tools/issues/8)/[#24](https://github.com/rolker/marine_perception_tools/issues/24)).
+One window, two modes that compose:
+
+- **Bag mode** — `survey_explorer <bag> [--start T --end T]`: scrub a
+  recording along distance travelled; the rolling window paints georeferenced
+  sidescan coverage on the map beside the slant-range waterfall, MBES
+  backscatter, water-column echogram, and 3D point cloud (linked cursor,
+  middle-click seek, contact marking with Contact-store save/load + GeoJSON
+  export). `--start/--end` (UNIX ns or ISO-8601 UTC) cue the scrub to that
+  time window once indexing completes.
+- **Explorer mode** — `survey_explorer --index survey_index.db [--stores DIR]`:
+  the map becomes the survey index — store-tile basemap (GGGS GeoTIFFs;
+  `--stores` defaults to `<index dir>/bathymetry/survey`), per-bag nav track
+  with direction arrows, and the selectable index-tile grid. Ctrl-click /
+  ctrl-drag selects tiles: every `mbes-bathy` pass of the selection loads into
+  the 3D cloud (one golden-angle colour per pass, legend beside the pane,
+  cross-bag reprojection through the `earth` anchor), and the **pass
+  timeline** under the scrub controls shows all the selection's passes on a
+  gap-compressed UTC axis — click a bar to cue the single-pass waterfall.
+  Both modes together (`--index` + a bag argument) place the open bag's
+  coverage on the survey map through its earth anchor.
+
+The index is produced by `marine_survey_index` (unh_marine_autonomy); see its
+`docs/survey_index_schema.md` for the schema contract.
+
+`sidescan_target_viewer` remains as a **compatibility shim** that execs
+`survey_explorer` with the same arguments
+([#22](https://github.com/rolker/marine_perception_tools/issues/22)).
 
 ## Qt version
 

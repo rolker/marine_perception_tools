@@ -118,7 +118,6 @@ ament_target_dependencies(sidescan_core ${SIDESCAN_CORE_DEPS})
 add_executable(sidescan_probe src/sidescan_probe.cpp)
 target_link_libraries(sidescan_probe sidescan_core)
 
-# Qt app: offline georeferenced sidescan viewer + target tracker (issue #7).
 # Headless survey-index bridge (#19): map click -> pass list, reusing the
 # marine_survey_index query library. Qt-free so it unit-tests without a display.
 add_library(survey_index_bridge src/survey_index_bridge.cpp)
@@ -128,18 +127,18 @@ target_link_libraries(survey_index_bridge SQLite::SQLite3)
 # transitively via marine_survey_index; depend on it explicitly.
 ament_target_dependencies(survey_index_bridge marine_autonomy marine_survey_index)
 
-add_executable(sidescan_target_viewer
-  src/sidescan_viewer_main.cpp
+# Qt app: the survey explorer (#24; grew out of the offline sidescan viewer /
+# target tracker, issues #7/#8) — bag scrub viewer + survey-index explorer in
+# one window.
+add_executable(survey_explorer
+  src/survey_explorer_main.cpp
   src/sidescan_viewer_window.cpp
   src/sidescan_canvas.cpp
   src/point_cloud_view.cpp
   src/mbes_pass_loader.cpp
   src/pass_timeline_widget.cpp
-  src/survey_overview_canvas.cpp
-  src/survey_overview_window.cpp
-  src/mbes_cloud_window.cpp
 )
-target_link_libraries(sidescan_target_viewer
+target_link_libraries(survey_explorer
   sidescan_core
   survey_index_bridge
   marine_contacts::marine_contacts
@@ -147,10 +146,13 @@ target_link_libraries(sidescan_target_viewer
   Qt${QT_VERSION_MAJOR}::Concurrent
   Qt${QT_VERSION_MAJOR}::Gui
   Qt${QT_VERSION_MAJOR}::OpenGL)
-ament_target_dependencies(sidescan_target_viewer
+ament_target_dependencies(survey_explorer
   marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
 
-install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
+# Back-compat shim (#22): the old executable name execs the explorer.
+add_executable(sidescan_target_viewer src/sidescan_target_viewer_shim.cpp)
+
+install(TARGETS sea_surface_tuner sidescan_probe survey_explorer sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
 )
 

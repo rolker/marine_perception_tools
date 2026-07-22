@@ -1,7 +1,8 @@
 # Agent Guide: marine_perception_tools
 
 > Operator-station tools for marine perception; hosts the `sea_surface_tuner`
-> offline bag-replay + segmentation→costmap tuning app.
+> offline bag-replay + segmentation→costmap tuning app and the
+> `survey_explorer` offline sidescan/MBES viewer + survey-data explorer.
 
 ## Workflow
 
@@ -23,7 +24,7 @@ apply.
 | Package | Language | Description |
 |---------|----------|-------------|
 | `marine_perception_tools` | C++ (Qt5) | Builds `sea_surface_tuner` — a 4-camera bag-replay + costmap re-tuning viewer (menu/File→Open with windowed buffering, fused costmap, raw+compressed segmentation, H.265 RGB decode, recorded-vs-regenerated compare, Apply/Reset param dock) ([#1](https://github.com/rolker/marine_perception_tools/issues/1)). |
-| *(same package)* | C++ (Qt5) | Also builds `sidescan_target_viewer` — the offline georeferenced sidescan/MBES viewer + target tracker ([#7](https://github.com/rolker/marine_perception_tools/issues/7)/[#8](https://github.com/rolker/marine_perception_tools/issues/8)): geo coverage pane, waterfall, water-column echogram, 3D point cloud, contact marking. CLI: `sidescan_target_viewer [bag] [--start T --end T] [--index survey_index.db [--stores DIR]]` — the optional time window (UNIX ns or ISO-8601, UTC assumed) cues the scrub to that interval once indexing completes (jump-to-pass from `survey_index_query`, [#17](https://github.com/rolker/marine_perception_tools/issues/17)). `--index` opens the **survey overview window** ([#19](https://github.com/rolker/marine_perception_tools/issues/19), explorer stage 2): store-tile basemap (GGGS GeoTIFFs via `marine_tiled_raster_store`; `--stores` defaults to `<index dir>/bathymetry/survey`), click → pass list from the index → double-click opens a viewer cued to that pass. Multi-selecting passes enables **View MBES cloud** ([#21](https://github.com/rolker/marine_perception_tools/issues/21), explorer stage 3): the selected `mbes-bathy` passes' soundings load together into one 3D point cloud — windowed, topic-filtered bag reads only (no full-bag index), one golden-angle colour per pass with a legend, cross-bag passes reprojected through the `earth` anchor into the first pass's map frame. Note: opening a bag in the *scrub viewer* always runs a full-bag *metadata* scan (TF + cumulative distance need the whole recording); only sample data is window-read, so the cue does not add a whole-bag sample read. |
+| *(same package)* | C++ (Qt5) | Also builds `survey_explorer` — the offline georeferenced sidescan/MBES viewer + target tracker AND tile-granular survey-data explorer in one window ([#7](https://github.com/rolker/marine_perception_tools/issues/7)/[#8](https://github.com/rolker/marine_perception_tools/issues/8)/[#24](https://github.com/rolker/marine_perception_tools/issues/24); `sidescan_target_viewer` remains as an exec shim, [#22](https://github.com/rolker/marine_perception_tools/issues/22)): geo map pane, sidescan waterfall, MBES backscatter, water-column echogram, 3D point cloud, contact marking. CLI: `survey_explorer [bag] [--start T --end T] [--index survey_index.db [--stores DIR]]` — the optional time window (UNIX ns or ISO-8601, UTC assumed) cues the scrub to that interval once indexing completes (jump-to-pass from `survey_index_query`, [#17](https://github.com/rolker/marine_perception_tools/issues/17)). With `--index` the map IS the survey index ([#19](https://github.com/rolker/marine_perception_tools/issues/19)/[#24](https://github.com/rolker/marine_perception_tools/issues/24)): store-tile basemap (GGGS GeoTIFFs via `marine_tiled_raster_store`; `--stores` defaults to `<index dir>/bathymetry/survey`), per-bag nav track with direction arrows, selectable index tiles (ctrl-click / ctrl-drag). A tile selection auto-loads every `mbes-bathy` pass into the 3D cloud ([#21](https://github.com/rolker/marine_perception_tools/issues/21) loader — windowed, topic-filtered bag reads; one golden-angle colour per pass + legend; cross-bag passes reprojected through the `earth` anchor into the first pass's map frame) and fills the **pass timeline** (gap-compressed UTC axis under the scrub controls); clicking a timeline bar cues the single-pass waterfall (same-bag clicks jump the scrub directly). An open bag places on the survey map through its probed earth anchor (`map_geo_anchor.hpp`); a bag without an earth reference hides its map layers rather than guessing. Note: opening a bag always runs a full-bag *metadata* scan (TF + cumulative distance need the whole recording); only sample data is window-read, so the cue does not add a whole-bag sample read. |
 
 ## Repository Layout
 
@@ -39,7 +40,7 @@ marine_perception_tools/
 ├── test/
 │   ├── test_resim_engine.cpp   # GTest: determinism, re-sim equivalence, clear, bounds-reject, multi-camera fusion, checkpoint rewind==fresh-replay, batched setParams
 │   └── test_buffer_policy.cpp  # GTest: pure span-policy boundaries (fresh/extend/far-jump/retention-trim/clamps)
-├── CMakeLists.txt              # ament_cmake; tuner_core library + Qt exe + 2 gtests
+├── CMakeLists.txt              # ament_cmake; tuner_core + sidescan_core + survey_index_bridge libs, sea_surface_tuner + survey_explorer Qt exes (+ sidescan_target_viewer shim, sidescan_probe CLI), gtests
 ├── package.xml
 ├── .github/workflows/ci.yml
 └── .pre-commit-config.yaml

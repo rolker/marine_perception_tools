@@ -490,7 +490,7 @@ SidescanRenderResult render_window(
 SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 : QMainWindow(parent)
 {
-  setWindowTitle("Sidescan Target Viewer");
+  setWindowTitle("Survey Explorer");
 
   canvas_ = new SidescanCanvas(this);
 
@@ -831,8 +831,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   qApp->installEventFilter(this);
 
   // Restore the operator's last window geometry + the resizable-pane splitter sizes.
-  // No-op on first run.
-  QSettings settings("UNH-CCOM", "sidescan_target_viewer");
+  // No-op on first run. (Settings key renamed with the app, #24 — the one-time
+  // loss of the pre-rename layout is accepted.)
+  QSettings settings("UNH-CCOM", "survey_explorer");
   const QByteArray geom = settings.value("geometry").toByteArray();
   if (!geom.isEmpty()) {restoreGeometry(geom);}
   const auto restore_split = [&settings](QSplitter * s, const char * key) {
@@ -861,7 +862,7 @@ void SidescanViewerWindow::closeEvent(QCloseEvent * event)
 {
   // Persist the window geometry + the resizable-pane splitter sizes so the
   // operator's arrangement survives a restart.
-  QSettings settings("UNH-CCOM", "sidescan_target_viewer");
+  QSettings settings("UNH-CCOM", "survey_explorer");
   settings.setValue("geometry", saveGeometry());
   if (outer_split_) {settings.setValue("split_outer", outer_split_->saveState());}
   if (grid_split_) {settings.setValue("split_grid", grid_split_->saveState());}
@@ -1376,7 +1377,7 @@ void SidescanViewerWindow::openSurveyIndex(
   const std::string & index_path, const std::string & stores_dir)
 {
   bridge_ = std::make_unique<SurveyIndexBridge>(index_path);   // throws on a bad DB
-  setWindowTitle(QString("Sidescan Target Viewer — %1")
+  setWindowTitle(QString("Survey Explorer — %1")
     .arg(QString::fromStdString(index_path)));
 
   QString note;
