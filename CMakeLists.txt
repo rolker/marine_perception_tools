@@ -236,6 +236,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_geo_anchor test/test_map_geo_anchor.cpp)
   target_include_directories(test_map_geo_anchor PRIVATE src)
 
+  # Robust basemap contrast (basemap_contrast.hpp, #24) — header-only. Pins
+  # the desk-verify bug: store outlier cells must not own the colour scale.
+  ament_add_gtest(test_basemap_contrast test/test_basemap_contrast.cpp)
+  target_include_directories(test_basemap_contrast PRIVATE src)
+
   # Multi-pass cloud loader (#24): error paths (missing bag, empty input) —
   # the happy path needs a real bag and is covered by test_mbes_window_reader's
   # units plus the window smoke below. QtCore only (QStringList notes).

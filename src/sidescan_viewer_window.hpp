@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "marine_contacts/contact_store.hpp"
@@ -101,6 +102,15 @@ struct CloudLoadTicket
   CloudLoadOutcome outcome;
 };
 
+// A basemap (store-tile) load in flight: layer/palette changes supersede via
+// the generation, same pattern as the cloud load.
+struct BasemapLoadTicket
+{
+  std::uint64_t generation = 0;
+  std::vector<OverviewTile> tiles;
+  QString note;
+};
+
 // Offline sidescan viewer main window: File->Open a bag, then scrub along
 // distance travelled. A rolling ~window of pings is painted (quality-wins) into a
 // coverage raster at true map position and shown north-up on the canvas, with the
@@ -159,6 +169,7 @@ private slots:
   void onExportGeoJson();
   void onTileSelectionChanged();
   void onCloudPassesLoaded();
+  void onBasemapLoaded();
   void onTimelinePassActivated(const QString & bag_path, qlonglong t_start_ns, qlonglong t_end_ns);
 
 private:
@@ -171,10 +182,12 @@ private:
 
   void refreshContacts();   // push the store to the map overlay + the list
 
-  // Load the store-tile GeoTIFFs into colormapped basemap images; appends any
-  // degradation notes (missing dir, mixed levels, unreadable tiles) to `note`.
-  std::vector<OverviewTile> loadStoreTileImages(
-    const std::string & stores_dir, QString & note) const;
+  // Populate the basemap layer combo from the store layers under `root`
+  // (subdirectories holding GGGS *.tif tiles), selecting `initial_dir`.
+  void discoverBasemapLayers(const std::string & root, const std::string & initial_dir);
+  // (Re)load the selected basemap layer with the selected colormap on a
+  // worker thread; a newer request supersedes via basemap_gen_.
+  void requestBasemapLoad();
   // Leave selection-cloud mode: restore the scrub-window cloud + colour mode.
   void exitSelectionCloud();
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
@@ -256,6 +269,13 @@ private:
   bool selection_cloud_ = false;   // cloud pane shows the tile selection, not the scrub window
   PassTimelineWidget * timeline_ = nullptr;     // selection's passes on a UTC axis (phase d)
   std::string current_bag_uri_;    // open bag; a same-bag timeline cue skips the re-open
+
+  // Basemap controls (#24 follow-up from desk verify): store layer + colormap.
+  QComboBox * basemap_layer_ = nullptr;
+  QComboBox * basemap_cmap_ = nullptr;
+  std::vector<std::pair<QString, std::string>> basemap_layers_;   // {label, dir}
+  QFutureWatcher<BasemapLoadTicket> basemap_watcher_;
+  std::uint64_t basemap_gen_ = 0;
 };
 
 }  // namespace marine_perception_tools

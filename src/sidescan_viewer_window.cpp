@@ -68,6 +68,7 @@
 #include <utility>
 #include <vector>
 
+#include "basemap_contrast.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_contacts/contact_store.hpp"
 #include "coverage_raster.hpp"
@@ -97,12 +98,16 @@ QString isoUtc(std::int64_t t_ns)
          .toString("yyyy-MM-dd HH:mm:ss");
 }
 
-// Colormap one store tile's band 0 (depth) into an RGBA image: finite values
-// span the given range, NaN (store NoData) stays transparent so gaps read as
-// gaps instead of painting as the deepest colour.
+// Colormap one store tile's band 0 into an RGBA image: valid values span the
+// given range, NoData stays transparent so gaps read as gaps instead of
+// painting as the deepest colour. NoData is NaN (the float stores' sentinel);
+// integer-backed stores (the sidescan composites, uint16) use 0 instead —
+// loadTile reads raw values without honoring the file's NoData metadata, so
+// the caller says which convention applies via `zero_is_nodata`.
 QImage tileToImage(
   const marine_tiled_raster_store::TiledRasterTile<double> & tile,
-  double lo, double hi, const std::vector<marine_colormap::Rgba8> & lut)
+  double lo, double hi, const std::vector<marine_colormap::Rgba8> & lut,
+  bool zero_is_nodata)
 {
   const auto & band = tile.band(0);
   const int rows = marine_tiled_raster_store::TiledRasterTile<double>::edge;
@@ -116,7 +121,7 @@ QImage tileToImage(
     QRgb * out = reinterpret_cast<QRgb *>(image.scanLine(rows - 1 - r));
     for (int c = 0; c < cols; ++c) {
       const double v = band[static_cast<std::size_t>(r) * cols + c];
-      if (std::isnan(v)) {
+      if (std::isnan(v) || (zero_is_nodata && v == 0.0)) {
         continue;
       }
       const double t = std::clamp((v - lo) / span, 0.0, 1.0);
@@ -126,6 +131,155 @@ QImage tileToImage(
     }
   }
   return image;
+}
+
+// One basemap layer loaded + colormapped off the UI thread (#24 basemap
+// controls). Adapted from the stage-2 overview loader with two hardenings
+// from desk verification: percentile contrast (robust_range — residual
+// outlier cells in the stores destroyed a min/max scale) and an image-memory
+// budget (the sidescan composite layer is ~1000 tiles; full-res QImages for
+// all of them would be gigabytes, so large layers decimate — still finer
+// than screen resolution at basemap zooms).
+struct BasemapLoadResult
+{
+  std::vector<OverviewTile> tiles;
+  QString note;
+};
+
+BasemapLoadResult load_basemap(
+  const std::string & dir, std::size_t palette_idx, bool zero_is_nodata)
+{
+  BasemapLoadResult out;
+
+  // The tile level is encoded in the filenames (<level>_<row>_<col>.tif). A
+  // store should hold a single level; scan every tile so we render one level
+  // deterministically (the lowest) and can warn when the directory mixes
+  // levels — otherwise the other levels vanish silently. A missing or empty
+  // directory degrades to an empty basemap.
+  std::error_code ec;
+  std::map<int, std::vector<std::string>> by_level;   // level -> tile paths
+  for (const auto & entry : std::filesystem::directory_iterator(dir, ec)) {
+    const auto name = entry.path().filename().string();
+    if (entry.path().extension() != ".tif" || name.find('_') == std::string::npos) {
+      continue;
+    }
+    try {
+      const int level = std::stoi(name.substr(0, name.find('_')));
+      // Reject non-GGGS levels here: by_level renders its LOWEST key, so one
+      // junk "-1_x_y.tif" would otherwise win level selection and blank the
+      // real tiles (gggs::Level itself throws only at load time, per tile).
+      if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size()) {
+        continue;
+      }
+      by_level[level].push_back(entry.path().string());
+    } catch (const std::exception &) {
+      continue;
+    }
+  }
+  if (by_level.empty()) {
+    out.note = QString(" (no store tiles under %1)").arg(QString::fromStdString(dir));
+    return out;
+  }
+
+  const int level = by_level.begin()->first;   // render the lowest level
+  const auto & level_paths = by_level.begin()->second;
+
+  if (by_level.size() > 1) {
+    QStringList others;
+    for (const auto & [lvl, paths] : by_level) {
+      if (lvl != level) {
+        others << QString::number(lvl);
+      }
+    }
+    out.note += QString(" (mixed store: ignoring levels %1)").arg(others.join(", "));
+  }
+
+  // Image-memory budget: decimate per-tile images so the whole layer stays
+  // within ~256 MB of ARGB32 pixels.
+  constexpr double kImageBudgetBytes = 256.0 * 1024.0 * 1024.0;
+  const int full_edge = marine_tiled_raster_store::TiledRasterTile<double>::edge;
+  const int target_edge = std::clamp(
+    static_cast<int>(std::sqrt(
+      kImageBudgetBytes / 4.0 / static_cast<double>(level_paths.size()))),
+    32, full_edge);
+
+  // Pass 1 over tile data happens per tile (load, sample, image) — but the
+  // shared contrast range must span the whole layer, so load in two passes:
+  // sample values first, then colormap. Holding every raw tile between the
+  // passes would be gigabytes for the big layers, so tiles are re-read in
+  // pass 2; GDAL's block cache makes the second read cheap.
+  const std::size_t total_cells = level_paths.size() *
+    static_cast<std::size_t>(full_edge) * static_cast<std::size_t>(full_edge);
+  constexpr std::size_t kMaxSamples = 2000000;
+  const std::size_t stride = std::max<std::size_t>(1, total_cells / kMaxSamples);
+
+  std::vector<double> samples;
+  samples.reserve(kMaxSamples + level_paths.size());
+  int failed_tiles = 0;
+  const auto load_one = [&](const std::string & path)
+    -> std::optional<marine_tiled_raster_store::TiledRasterTile<double>> {
+      try {
+        const int band_count = marine_tiled_raster_store::tileRasterCount(path);
+        if (band_count < 1) {
+          return std::nullopt;
+        }
+        return marine_tiled_raster_store::loadTile<double>(
+          path, gggs::Level(static_cast<std::uint8_t>(level)),
+          static_cast<std::size_t>(band_count));
+      } catch (const std::exception &) {
+        return std::nullopt;
+      }
+    };
+
+  for (const auto & path : level_paths) {
+    const auto tile = load_one(path);
+    if (!tile) {
+      ++failed_tiles;   // counted once here; pass 2 skips silently
+      continue;
+    }
+    const auto & band = tile->band(0);
+    for (std::size_t i = 0; i < band.size(); i += stride) {
+      const double v = band[i];
+      if (!std::isnan(v) && !(zero_is_nodata && v == 0.0)) {
+        samples.push_back(v);
+      }
+    }
+  }
+  if (failed_tiles > 0) {
+    out.note += QString(" (%1 unreadable tile%2 skipped)")
+      .arg(failed_tiles).arg(failed_tiles == 1 ? "" : "s");
+  }
+  if (samples.empty()) {
+    out.note += " (store tiles hold no valid values)";
+    return out;
+  }
+  // Percentile contrast: residual outlier cells (pre-outlier-gate junk
+  // reaching km-scale depths) must not own the colour scale.
+  const auto [lo, hi] = robust_range(samples);
+  const auto lut = marine_colormap::bake_lut(
+    marine_colormap::palette(palette_idx), marine_colormap::TransferParams{}, 256);
+
+  out.tiles.reserve(level_paths.size());
+  for (const auto & path : level_paths) {
+    const auto tile = load_one(path);
+    if (!tile) {
+      continue;
+    }
+    OverviewTile ot;
+    ot.image = tileToImage(*tile, lo, hi, lut, zero_is_nodata);
+    if (target_edge < full_edge) {
+      ot.image = ot.image.scaled(
+        target_edge, target_edge, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    }
+    ot.south = tile->index().southLatitude();
+    ot.west = tile->index().westLongitude();
+    ot.north = tile->index().northLatitude();
+    ot.east = tile->index().eastLongitude();
+    out.tiles.push_back(std::move(ot));
+  }
+  out.note += QString(" (%1 tiles, L%2, %3–%4)")
+    .arg(out.tiles.size()).arg(level).arg(lo, 0, 'f', 1).arg(hi, 0, 'f', 1);
+  return out;
 }
 
 // Maximum slant range (≈ far ground range) of a ping's last sample, used to pad
@@ -607,6 +761,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   sidescan_cmap_ = make_cmap_combo();
   mbes_cmap_ = make_cmap_combo();
   echo_cmap_ = make_cmap_combo();
+  // Basemap controls (survey mode): store layer + its own colormap. Hidden
+  // until openSurveyIndex discovers the layers.
+  basemap_layer_ = new QComboBox(this);
+  basemap_layer_->setToolTip("Store layer rendered as the map basemap");
+  basemap_layer_->setVisible(false);
+  basemap_cmap_ = make_cmap_combo();
+  basemap_cmap_->setToolTip("Basemap colormap (percentile-scaled per layer)");
+  basemap_cmap_->setVisible(false);
   // Apply each combo's initial palette to its widget (combos don't fire on init).
   waterfall_->set_color_map(marine_colormap::palette(sidescan_cmap_->currentIndex()));
   mbes_waterfall_->set_color_map(marine_colormap::palette(mbes_cmap_->currentIndex()));
@@ -674,10 +836,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   contact_list_ = new QListWidget(this);
   auto * contacts_pane = make_pane("Contacts", contact_list_, {});
 
-  // Left-to-right: contacts | map | 2x2 grid, all resizable.
+  // Left-to-right: contacts | map | 2x2 grid, all resizable. The map pane
+  // header carries the basemap layer/colormap combos (survey mode only).
+  auto * map_pane = make_pane("Map", canvas_, {basemap_layer_, basemap_cmap_});
   outer_split_ = new QSplitter(Qt::Horizontal, this);
   outer_split_->addWidget(contacts_pane);
-  outer_split_->addWidget(canvas_);
+  outer_split_->addWidget(map_pane);
   outer_split_->addWidget(grid_split_);
   outer_split_->setStretchFactor(0, 0);
   outer_split_->setStretchFactor(1, 3);
@@ -726,6 +890,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onRenderFinished);
   connect(&cloud_watcher_, &QFutureWatcher<CloudLoadTicket>::finished,
     this, &SidescanViewerWindow::onCloudPassesLoaded);
+  connect(&basemap_watcher_, &QFutureWatcher<BasemapLoadTicket>::finished,
+    this, &SidescanViewerWindow::onBasemapLoaded);
+  connect(basemap_layer_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {requestBasemapLoad();});
+  connect(basemap_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {requestBasemapLoad();});
   connect(canvas_, &SidescanCanvas::tileSelectionChanged,
     this, &SidescanViewerWindow::onTileSelectionChanged);
   connect(canvas_, &SidescanCanvas::hoverGeo, this, [this](double lat, double lon) {
@@ -859,6 +1029,7 @@ SidescanViewerWindow::~SidescanViewerWindow()
   }
   if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
   if (cloud_watcher_.isRunning()) {cloud_watcher_.waitForFinished();}
+  if (basemap_watcher_.isRunning()) {basemap_watcher_.waitForFinished();}
 }
 
 void SidescanViewerWindow::closeEvent(QCloseEvent * event)
@@ -1394,47 +1565,15 @@ void SidescanViewerWindow::openSurveyIndex(
   setWindowTitle(QString("Survey Explorer — %1")
     .arg(QString::fromStdString(index_path)));
 
-  QString note;
-  auto tiles = loadStoreTileImages(stores_dir, note);
-
-  // The canvas-metre plane needs a geographic origin before any layer is set:
-  // the index extent's centre, or the store tiles' centre when the index holds
-  // no passes but tiles exist. (Both empty: nothing to explore — say so.)
+  // The canvas-metre plane needs a geographic origin before layers derive
+  // their geometry: the index extent's centre. With an empty index the origin
+  // waits for the first basemap load (the geo layer data below is stored
+  // regardless and re-derives when the origin lands).
   const auto box = bridge_->extent();
-  double olat = 0.0;
-  double olon = 0.0;
-  double fit_s = 0.0, fit_w = 0.0, fit_n = 0.0, fit_e = 0.0;
-  bool have_fit = false;
-  if (!tiles.empty()) {
-    // Store tiles are the visual frame the operator aims by — fit to them.
-    fit_s = tiles.front().south;
-    fit_w = tiles.front().west;
-    fit_n = tiles.front().north;
-    fit_e = tiles.front().east;
-    for (const auto & t : tiles) {
-      fit_s = std::min(fit_s, t.south);
-      fit_w = std::min(fit_w, t.west);
-      fit_n = std::max(fit_n, t.north);
-      fit_e = std::max(fit_e, t.east);
-    }
-    have_fit = true;
-  }
   if (box) {
-    if (!have_fit) {
-      fit_s = box->south;
-      fit_w = box->west;
-      fit_n = box->north;
-      fit_e = box->east;
-      have_fit = true;
-    }
-    olat = 0.5 * (box->south + box->north);
-    olon = 0.5 * (box->west + box->east);
-  } else if (have_fit) {
-    olat = 0.5 * (fit_s + fit_n);
-    olon = 0.5 * (fit_w + fit_e);
+    canvas_->setGeoOrigin(
+      0.5 * (box->south + box->north), 0.5 * (box->west + box->east));
   }
-  canvas_->setGeoOrigin(olat, olon);
-  canvas_->setStoreTiles(std::move(tiles));
 
   // Nav track (schema v2, #265): one polyline per bag, segmented at bag_id
   // changes (the accessor orders by bag then time).
@@ -1460,130 +1599,153 @@ void SidescanViewerWindow::openSurveyIndex(
   }
   canvas_->setIndexTiles(rects);
 
-  if (have_fit) {
-    canvas_->fitGeo(fit_s, fit_w, fit_n, fit_e);
+  if (box) {
+    canvas_->fitGeo(box->south, box->west, box->north, box->east);
     status_->setText(
-      QString("Survey index: %1 tiles indexed%2 — ctrl-click or ctrl-drag "
+      QString("Survey index: %1 tiles indexed — ctrl-click or ctrl-drag "
         "tiles to load their passes into the 3D cloud.")
-      .arg(indexed_tiles_.size()).arg(note));
+      .arg(indexed_tiles_.size()));
   } else {
-    status_->setText(
-      QString("Survey index holds no passes%1 — nothing to explore.").arg(note));
+    status_->setText("Survey index holds no passes — nothing to explore.");
   }
+
+  // Basemap: discover the store layers next to the index and load the
+  // initial one (async; layer/colormap combos re-load on change).
+  discoverBasemapLayers(
+    std::filesystem::path(index_path).parent_path().string(), stores_dir);
+  requestBasemapLoad();
 }
 
-std::vector<OverviewTile> SidescanViewerWindow::loadStoreTileImages(
-  const std::string & stores_dir, QString & note) const
+void SidescanViewerWindow::discoverBasemapLayers(
+  const std::string & root, const std::string & initial_dir)
 {
-  // The tile level is encoded in the filenames (<level>_<row>_<col>.tif). A
-  // store should hold a single level; scan every tile so we render one level
-  // deterministically (the lowest) and can warn when the directory mixes
-  // levels — otherwise the other levels vanish silently. A missing or empty
-  // directory degrades to an empty basemap (the caller fits to the index
-  // extent), so tile selection works from the index alone.
+  basemap_layers_.clear();
+
+  const auto has_tif = [](const std::filesystem::path & dir) {
+      std::error_code ec;
+      for (const auto & e : std::filesystem::directory_iterator(dir, ec)) {
+        if (e.path().extension() == ".tif") {
+          return true;
+        }
+      }
+      return false;
+    };
+
+  // Preferred layers first (the ones an operator reaches for), then any other
+  // tile-holding subdirectory found one or two levels under the stores root.
+  const std::vector<std::string> preferred = {
+    "bathymetry/survey", "backscatter/survey", "sidescan/processed",
+    "bathymetry/reference"};
+  for (const auto & rel : preferred) {
+    const auto dir = std::filesystem::path(root) / rel;
+    if (has_tif(dir)) {
+      basemap_layers_.emplace_back(QString::fromStdString(rel), dir.string());
+    }
+  }
   std::error_code ec;
-  std::map<int, std::vector<std::string>> by_level;   // level -> tile paths
-  for (const auto & entry : std::filesystem::directory_iterator(stores_dir, ec)) {
-    const auto name = entry.path().filename().string();
-    if (entry.path().extension() != ".tif" || name.find('_') == std::string::npos) {
+  for (const auto & top : std::filesystem::directory_iterator(root, ec)) {
+    if (!top.is_directory()) {
       continue;
     }
-    try {
-      const int level = std::stoi(name.substr(0, name.find('_')));
-      // Reject non-GGGS levels here: by_level renders its LOWEST key, so one
-      // junk "-1_x_y.tif" would otherwise win level selection and blank the
-      // real tiles (gggs::Level itself throws only at load time, per tile).
-      if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size()) {
+    std::error_code ec2;
+    for (const auto & sub : std::filesystem::directory_iterator(top.path(), ec2)) {
+      if (!sub.is_directory() || !has_tif(sub.path())) {
         continue;
       }
-      by_level[level].push_back(entry.path().string());
-    } catch (const std::exception &) {
-      continue;
-    }
-  }
-  if (by_level.empty()) {
-    note += QString(" (no store tiles under %1)").arg(QString::fromStdString(stores_dir));
-    return {};
-  }
-
-  const int level = by_level.begin()->first;   // render the lowest level
-  const auto & level_paths = by_level.begin()->second;
-
-  // Warn when the store mixes levels: only `level` is rendered, so name the
-  // ignored ones instead of dropping them without a trace. (loadTiles() would
-  // throw on the off-level tiles, so this loads the chosen level tile-by-tile.)
-  if (by_level.size() > 1) {
-    QStringList others;
-    for (const auto & [lvl, paths] : by_level) {
-      if (lvl != level) {
-        others << QString::number(lvl);
-      }
-    }
-    note += QString(" (mixed store: ignoring levels %1)").arg(others.join(", "));
-  }
-
-  // Load per-tile with a per-tile guard: tileRasterCount/loadTile @throw on a
-  // corrupt or unreadable tile, and one bad tile must cost only itself — not
-  // the whole map, and certainly not the window (graceful degradation; the
-  // pass query works regardless).
-  std::map<gggs::GridIndex, marine_tiled_raster_store::TiledRasterTile<double>> tiles;
-  int failed_tiles = 0;
-  for (const auto & path : level_paths) {
-    try {
-      const int band_count = marine_tiled_raster_store::tileRasterCount(path);
-      if (band_count < 1) {
-        ++failed_tiles;
-        continue;
-      }
-      auto tile = marine_tiled_raster_store::loadTile<double>(
-        path, gggs::Level(static_cast<std::uint8_t>(level)),
-        static_cast<std::size_t>(band_count));
-      tiles.emplace(tile.index(), std::move(tile));
-    } catch (const std::exception &) {
-      ++failed_tiles;
-    }
-  }
-  if (failed_tiles > 0) {
-    note += QString(" (%1 unreadable tile%2 skipped)")
-      .arg(failed_tiles).arg(failed_tiles == 1 ? "" : "s");
-  }
-  if (tiles.empty()) {
-    return {};
-  }
-
-  // One shared depth range across the survey so colours are comparable
-  // between tiles.
-  double lo = std::numeric_limits<double>::max();
-  double hi = std::numeric_limits<double>::lowest();
-  for (const auto & [index, tile] : tiles) {
-    for (const double v : tile.band(0)) {
-      if (!std::isnan(v)) {
-        lo = std::min(lo, v);
-        hi = std::max(hi, v);
+      const std::string dir = sub.path().string();
+      const bool known = std::any_of(
+        basemap_layers_.begin(), basemap_layers_.end(),
+        [&dir](const auto & l) {return l.second == dir;});
+      if (!known) {
+        const auto rel = std::filesystem::relative(sub.path(), root, ec2);
+        basemap_layers_.emplace_back(
+          QString::fromStdString(ec2 ? dir : rel.string()), dir);
       }
     }
   }
-  if (lo > hi) {
-    note += " (store tiles hold no finite depths)";
-    return {};
+  // An explicit --stores dir that discovery didn't produce goes first (it was
+  // asked for), labeled by its path.
+  const bool initial_known = std::any_of(
+    basemap_layers_.begin(), basemap_layers_.end(),
+    [&initial_dir](const auto & l) {return l.second == initial_dir;});
+  if (!initial_dir.empty() && !initial_known) {
+    basemap_layers_.emplace(
+      basemap_layers_.begin(),
+      QString::fromStdString(initial_dir), initial_dir);
   }
-  const auto lut = marine_colormap::bake_lut(
-    marine_colormap::palette(0), marine_colormap::TransferParams{}, 256);
 
-  std::vector<OverviewTile> overview;
-  overview.reserve(tiles.size());
-  for (const auto & [index, tile] : tiles) {
-    OverviewTile out;
-    out.image = tileToImage(tile, lo, hi, lut);
-    out.south = index.southLatitude();
-    out.west = index.westLongitude();
-    out.north = index.northLatitude();
-    out.east = index.eastLongitude();
-    overview.push_back(std::move(out));
+  basemap_layer_->blockSignals(true);
+  basemap_layer_->clear();
+  int initial_index = 0;
+  for (std::size_t i = 0; i < basemap_layers_.size(); ++i) {
+    basemap_layer_->addItem(basemap_layers_[i].first);
+    if (basemap_layers_[i].second == initial_dir) {
+      initial_index = static_cast<int>(i);
+    }
   }
-  note += QString(" (%1 store tiles, L%2, depth %3–%4 m)")
-    .arg(overview.size()).arg(level).arg(lo, 0, 'f', 1).arg(hi, 0, 'f', 1);
-  return overview;
+  basemap_layer_->setCurrentIndex(initial_index);
+  basemap_layer_->blockSignals(false);
+  basemap_layer_->setVisible(basemap_layers_.size() > 1);
+  basemap_cmap_->setVisible(!basemap_layers_.empty());
+}
+
+void SidescanViewerWindow::requestBasemapLoad()
+{
+  const int li = basemap_layer_ ? basemap_layer_->currentIndex() : -1;
+  if (!bridge_ || li < 0 || li >= static_cast<int>(basemap_layers_.size())) {
+    return;
+  }
+  const QString label = basemap_layers_[static_cast<std::size_t>(li)].first;
+  const std::string dir = basemap_layers_[static_cast<std::size_t>(li)].second;
+  // loadTile reads raw values; the uint16-backed sidescan composites use 0 as
+  // their NoData sentinel (the float stores use NaN).
+  const bool zero_is_nodata = dir.find("sidescan") != std::string::npos;
+  const auto palette_idx = static_cast<std::size_t>(
+    std::max(0, basemap_cmap_->currentIndex()));
+
+  ++basemap_gen_;
+  const auto gen = basemap_gen_;
+  status_->setText(QString("Loading basemap %1…").arg(label));
+  basemap_watcher_.setFuture(
+    QtConcurrent::run([dir, palette_idx, zero_is_nodata, gen]() {
+      BasemapLoadTicket ticket;
+      ticket.generation = gen;
+      auto result = load_basemap(dir, palette_idx, zero_is_nodata);
+      ticket.tiles = std::move(result.tiles);
+      ticket.note = std::move(result.note);
+      return ticket;
+    }));
+}
+
+void SidescanViewerWindow::onBasemapLoaded()
+{
+  BasemapLoadTicket ticket = basemap_watcher_.result();
+  if (ticket.generation != basemap_gen_) {
+    return;   // a newer layer/colormap choice superseded this load
+  }
+  // Empty index: the first basemap with tiles establishes the geo origin and
+  // the initial fit so the map is still usable from stores alone.
+  if (!canvas_->hasGeoOrigin() && !ticket.tiles.empty()) {
+    double s = ticket.tiles.front().south;
+    double w = ticket.tiles.front().west;
+    double n = ticket.tiles.front().north;
+    double e = ticket.tiles.front().east;
+    for (const auto & t : ticket.tiles) {
+      s = std::min(s, t.south);
+      w = std::min(w, t.west);
+      n = std::max(n, t.north);
+      e = std::max(e, t.east);
+    }
+    canvas_->setGeoOrigin(0.5 * (s + n), 0.5 * (w + e));
+    canvas_->fitGeo(s, w, n, e);
+  }
+  const auto n_tiles = ticket.tiles.size();
+  canvas_->setStoreTiles(std::move(ticket.tiles));
+  const int li = basemap_layer_->currentIndex();
+  const QString label = (li >= 0 && li < static_cast<int>(basemap_layers_.size())) ?
+    basemap_layers_[static_cast<std::size_t>(li)].first : QString();
+  status_->setText(QString("Basemap %1: %2 tile%3%4")
+    .arg(label).arg(n_tiles).arg(n_tiles == 1 ? "" : "s").arg(ticket.note));
 }
 
 void SidescanViewerWindow::onTileSelectionChanged()

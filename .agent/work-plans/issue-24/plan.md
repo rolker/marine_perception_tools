@@ -103,6 +103,7 @@ index is regenerated (46,541 points / 31 bags). `marine_survey_index_core` is a
 | NEW `src/tile_selection.hpp` | Pure hit-test / rubber-band-intersection / selection-set math |
 | NEW `src/map_geo_anchor.hpp` | `MapGeoAffine` + the pure `probe_map_anchor` (moved out of the canvas header so the probe unit-tests without Qt) |
 | NEW `src/pass_coalesce.hpp` | Pure per-tile→per-physical-pass segment coalescing, extracted from the stage-2 overview window; shared by the timeline and the cloud loader |
+| NEW `src/basemap_contrast.hpp` + basemap controls (desk-verify follow-up, 2026-07-22) | Roland's desk check found the basemap flat (residual store outlier cells owned the min/max colour scale) and asked for basemap colormap + store-layer controls. Added: percentile contrast (`robust_range`), a Map pane header with layer picker (layers discovered under the stores root: bathymetry/backscatter/sidescan) + colormap combo, async basemap loading with a generation counter, an image-memory budget (large sidescan layers decimate), and 0-as-NoData for the uint16 sidescan composites |
 | NEW `src/mbes_pass_loader.hpp/.cpp` | Multi-pass cloud loader extracted from `MbesCloudWindow` (single source of truth until its phase-e retirement) |
 | NEW `src/pass_timeline_widget.hpp/.cpp` | Timeline pane: rows per sensor, gap-compressed UTC axis, pass bars, activate signal |
 | NEW `src/pass_timeline_model.hpp` | Pure interval → x mapping with gap compression (unit-testable) |
