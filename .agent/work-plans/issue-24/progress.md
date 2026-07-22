@@ -191,3 +191,28 @@ Governance, Plan Drift, Claude Adversarial Lens A + Lens B (Deep). Copilot: off 
 - [x] (suggestion) Stale phase-e staging comment in CMake test block; dropped — `CMakeLists.txt`
 - [x] (suggestion) pass_coalesce.hpp missing from plan Files-to-Change table; row added — `.agent/work-plans/issue-24/plan.md`
 - [ ] (note, out of scope) Repo lacks ADR-0017 root AGENTS.md — pre-existing gap, separate onboarding task
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-22 17:17 -0400
+**By**: Claude Code Agent (Claude Fable 5)
+**Verdict**: approved
+
+**Branch**: feature/issue-24 at `6164ca8`
+**Mode**: pre-push
+**Depth**: Deep (reason: 16 desk-round commits since round 1 — time bar, cache, perf, GPU bounds)
+**Must-fix**: 0 | **Suggestions**: 8 (all applied)
+**Round**: 2 | **Ship**: recommended — zero must-fix from both adversarial lenses; all suggestions fixed in-session; 431 tests green.
+
+Specialists: Claude Adversarial Lens A + Lens B (Deep, fresh-context), Governance+Plan-Drift; static analysis via full ament lint suite (green). Copilot: off.
+
+### Findings
+- [x] (suggestion) Docs behind desk rounds: basemap controls, legend checkboxes, contact clip/deletion — README/.agents/README updated; summarizing plan note added
+- [x] (suggestion) Waterfall 4000-row cap was silent — now in status line
+- [x] (suggestion) Index worker uncaught exception would std::terminate (Qt5) — try/catch + tightened cache count guards
+- [x] (suggestion) Shared .tmp cache path raced across processes — per-writer pid suffix
+- [x] (suggestion) panning_ could stick on lost release — self-heals at paint
+- [x] (suggestion) Zero-size layer-cache pixmap guard
+- [x] (suggestion) const ticket defeated the pass-clouds move (full copy on UI thread) — non-const now
+- [x] (suggestion) monthName comment inaccuracy
+- [ ] (note) GeoZui4D port attribution assumes personal (not CCOM-institutional) copyright — Roland to confirm; his call as author
