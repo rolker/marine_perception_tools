@@ -917,6 +917,25 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onRenderFinished);
   connect(&cloud_watcher_, &QFutureWatcher<CloudLoadTicket>::finished,
     this, &SidescanViewerWindow::onCloudPassesLoaded);
+  // Legend checkboxes: show/hide individual passes in the cloud. Unchecked
+  // passes become empty slots (indices keep their golden-angle colours);
+  // the camera is left alone.
+  connect(cloud_legend_, &QTreeWidget::itemChanged, this,
+    [this](QTreeWidgetItem *, int) {
+      if (!selection_cloud_ || cloud_pass_clouds_.empty()) {
+        return;
+      }
+      std::vector<std::vector<MbesSounding>> visible(cloud_pass_clouds_.size());
+      for (int i = 0; i < cloud_legend_->topLevelItemCount() &&
+      i < static_cast<int>(cloud_pass_clouds_.size()); ++i)
+      {
+        if (cloud_legend_->topLevelItem(i)->checkState(0) == Qt::Checked) {
+          visible[static_cast<std::size_t>(i)] =
+          cloud_pass_clouds_[static_cast<std::size_t>(i)];
+        }
+      }
+      cloud_->setMultiPassPoints(visible);
+    });
   connect(&basemap_watcher_, &QFutureWatcher<BasemapLoadTicket>::finished,
     this, &SidescanViewerWindow::onBasemapLoaded);
   connect(basemap_layer_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -2020,6 +2039,7 @@ void SidescanViewerWindow::exitSelectionCloud()
   }
   selection_cloud_ = false;
   ++cloud_gen_;   // an in-flight selection load must not apply any more
+  cloud_pass_clouds_.clear();
   cloud_legend_->clear();
   cloud_legend_->setVisible(false);
   cloud_color_combo_->setEnabled(true);
@@ -2135,6 +2155,7 @@ void SidescanViewerWindow::onCloudPassesLoaded()
   // bag's boat arrow would be in the wrong frame, so hide it.
   cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
 
+  cloud_legend_->blockSignals(true);   // populating checkboxes is not a toggle
   cloud_legend_->clear();
   int total = 0;
   for (std::size_t i = 0; i < cloud_passes_.size(); ++i) {
@@ -2149,11 +2170,17 @@ void SidescanViewerWindow::onCloudPassesLoaded()
     pass_color(static_cast<int>(i), r, g, b);
     swatch.fill(QColor::fromRgbF(r, g, b));
     item->setIcon(0, swatch);
+    // Checkbox toggles this pass in the cloud (#24 desk ask).
+    item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+    item->setCheckState(0, Qt::Checked);
     if (count == 0) {
       item->setDisabled(true);
     }
     total += count;
   }
+  cloud_legend_->blockSignals(false);
+  // Keep the per-pass clouds so checkbox toggles re-filter without bag I/O.
+  cloud_pass_clouds_ = std::move(ticket.outcome.pass_clouds);
 
   QString message = QString("%1 soundings from %2 pass%3")
     .arg(total).arg(cloud_passes_.size()).arg(cloud_passes_.size() == 1 ? "" : "es");

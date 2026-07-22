@@ -270,6 +270,9 @@ private:
   QFutureWatcher<CloudLoadTicket> cloud_watcher_;
   std::uint64_t cloud_gen_ = 0;                 // bumped per selection change
   std::vector<CloudPassInfo> cloud_passes_;     // passes of the in-flight/last load
+  // The last load's per-pass clouds, kept so legend checkboxes can toggle
+  // passes without re-reading bags (index-aligned with cloud_passes_).
+  std::vector<std::vector<MbesSounding>> cloud_pass_clouds_;
   bool selection_cloud_ = false;   // cloud pane shows the tile selection, not the scrub window
   TimeBarWidget * time_bar_ = nullptr;   // GeoZui-style time navigator (replaced phase d's axis)
   std::vector<TimelinePassInfo> selection_passes_;   // for time->bag lookup on cue
