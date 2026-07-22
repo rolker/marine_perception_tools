@@ -38,9 +38,6 @@ namespace
 // constant the bridge's point query uses; display-grade, not geodetic.
 constexpr double kMetersPerDegLat = 111320.0;
 
-// Nav-track arrowheads roughly this many screen pixels apart.
-constexpr double kArrowSpacingPx = 30.0;
-
 }  // namespace
 
 SidescanCanvas::SidescanCanvas(QWidget * parent)
@@ -138,6 +135,12 @@ void SidescanCanvas::setIndexTilesVisible(bool on)
     show_index_tiles_ = on;
     update();
   }
+}
+
+void SidescanCanvas::setTimeArrow(const std::optional<TimeArrow> & arrow)
+{
+  time_arrow_ = arrow;
+  update();
 }
 
 void SidescanCanvas::fitGeo(double south, double west, double north, double east)
@@ -412,10 +415,12 @@ void SidescanCanvas::drawNavTrack(QPainter & painter) const
   }
   // Light-handed: a campaign's worth of overlapping passes must read as a
   // veil over the basemap, not a blanket (and the toggle removes it wholly).
+  // No per-track arrowheads — the time-bar arrow gives direction on demand;
+  // arrowheads everywhere were half the clutter over the basemap.
   QPen pen(QColor(255, 255, 255, 90));
   pen.setWidthF(1.0);
   painter.setPen(pen);
-  painter.setBrush(QColor(255, 255, 255, 90));
+  painter.setBrush(Qt::NoBrush);
   for (const auto & seg : nav_segments_) {
     if (seg.size() < 2) {
       continue;
@@ -425,29 +430,7 @@ void SidescanCanvas::drawNavTrack(QPainter & painter) const
     for (const auto & p : seg) {
       screen << mapToScreen(p.x(), p.y());
     }
-    painter.setBrush(Qt::NoBrush);
     painter.drawPolyline(screen);
-    // Direction arrowheads (older -> newer) roughly every kArrowSpacingPx.
-    painter.setBrush(QColor(255, 255, 255, 153));
-    double since_last = kArrowSpacingPx;   // arrow near the segment start too
-    for (int i = 1; i < screen.size(); ++i) {
-      const QPointF d = screen[i] - screen[i - 1];
-      const double len = std::hypot(d.x(), d.y());
-      since_last += len;
-      if (since_last < kArrowSpacingPx || len < 1e-9) {
-        continue;
-      }
-      since_last = 0.0;
-      const QPointF mid = (screen[i - 1] + screen[i]) * 0.5;
-      const QPointF dir(d.x() / len, d.y() / len);
-      const QPointF ortho(-dir.y(), dir.x());
-      constexpr double kA = 5.0;   // arrow size, px
-      QPolygonF arrow;
-      arrow << (mid + dir * kA)
-            << (mid - dir * kA * 0.6 + ortho * kA * 0.6)
-            << (mid - dir * kA * 0.6 - ortho * kA * 0.6);
-      painter.drawPolygon(arrow);
-    }
   }
 }
 
@@ -517,6 +500,31 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
   if (geo_mode_) {
     drawNavTrack(painter);
     drawIndexTiles(painter);
+    // Time-bar position arrow: the boat at the bar's centre time, in the
+    // 3D pane's boat-arrow orange for consistent iconography.
+    if (time_arrow_) {
+      const QPointF c = geoToCanvas(time_arrow_->lat, time_arrow_->lon);
+      const QPointF s = mapToScreen(c.x(), c.y());
+      // Heading is CW from north; screen y grows downward, so the north-up
+      // rotation is the same angle about the screen point.
+      const double a = time_arrow_->heading_rad;
+      const double ca = std::cos(a);
+      const double sa = std::sin(a);
+      const auto rot = [&](double fwd, double right) {
+          // forward = north(-y on screen), right = east(+x on screen).
+          return s + QPointF(
+            right * ca + fwd * sa,
+            right * sa - fwd * ca);
+        };
+      constexpr double kL = 12.0;   // arrow length, px
+      QPolygonF arrow;
+      arrow << rot(kL, 0.0) << rot(-0.5 * kL, 0.55 * kL)
+            << rot(-0.2 * kL, 0.0) << rot(-0.5 * kL, -0.55 * kL);
+      painter.setPen(QPen(QColor(20, 20, 20), 1.0));
+      painter.setBrush(QColor(255, 140, 0));   // boat-arrow orange
+      painter.drawPolygon(arrow);
+      painter.setBrush(Qt::NoBrush);
+    }
   }
 
   const bool bag_placeable = mapPlaceable();

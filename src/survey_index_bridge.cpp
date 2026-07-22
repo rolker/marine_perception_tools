@@ -154,4 +154,29 @@ std::vector<marine_survey_index::NavPoint> SurveyIndexBridge::navTrack() const
     db_, box->south, box->west, box->north, box->east);
 }
 
+std::vector<std::pair<std::int64_t, std::string>> SurveyIndexBridge::bagPaths() const
+{
+  sqlite3_stmt * stmt = nullptr;
+  if (sqlite3_prepare_v2(
+      db_, "SELECT id, path FROM bags ORDER BY id;", -1, &stmt, nullptr) != SQLITE_OK)
+  {
+    throw std::runtime_error(
+      std::string("survey index bag scan failed: ") + sqlite3_errmsg(db_));
+  }
+  std::vector<std::pair<std::int64_t, std::string>> bags;
+  int rc;
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    const auto * path = sqlite3_column_text(stmt, 1);
+    bags.emplace_back(
+      static_cast<std::int64_t>(sqlite3_column_int64(stmt, 0)),
+      path ? reinterpret_cast<const char *>(path) : "");
+  }
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_DONE) {
+    throw std::runtime_error(
+      std::string("survey index bag scan failed: ") + sqlite3_errmsg(db_));
+  }
+  return bags;
+}
+
 }  // namespace marine_perception_tools

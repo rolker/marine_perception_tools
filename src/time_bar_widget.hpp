@@ -86,6 +86,10 @@ public:
   QSize minimumSizeHint() const override {return sizeHint();}
 
 signals:
+  // The centre time moved — fires CONTINUOUSLY (every drag step, animation
+  // frame, page, scrub round-trip). For cheap live followers only (the map
+  // position arrow); anything that loads data listens to timeSelected.
+  void centerTimeChanged(qlonglong t_ns);
   // The operator committed a new centre time (drag release / jump / page).
   void timeSelected(qlonglong t_ns);
   // A pass bar was clicked: cue the viewer to this pass.

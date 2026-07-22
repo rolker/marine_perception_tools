@@ -114,6 +114,18 @@ public:
   void setNavTrackVisible(bool on);
   void setIndexTilesVisible(bool on);
 
+  // The time-bar position arrow (#24): the boat's interpolated nav-track
+  // position/course at the time bar's centre time. Replaces the per-track
+  // direction arrowheads — direction on demand instead of everywhere at
+  // once. nullopt hides it (time in a gap between bags, or no index).
+  struct TimeArrow
+  {
+    double lat = 0.0;
+    double lon = 0.0;
+    double heading_rad = 0.0;   // CW from north
+  };
+  void setTimeArrow(const std::optional<TimeArrow> & arrow);
+
   // Selectable index tiles. Replaces the set and clears the selection.
   void setIndexTiles(const std::vector<GeoRect> & tiles);
   const std::set<std::size_t> & selectedTiles() const {return selected_tiles_;}
@@ -222,6 +234,7 @@ private:
   std::set<std::size_t> selected_tiles_;
   bool show_nav_track_ = true;
   bool show_index_tiles_ = true;
+  std::optional<TimeArrow> time_arrow_;
 
   bool fit_pending_ = false;
   bool user_adjusted_ = false;

@@ -84,12 +84,14 @@ TimeBarWidget::TimeBarWidget(QWidget * parent)
         anim_timer_.stop();
         center_ns_ = anim_to_ns_;
         update();
+        emit centerTimeChanged(static_cast<qlonglong>(center_ns_));
         commitTime();
         return;
       }
       center_ns_ = anim_from_ns_ + static_cast<std::int64_t>(
         static_cast<double>(anim_to_ns_ - anim_from_ns_) * anim_progress_);
       update();
+      emit centerTimeChanged(static_cast<qlonglong>(center_ns_));
     });
 }
 
@@ -116,11 +118,17 @@ void TimeBarWidget::setPasses(std::vector<TimelinePassInfo> passes)
     }
   }
   if (!passes_.empty()) {
+    // Grow the extent to cover the passes — never shrink it: in index mode
+    // the extent is the whole campaign and a tile selection only adds bars.
     std::int64_t t0 = passes_.front().t_start_ns;
     std::int64_t t1 = passes_.front().t_end_ns;
     for (const auto & p : passes_) {
       t0 = std::min(t0, p.t_start_ns);
       t1 = std::max(t1, p.t_end_ns);
+    }
+    if (hasExtent()) {
+      t0 = std::min(t0, extent_t0_);
+      t1 = std::max(t1, extent_t1_);
     }
     setExtent(t0, t1);
   }
@@ -174,6 +182,7 @@ void TimeBarWidget::setCurrentTime(std::int64_t t_ns)
   }
   center_ns_ = t_ns;   // recentre only; zoom (and any pending fit) unchanged
   update();
+  emit centerTimeChanged(static_cast<qlonglong>(center_ns_));
 }
 
 QRectF TimeBarWidget::tapeRect() const
@@ -450,6 +459,7 @@ void TimeBarWidget::mouseMoveEvent(QMouseEvent * event)
       user_adjusted_ = true;
     }
     update();
+    emit centerTimeChanged(static_cast<qlonglong>(center_ns_));
     return;
   }
   if (dragging_thumb_) {
@@ -460,6 +470,7 @@ void TimeBarWidget::mouseMoveEvent(QMouseEvent * event)
       (pos.x() - thumb_grab_x_) * per_px);
     user_adjusted_ = true;
     update();
+    emit centerTimeChanged(static_cast<qlonglong>(center_ns_));
     return;
   }
   const int hit = tapeRect().contains(pos) ? barAt(pos) : -1;
@@ -574,6 +585,7 @@ void TimeBarWidget::pageBy(int direction)
   center_ns_ += static_cast<std::int64_t>(direction * width() * spp_ * 1e9);
   user_adjusted_ = true;
   update();
+  emit centerTimeChanged(static_cast<qlonglong>(center_ns_));
 }
 
 }  // namespace marine_perception_tools

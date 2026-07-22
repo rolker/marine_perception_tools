@@ -82,6 +82,7 @@
 #include "marine_sonar_widgets/echogram_widget.hpp"
 #include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "marine_tiled_raster_store/tile_io.hpp"
+#include "nav_track_lookup.hpp"
 #include "pass_coalesce.hpp"
 #include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
@@ -922,6 +923,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, &SidescanViewerWindow::onTimelinePassActivated);
   connect(time_bar_, &TimeBarWidget::timeSelected,
     this, &SidescanViewerWindow::onTimeSelected);
+  connect(time_bar_, &TimeBarWidget::centerTimeChanged,
+    this, &SidescanViewerWindow::onCenterTimeChanged);
   connect(scrub_, &QSlider::valueChanged, this, &SidescanViewerWindow::onScrubChanged);
   connect(grid_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, &SidescanViewerWindow::onGridSpacingChanged);
@@ -1609,11 +1612,14 @@ void SidescanViewerWindow::openSurveyIndex(
   }
 
   // Nav track (schema v2, #265): one polyline per bag, segmented at bag_id
-  // changes (the accessor orders by bag then time).
+  // changes (the accessor orders by bag then time). The rows are kept for
+  // the time-bar position arrow (time -> fix) and time -> bag resolution.
+  nav_track_points_ = bridge_->navTrack();
+  bag_paths_ = bridge_->bagPaths();
   std::vector<std::vector<std::pair<double, double>>> segments;
   {
     std::int64_t cur_bag = -1;
-    for (const auto & p : bridge_->navTrack()) {
+    for (const auto & p : nav_track_points_) {
       if (p.bag_id != cur_bag) {
         segments.emplace_back();
         cur_bag = p.bag_id;
@@ -1622,6 +1628,21 @@ void SidescanViewerWindow::openSurveyIndex(
     }
   }
   canvas_->setNavTrack(std::move(segments));
+
+  // The time bar is present from startup in index mode, spanning the whole
+  // campaign (the nav track's time range); a tile selection only adds pass
+  // bars, and an open bag lives inside this extent.
+  if (!nav_track_points_.empty()) {
+    std::int64_t t0 = nav_track_points_.front().t_ns;
+    std::int64_t t1 = t0;
+    for (const auto & p : nav_track_points_) {
+      t0 = std::min(t0, p.t_ns);
+      t1 = std::max(t1, p.t_ns);
+    }
+    time_bar_->setExtent(t0, t1);
+    time_bar_->setCurrentTime(t0);   // arrow starts at the campaign's first fix
+    time_bar_->setVisible(true);
+  }
 
   // Selectable index-tile grid; canvas selection indices map into indexed_tiles_.
   indexed_tiles_ = bridge_->indexedTiles();
@@ -1889,9 +1910,17 @@ void SidescanViewerWindow::exitSelectionCloud()
   selection_passes_.clear();
   if (time_bar_) {
     time_bar_->clearPasses();
-    // With a bag still open the bar keeps navigating its span; otherwise it
-    // has no extent and hides.
-    if (session_ && !loading_) {
+    // The extent survives the selection: the campaign (index mode), else the
+    // open bag's span; with neither the bar has no extent and hides.
+    if (!nav_track_points_.empty()) {
+      std::int64_t t0 = nav_track_points_.front().t_ns;
+      std::int64_t t1 = t0;
+      for (const auto & p : nav_track_points_) {
+        t0 = std::min(t0, p.t_ns);
+        t1 = std::max(t1, p.t_ns);
+      }
+      time_bar_->setExtent(t0, t1);
+    } else if (session_ && !loading_) {
       const double t0 = session_->timeAtDistance(0.0);
       const double t1 = session_->timeAtDistance(session_->totalDistance());
       time_bar_->setExtent(
@@ -1973,11 +2002,36 @@ void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)
       return;
     }
   }
+  // Otherwise: any campaign bag whose nav track covers that time — release
+  // on the campaign-wide bar means "go there" (the bag-index cache makes the
+  // open cheap after the first visit).
+  if (const auto fix = fixAtTime(nav_track_points_, static_cast<int64_t>(t_ns))) {
+    for (const auto & [bag_id, path] : bag_paths_) {
+      if (bag_id == fix->bag_id && !path.empty() && path != current_bag_uri_) {
+        openBag(path, t0, t1);
+        return;
+      }
+    }
+  }
   const QString when = QDateTime::fromMSecsSinceEpoch(
     static_cast<qint64>(t_ns / 1000000LL), QTimeZone::utc())
     .toString("yyyy-MM-dd HH:mm:ss");
   status_->setText(
-    QString("No data at %1 in the open bag or selection.").arg(when));
+    QString("No data at %1 in the open bag or campaign.").arg(when));
+}
+
+void SidescanViewerWindow::onCenterTimeChanged(qlonglong t_ns)
+{
+  // Live follower: the boat's interpolated fix at the bar's centre time, or
+  // no arrow when the time falls between bags. Pure in-memory lookup, safe
+  // at drag rates.
+  const auto fix = fixAtTime(nav_track_points_, static_cast<int64_t>(t_ns));
+  if (fix) {
+    canvas_->setTimeArrow(
+      SidescanCanvas::TimeArrow{fix->lat, fix->lon, fix->heading_rad});
+  } else {
+    canvas_->setTimeArrow(std::nullopt);
+  }
 }
 
 void SidescanViewerWindow::onCloudPassesLoaded()

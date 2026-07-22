@@ -212,6 +212,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_time_bar_model test/test_time_bar_model.cpp)
   target_include_directories(test_time_bar_model PRIVATE src)
 
+  # Pure time -> nav-track fix interpolation for the time-bar position arrow
+  # (nav_track_lookup.hpp, #24) — header-only + the query lib's NavPoint.
+  ament_add_gtest(test_nav_track_lookup test/test_nav_track_lookup.cpp)
+  target_include_directories(test_nav_track_lookup PRIVATE src)
+  ament_target_dependencies(test_nav_track_lookup marine_survey_index)
+
   # Multi-pass windowed-read pure parts (#21): cross-bag frame reprojection +
   # the shared tf_lift helpers. No bag I/O; links sidescan_core.
   ament_add_gtest(test_mbes_window_reader test/test_mbes_window_reader.cpp)

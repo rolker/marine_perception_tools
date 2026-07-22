@@ -178,7 +178,11 @@ TEST_F(ExplorerWindowFixture, IndexModeSurvivesTileSelectionAndClear)
   EXPECT_FALSE(legend->isVisible());
   auto * timeline = window.findChild<TimeBarWidget *>("time_bar");
   ASSERT_NE(timeline, nullptr);
-  EXPECT_FALSE(timeline->isVisible());
+  // Always-on in index mode: the bar spans the campaign (the fixture's nav
+  // track) from startup, before any selection.
+  EXPECT_TRUE(timeline->isVisible());
+  EXPECT_TRUE(timeline->hasExtent());
+  EXPECT_EQ(timeline->passCount(), 0);
 
   // Select both indexed tiles: the mbes-bathy pass heads for the cloud; its
   // bag is missing, so the loader's error path must land in the legend (one
@@ -193,12 +197,13 @@ TEST_F(ExplorerWindowFixture, IndexModeSurvivesTileSelectionAndClear)
   EXPECT_TRUE(timeline->isVisible());
   EXPECT_EQ(timeline->passCount(), 2);
 
-  // Clearing the selection hands the pane back to scrub mode.
+  // Clearing the selection hands the pane back to scrub mode; the campaign
+  // time bar stays (only its pass bars clear).
   canvas->clearTileSelection();
   QCoreApplication::processEvents();
   EXPECT_FALSE(legend->isVisible());
   EXPECT_EQ(legend->topLevelItemCount(), 0);
-  EXPECT_FALSE(timeline->isVisible());
+  EXPECT_TRUE(timeline->isVisible());
   EXPECT_EQ(timeline->passCount(), 0);
 }
 

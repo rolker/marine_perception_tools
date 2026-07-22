@@ -174,6 +174,7 @@ private slots:
   void onBasemapLoaded();
   void onTimelinePassActivated(const QString & bag_path, qlonglong t_start_ns, qlonglong t_end_ns);
   void onTimeSelected(qlonglong t_ns);   // time-bar centre committed: cue there
+  void onCenterTimeChanged(qlonglong t_ns);   // live: move the map's position arrow
 
 private:
   // Cross-pane linked cursor + click-to-seek coordination. A world map point is the
@@ -272,6 +273,11 @@ private:
   bool selection_cloud_ = false;   // cloud pane shows the tile selection, not the scrub window
   TimeBarWidget * time_bar_ = nullptr;   // GeoZui-style time navigator (replaced phase d's axis)
   std::vector<TimelinePassInfo> selection_passes_;   // for time->bag lookup on cue
+  // Campaign nav track + bag paths (index mode): the time-bar position arrow
+  // interpolates the boat's fix from these, and a committed time resolves to
+  // an openable bag through them.
+  std::vector<marine_survey_index::NavPoint> nav_track_points_;
+  std::vector<std::pair<std::int64_t, std::string>> bag_paths_;
   std::string current_bag_uri_;    // open bag; a same-bag timeline cue skips the re-open
 
   // Basemap controls (#24 follow-up from desk verify): store layer + colormap,

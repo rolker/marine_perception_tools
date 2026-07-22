@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "marine_survey_index/query.hpp"
@@ -92,6 +93,10 @@ public:
   // then time — segment into per-bag polylines at bag_id changes. Empty when
   // the index predates the track table's population or holds no posed pings.
   std::vector<marine_survey_index::NavPoint> navTrack() const;
+
+  // bag_id -> bag path for every indexed bag (the schema's bags table) — the
+  // time bar resolves a nav-track fix's bag into an openable path with this.
+  std::vector<std::pair<std::int64_t, std::string>> bagPaths() const;
 
 private:
   sqlite3 * db_ = nullptr;
