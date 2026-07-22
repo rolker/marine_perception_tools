@@ -81,6 +81,7 @@
 #include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "marine_tiled_raster_store/tile_io.hpp"
 #include "pass_coalesce.hpp"
+#include "pass_timeline_widget.hpp"
 #include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
@@ -691,10 +692,17 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   srow->addWidget(status_, 1);
   srow->addWidget(hover_geo_);
 
+  // Pass timeline (phase d): the tile selection's passes on a gap-compressed
+  // UTC axis, under the scrub controls; hidden until a selection exists.
+  timeline_ = new PassTimelineWidget(this);
+  timeline_->setObjectName("pass_timeline");
+  timeline_->setVisible(false);
+
   auto * central = new QWidget(this);
   auto * col = new QVBoxLayout(central);
   col->addWidget(outer_split_, 1);
   col->addWidget(controls);
+  col->addWidget(timeline_);
   col->addWidget(status_row);
   setCentralWidget(central);
 
@@ -724,6 +732,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       hover_geo_->setText(
         QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
     });
+  connect(timeline_, &PassTimelineWidget::passActivated,
+    this, &SidescanViewerWindow::onTimelinePassActivated);
   connect(scrub_, &QSlider::valueChanged, this, &SidescanViewerWindow::onScrubChanged);
   connect(grid_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, &SidescanViewerWindow::onGridSpacingChanged);
@@ -932,6 +942,7 @@ void SidescanViewerWindow::openBag(
   ++index_epoch_;
   const quint64 epoch = index_epoch_;
   session_ = session;
+  current_bag_uri_ = bag_uri;   // a same-bag timeline cue can skip the re-open
   ++session_epoch_;   // any render in flight for the previous bag is now stale
 
   // Reset the views for the new bag; the scrub range grows on each progress tick.
@@ -1588,22 +1599,35 @@ void SidescanViewerWindow::onTileSelectionChanged()
 
   // The cloud loads every mbes-bathy pass of the selection, across bags —
   // sidescan stays single-pass by design (#258: blending kills shadows); its
-  // passes will drive the waterfall through the timeline pane (phase d).
+  // passes cue the waterfall through the timeline. The timeline shows ALL
+  // passes; an mbes bar carries its cloud-legend colour index so the two
+  // panes correlate.
   std::vector<CloudPassInfo> cloud_passes;
+  std::vector<TimelinePassInfo> timeline_passes;
+  timeline_passes.reserve(passes.size());
   for (const auto & p : passes) {
-    if (p.sensor_type != "mbes-bathy") {
-      continue;
+    TimelinePassInfo bar;
+    bar.bag_path = p.bag_path;
+    bar.sensor_type = p.sensor_type;
+    bar.t_start_ns = p.t_start_ns;
+    bar.t_end_ns = p.t_end_ns;
+    bar.ping_count = p.ping_count;
+    if (p.sensor_type == "mbes-bathy") {
+      bar.color_index = static_cast<int>(cloud_passes.size());
+      CloudPassInfo info;
+      info.bag_path = p.bag_path;
+      info.t_start_ns = p.t_start_ns;
+      info.t_end_ns = p.t_end_ns;
+      info.label = QString("%1  (%2)")
+        .arg(isoUtc(p.t_start_ns))
+        .arg(QFileInfo(QString::fromStdString(p.bag_path)).fileName())
+        .toStdString();
+      cloud_passes.push_back(std::move(info));
     }
-    CloudPassInfo info;
-    info.bag_path = p.bag_path;
-    info.t_start_ns = p.t_start_ns;
-    info.t_end_ns = p.t_end_ns;
-    info.label = QString("%1  (%2)")
-      .arg(isoUtc(p.t_start_ns))
-      .arg(QFileInfo(QString::fromStdString(p.bag_path)).fileName())
-      .toStdString();
-    cloud_passes.push_back(std::move(info));
+    timeline_passes.push_back(std::move(bar));
   }
+  timeline_->setPasses(std::move(timeline_passes));
+  timeline_->setVisible(true);
 
   // Selection mode: the cloud pane belongs to the selection until it clears.
   selection_cloud_ = true;
@@ -1642,6 +1666,10 @@ void SidescanViewerWindow::onTileSelectionChanged()
 
 void SidescanViewerWindow::exitSelectionCloud()
 {
+  if (timeline_) {
+    timeline_->clearPasses();
+    timeline_->setVisible(false);
+  }
   if (!selection_cloud_) {
     return;
   }
@@ -1661,6 +1689,32 @@ void SidescanViewerWindow::exitSelectionCloud()
     cloud_->setPoints({});
     cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
   }
+}
+
+void SidescanViewerWindow::onTimelinePassActivated(
+  const QString & bag_path, qlonglong t_start_ns, qlonglong t_end_ns)
+{
+  const std::string bag = bag_path.toStdString();
+  // Same bag, index complete: cue the scrub directly instead of re-opening
+  // (an open re-runs the whole metadata index pass). Same trailing-window
+  // head rule as the openBag cue.
+  if (session_ && bag == current_bag_uri_ && !loading_) {
+    const auto snapshot = session_->snapshot();
+    const auto interval = snapshot ?
+      distance_interval(
+      *snapshot, static_cast<int64_t>(t_start_ns), static_cast<int64_t>(t_end_ns)) :
+      std::nullopt;
+    if (interval) {
+      const double head = std::min(interval->first + window_len_m_, interval->second);
+      scrub_->setValue(static_cast<int>(std::lround(head)));
+      status_->setText(QString("Cued to pass %1–%2 m")
+        .arg(interval->first, 0, 'f', 0).arg(interval->second, 0, 'f', 0));
+    } else {
+      status_->setText("Pass window matched no posed pings in the open bag.");
+    }
+    return;
+  }
+  openBag(bag, static_cast<int64_t>(t_start_ns), static_cast<int64_t>(t_end_ns));
 }
 
 void SidescanViewerWindow::onCloudPassesLoaded()

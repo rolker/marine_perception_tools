@@ -50,6 +50,7 @@ namespace marine_perception_tools
 
 class SidescanCanvas;
 class PointCloudView;
+class PassTimelineWidget;
 }  // namespace marine_perception_tools
 
 namespace marine_sonar_widgets {class WaterfallWidget; class EchogramWidget;}
@@ -158,6 +159,7 @@ private slots:
   void onExportGeoJson();
   void onTileSelectionChanged();
   void onCloudPassesLoaded();
+  void onTimelinePassActivated(const QString & bag_path, qlonglong t_start_ns, qlonglong t_end_ns);
 
 private:
   // Cross-pane linked cursor + click-to-seek coordination. A world map point is the
@@ -247,6 +249,8 @@ private:
   std::uint64_t cloud_gen_ = 0;                 // bumped per selection change
   std::vector<CloudPassInfo> cloud_passes_;     // passes of the in-flight/last load
   bool selection_cloud_ = false;   // cloud pane shows the tile selection, not the scrub window
+  PassTimelineWidget * timeline_ = nullptr;     // selection's passes on a UTC axis (phase d)
+  std::string current_bag_uri_;    // open bag; a same-bag timeline cue skips the re-open
 };
 
 }  // namespace marine_perception_tools

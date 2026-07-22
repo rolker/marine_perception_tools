@@ -39,12 +39,14 @@
 
 #include "marine_autonomy/gggs.h"
 #include "marine_survey_index/schema.hpp"
+#include "pass_timeline_widget.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_viewer_window.hpp"
 
 namespace
 {
 
+using marine_perception_tools::PassTimelineWidget;
 using marine_perception_tools::SidescanCanvas;
 using marine_perception_tools::SidescanViewerWindow;
 
@@ -174,22 +176,30 @@ TEST_F(ExplorerWindowFixture, IndexModeSurvivesTileSelectionAndClear)
   auto * legend = window.findChild<QTreeWidget *>("cloud_legend");
   ASSERT_NE(legend, nullptr);
   EXPECT_FALSE(legend->isVisible());
+  auto * timeline = window.findChild<PassTimelineWidget *>("pass_timeline");
+  ASSERT_NE(timeline, nullptr);
+  EXPECT_FALSE(timeline->isVisible());
 
   // Select both indexed tiles: the mbes-bathy pass heads for the cloud; its
   // bag is missing, so the loader's error path must land in the legend (one
-  // zero-count row) and the window must stay alive.
+  // zero-count row) and the window must stay alive. The timeline shows BOTH
+  // passes (mbes + sidescan).
   canvas->selectTiles({0, 1});
   ASSERT_TRUE(process_until([legend]() {return legend->topLevelItemCount() > 0;}))
     << "cloud load never completed";
   EXPECT_TRUE(legend->isVisible());
   ASSERT_EQ(legend->topLevelItemCount(), 1);
   EXPECT_EQ(legend->topLevelItem(0)->text(1), "0");
+  EXPECT_TRUE(timeline->isVisible());
+  EXPECT_EQ(timeline->passCount(), 2);
 
   // Clearing the selection hands the pane back to scrub mode.
   canvas->clearTileSelection();
   QCoreApplication::processEvents();
   EXPECT_FALSE(legend->isVisible());
   EXPECT_EQ(legend->topLevelItemCount(), 0);
+  EXPECT_FALSE(timeline->isVisible());
+  EXPECT_EQ(timeline->passCount(), 0);
 }
 
 }  // namespace

@@ -134,6 +134,7 @@ add_executable(sidescan_target_viewer
   src/sidescan_canvas.cpp
   src/point_cloud_view.cpp
   src/mbes_pass_loader.cpp
+  src/pass_timeline_widget.cpp
   src/survey_overview_canvas.cpp
   src/survey_overview_window.cpp
   src/mbes_cloud_window.cpp
@@ -252,7 +253,8 @@ if(BUILD_TESTING)
     src/sidescan_viewer_window.cpp
     src/sidescan_canvas.cpp
     src/point_cloud_view.cpp
-    src/mbes_pass_loader.cpp)
+    src/mbes_pass_loader.cpp
+    src/pass_timeline_widget.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
   ament_target_dependencies(test_survey_explorer_window
     marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)

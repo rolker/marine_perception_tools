@@ -21,7 +21,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
-#include <memory>
 #include <string>
 
 #include "sidescan_viewer_window.hpp"
