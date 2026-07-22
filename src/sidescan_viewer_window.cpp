@@ -1277,12 +1277,20 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
   scrub_->blockSignals(false);
   updateScrubStep();
 
-  // Grow the boat-track polyline from the snapshot.
+  // Grow the boat-track polyline from the snapshot. Decimated for display:
+  // trackPoints() is per POSED PING (~600k on a long bag), and the bag track
+  // is a dynamic canvas overlay redrawn every repaint — feeding it raw made
+  // the whole UI sluggish the moment a bag finished loading (desk finding).
+  // ~4k points is indistinguishable at any zoom the map reaches.
   const auto pts = session_->trackPoints();
+  const std::size_t stride = std::max<std::size_t>(1, pts.size() / 4000);
   std::vector<QPointF> track;
-  track.reserve(pts.size());
-  for (const auto & p : pts) {
-    track.emplace_back(p.first, p.second);
+  track.reserve(pts.size() / stride + 2);
+  for (std::size_t i = 0; i < pts.size(); i += stride) {
+    track.emplace_back(pts[i].first, pts[i].second);
+  }
+  if (!pts.empty() && (pts.size() - 1) % stride != 0) {
+    track.emplace_back(pts.back().first, pts.back().second);
   }
   canvas_->setTrack(track);
   if (first) {
