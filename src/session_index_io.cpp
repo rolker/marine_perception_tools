@@ -14,6 +14,8 @@
 
 #include "session_index_io.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -196,7 +198,10 @@ bool saveSessionIndex(
   }
   std::error_code ec;
   std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
-  const std::string tmp = path + ".tmp";
+  // Per-writer temp name: two processes (an interactive explorer + a
+  // concurrent --warm-cache) may cache the same bag into the same dir; a
+  // shared .tmp would interleave (review round-2 finding).
+  const std::string tmp = path + ".tmp." + std::to_string(::getpid());
   {
     std::ofstream os(tmp, std::ios::binary | std::ios::trunc);
     if (!os) {
@@ -288,7 +293,7 @@ std::optional<SessionIndex> loadSessionIndex(
   index.used_nadir_depth = used_nadir != 0;
 
   std::uint64_t n = 0;
-  if (!get(is, n) || n > (1ULL << 32)) {
+  if (!get(is, n) || n > (1ULL << 27)) {
     return std::nullopt;
   }
   index.pings.resize(n);
@@ -297,7 +302,7 @@ std::optional<SessionIndex> loadSessionIndex(
       return std::nullopt;   // truncated
     }
   }
-  if (!get(is, n) || n > (1ULL << 32)) {
+  if (!get(is, n) || n > (1ULL << 27)) {
     return std::nullopt;
   }
   index.mbes_pings.resize(n);

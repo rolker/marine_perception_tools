@@ -1241,25 +1241,32 @@ void SidescanViewerWindow::openBag(
   const std::string cache_path =
     cache_dir_.empty() ? std::string() : cachePathFor(cache_dir_, bag_uri);
   index_watcher_.setFuture(QtConcurrent::run([this, session, epoch, bag_uri, cache_path]() {
-      if (!cache_path.empty()) {
-        const auto identity = bagIdentity(bag_uri);
-        if (auto cached = loadSessionIndex(cache_path, identity)) {
-          const double total = cached->total_distance_m;
-          session->adoptIndex(std::move(*cached));
-          Q_EMIT indexProgress(epoch, total, true);
+      // A non-QException from a QtConcurrent task std::terminates in Qt5 —
+      // never let a corrupt cache or a failing scan out of the worker
+      // (review round-2 finding); a failure just ends progress where it is.
+      try {
+        if (!cache_path.empty()) {
+          const auto identity = bagIdentity(bag_uri);
+          if (auto cached = loadSessionIndex(cache_path, identity)) {
+            const double total = cached->total_distance_m;
+            session->adoptIndex(std::move(*cached));
+            Q_EMIT indexProgress(epoch, total, true);
+            return;
+          }
+          session->buildIndex([this, epoch](double resolved_m, bool done) {
+            Q_EMIT indexProgress(epoch, resolved_m, done);
+        });
+          if (const auto snap = session->snapshot()) {
+            saveSessionIndex(cache_path, identity, *snap);   // best-effort
+          }
           return;
         }
         session->buildIndex([this, epoch](double resolved_m, bool done) {
           Q_EMIT indexProgress(epoch, resolved_m, done);
-        });
-        if (const auto snap = session->snapshot()) {
-          saveSessionIndex(cache_path, identity, *snap);   // best-effort
-        }
-        return;
-      }
-      session->buildIndex([this, epoch](double resolved_m, bool done) {
-        Q_EMIT indexProgress(epoch, resolved_m, done);
       });
+      } catch (const std::exception &) {
+        Q_EMIT indexProgress(epoch, 0.0, true);   // surface as an empty done
+      }
       }));
 }
 
@@ -1684,9 +1691,17 @@ void SidescanViewerWindow::onRenderFinished()
     .arg(r.win_lo, 0, 'f', 1)
     .arg(r.win_hi, 0, 'f', 1)
     .arg(r.npings)
-    .arg(cloud_->decimationStride() > 1 ?
-    QString(" • cloud 1/%1 (render budget)").arg(cloud_->decimationStride()) :
-    QString()));
+    .arg([&]() {
+      QString extra;
+      if (cloud_->decimationStride() > 1) {
+        extra += QString(" • cloud 1/%1 (render budget)")
+        .arg(cloud_->decimationStride());
+      }
+      if (ss_first > 0 || bs_first > 0) {
+        extra += QString(" • waterfalls newest %1 rows").arg(kMaxGlRows);
+      }
+      return extra;
+    }()));
 
   // A scrub arrived while we were rendering — render once more with the latest.
   if (render_pending_) {
@@ -2161,7 +2176,9 @@ void SidescanViewerWindow::onCenterTimeChanged(qlonglong t_ns)
 
 void SidescanViewerWindow::onCloudPassesLoaded()
 {
-  const CloudLoadTicket ticket = cloud_watcher_.result();
+  // Non-const: the per-pass clouds are MOVED out below (a const ticket
+  // silently degraded the move to a full copy — review round-2 finding).
+  CloudLoadTicket ticket = cloud_watcher_.result();
   if (ticket.generation != cloud_gen_) {
     return;   // a newer selection (or a cleared one) superseded this load
   }

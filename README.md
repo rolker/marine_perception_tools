@@ -147,6 +147,15 @@ Committing a time cues the scrub there — switching bags through the index
 selection when the time falls in another recording. Clicking a pass bar
 cues that pass directly.
 
+More explorer controls: the Map pane header carries a **basemap layer
+picker** (bathymetry / backscatter / sidescan store layers discovered next
+to the index) and a **basemap colormap** combo — contrast is
+percentile-scaled per layer so residual store outliers cannot blank the
+map — plus **track**/**grid** declutter toggles. The cloud legend's rows
+have **checkboxes** to show/hide individual passes, and **clip to
+contact** (+ margin) restricts a multi-pass load to the selected contact's
+neighbourhood. Contacts can be deleted from the list's context menu.
+
 Bag opens are accelerated by a **bag-index cache** (`--cache-dir`, default
 `$XDG_CACHE_HOME/survey_explorer`): the whole-bag metadata scan runs once per
 bag and is then a file read, keyed by the bag's size+mtime (bags are never

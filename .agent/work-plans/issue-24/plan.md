@@ -168,3 +168,14 @@ publishing a complete snapshot) or scans + saves. `--warm-cache` pre-builds ever
 indexed bag. Measured: June-15 bag 90 s scan -> ~1 s cached open (126 MB cache).
 This is what makes campaign-wide time-bar release-cues acceptable without
 decoupling browsing from loading.
+
+**Later desk rounds (2026-07-22, one summarizing note):** campaign time bar +
+live map position arrow (`nav_track_lookup.hpp` fixAtTime; `TimeArrow` on the
+canvas) — this REPLACED the plan's per-track direction arrowheads (design
+change: direction on demand); campaign extent authoritative over bag opens +
+status-line size fix; contact clip (GeoClip in `mbes_pass_loader`, per-bag
+geo->world filter) + contact deletion (store rebuild); legend pass checkboxes
+(kept per-pass clouds, in-memory re-filter); canvas static-layer pixmap cache
+with pan-blit + sparse track/tile rendering; GPU render budgets after a desktop
+crash (4M-point cloud stride via decimationStride, 4000-row waterfall caps,
+both surfaced); per-bag track display decimation (~4k points).

@@ -60,7 +60,7 @@ inline const char * dayName(int wday)
   return kDays[((wday % 7) + 7) % 7];
 }
 
-inline const char * monthName(int mon)   // 1-based (the ladder counts months 1..12)
+inline const char * monthName(int mon)   // NEXT month's 0-based index (tm_mon+1)
 {
   static const char * kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};

@@ -15,6 +15,7 @@
 #include "sidescan_canvas.hpp"
 
 #include <QColor>
+#include <QGuiApplication>
 #include <QFont>
 #include <QMouseEvent>
 #include <QPainter>
@@ -499,6 +500,9 @@ void SidescanCanvas::drawSelectedTiles(QPainter & painter) const
 
 void SidescanCanvas::rebuildLayerCache()
 {
+  if (size().isEmpty()) {
+    return;   // pre-layout paint: nothing sane to rasterize yet
+  }
   layer_cache_ = QPixmap(size());
   QPainter painter(&layer_cache_);
   painter.fillRect(layer_cache_.rect(), QColor(20, 24, 28));
@@ -539,6 +543,11 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
   // Static layers from the cache (see rebuildLayerCache): a same-view repaint
   // is a blit; a mid-pan repaint blits the stale cache translated and rebuilds
   // on release; anything else (zoom, resize, data change) rebuilds now.
+  // A lost left-button release (modal mid-drag, grab stolen) must not pin us
+  // on the translated-blit branch forever (review round-2 finding).
+  if (panning_ && !(QGuiApplication::mouseButtons() & Qt::LeftButton)) {
+    panning_ = false;
+  }
   const bool view_matches = layer_cache_valid_ && cache_size_ == size() &&
     cache_px_per_m_ == px_per_m_ && cache_center_ == center_map_;
   const bool pan_blit = panning_ && layer_cache_valid_ &&
