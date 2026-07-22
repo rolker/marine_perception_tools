@@ -167,3 +167,27 @@ Decisions: executable name = `survey_explorer`; timeline REPLACES the pass
 list (timeline only). Implementation proceeds host-inline, commit-phased
 (a) bridge+pure headers+tests, (b) canvas merge, (c) cloud in place,
 (d) timeline, (e) rename/docs/retire.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-22 11:45 -0400
+**By**: Claude Code Agent (Claude Fable 5)
+**Verdict**: approved
+
+**Branch**: feature/issue-24 at `f9fae4d`
+**Mode**: pre-push
+**Depth**: Deep (reason: 33 files, +3301/-1150; GUI concurrency + executable rename)
+**Must-fix**: 1 | **Suggestions**: 5
+**Round**: 1 | **Ship**: recommended — the single must-fix and all actionable suggestions were fixed in-session (f9fae4d); 377 tests green after fixes.
+
+Specialists: Static Analysis (via full ament lint suite in colcon test, green),
+Governance, Plan Drift, Claude Adversarial Lens A + Lens B (Deep). Copilot: off (default).
+
+### Findings
+- [x] (must-fix) UAF: superseded background indexer captures `this`, never waited — orphaned futures now tracked + waited in dtor — `src/sidescan_viewer_window.cpp` (openBag/dtor)
+- [x] (suggestion) Timeline short bars drawn 3 px but hit-tested in fraction space → dead click targets; now hit-tests drawn rects — `src/pass_timeline_widget.cpp`
+- [x] (suggestion) Shim no-/proc fallback could exec CWD-relative name; now fails loudly when self-path unresolvable — `src/sidescan_target_viewer_shim.cpp`
+- [x] (suggestion) Antimeridian restriction of equirectangular canvas undocumented; note added — `src/sidescan_canvas.cpp` (geoToCanvas)
+- [x] (suggestion) Stale phase-e staging comment in CMake test block; dropped — `CMakeLists.txt`
+- [x] (suggestion) pass_coalesce.hpp missing from plan Files-to-Change table; row added — `.agent/work-plans/issue-24/plan.md`
+- [ ] (note, out of scope) Repo lacks ADR-0017 root AGENTS.md — pre-existing gap, separate onboarding task
