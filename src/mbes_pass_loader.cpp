@@ -16,15 +16,18 @@
 
 #include <QString>
 
+#include <algorithm>
 #include <exception>
 #include <utility>
 
 #include "mbes_window_reader.hpp"
+#include "sidescan_geometry.hpp"
 
 namespace marine_perception_tools
 {
 
-CloudLoadOutcome load_cloud_passes(const std::vector<CloudPassInfo> & passes)
+CloudLoadOutcome load_cloud_passes(
+  const std::vector<CloudPassInfo> & passes, const std::optional<GeoClip> & clip)
 {
   CloudLoadOutcome out;
   out.pass_clouds.resize(passes.size());
@@ -51,9 +54,43 @@ CloudLoadOutcome load_cloud_passes(const std::vector<CloudPassInfo> & passes)
       continue;
     }
     out.skipped_pings += res.skipped_pings;
+
+    // Contact clip: drop soundings outside the margin, in THIS bag's own
+    // world frame (geo point -> ECEF -> inverse earth anchor). Without a geo
+    // anchor the pass cannot be clipped — keep it whole, and say so.
+    if (clip && !res.world_soundings.empty()) {
+      if (res.has_geo) {
+        double ex = 0.0;
+        double ey = 0.0;
+        double ez = 0.0;
+        geodetic_to_ecef(clip->lat, clip->lon, clip->alt, ex, ey, ez);
+        const auto & t = res.earth_from_world.transform;
+        double cx = 0.0;
+        double cy = 0.0;
+        double cz = 0.0;
+        rotate_by_quat(
+          -t.rotation.x, -t.rotation.y, -t.rotation.z, t.rotation.w,
+          ex - t.translation.x, ey - t.translation.y, ez - t.translation.z,
+          cx, cy, cz);
+        const double m2 = clip->margin_m * clip->margin_m;
+        res.world_soundings.erase(
+          std::remove_if(
+            res.world_soundings.begin(), res.world_soundings.end(),
+            [&](const MbesSounding & s) {
+              const double dx = s.x - cx;
+              const double dy = s.y - cy;
+              return dx * dx + dy * dy > m2;
+            }),
+          res.world_soundings.end());
+      } else {
+        out.notes << QString("%1: no geo anchor — not clipped")
+          .arg(QString::fromStdString(pass.label));
+      }
+    }
     if (res.world_soundings.empty()) {
-      out.notes << QString("%1: no soundings in window")
-        .arg(QString::fromStdString(pass.label));
+      out.notes << QString("%1: no soundings %2")
+        .arg(QString::fromStdString(pass.label))
+        .arg(clip ? "within the contact margin" : "in window");
       continue;
     }
 

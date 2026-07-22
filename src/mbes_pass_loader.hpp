@@ -24,6 +24,7 @@
 #include <QStringList>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,9 +53,24 @@ struct CloudLoadOutcome
   int skipped_pings = 0;              // pings dropped (no TF), summed
 };
 
+// Optional clip region: keep only soundings within `margin_m` horizontally
+// of the geographic point (a contact + margin, #24 desk finding — 6-7 passes
+// over a tile is millions of soundings; the inspect-a-contact workflow needs
+// just its neighbourhood). Applied per pass in that bag's own world frame
+// via its earth anchor; passes without a geo anchor stay unclipped (noted).
+struct GeoClip
+{
+  double lat = 0.0;
+  double lon = 0.0;
+  double alt = 0.0;
+  double margin_m = 25.0;
+};
+
 // Load every pass's soundings into the first loadable pass's world frame.
 // Never throws: a failing bag costs only its own pass (skipped + noted).
-CloudLoadOutcome load_cloud_passes(const std::vector<CloudPassInfo> & passes);
+CloudLoadOutcome load_cloud_passes(
+  const std::vector<CloudPassInfo> & passes,
+  const std::optional<GeoClip> & clip = std::nullopt);
 
 }  // namespace marine_perception_tools
 

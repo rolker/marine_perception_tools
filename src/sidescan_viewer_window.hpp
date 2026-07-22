@@ -293,6 +293,10 @@ private:
   QComboBox * basemap_cmap_ = nullptr;
   QCheckBox * show_track_check_ = nullptr;
   QCheckBox * show_grid_check_ = nullptr;
+  // Clip the selection cloud to the selected contact + margin (#24 desk
+  // finding: several passes over a tile is millions of soundings).
+  QCheckBox * clip_contact_check_ = nullptr;
+  QDoubleSpinBox * clip_margin_spin_ = nullptr;
   std::vector<std::pair<QString, std::string>> basemap_layers_;   // {label, dir}
   QFutureWatcher<BasemapLoadTicket> basemap_watcher_;
   std::uint64_t basemap_gen_ = 0;

@@ -826,9 +826,19 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   cloud_split_->addWidget(cloud_);
   cloud_split_->addWidget(cloud_legend_);
   cloud_split_->setStretchFactor(0, 1);
+  clip_contact_check_ = new QCheckBox("clip to contact", this);
+  clip_contact_check_->setToolTip(
+    "Load only soundings within the margin of the SELECTED contact — several "
+    "passes over a tile is millions of points otherwise");
+  clip_margin_spin_ = new QDoubleSpinBox(this);
+  clip_margin_spin_->setRange(1.0, 500.0);
+  clip_margin_spin_->setValue(25.0);
+  clip_margin_spin_->setSuffix(" m");
+  clip_margin_spin_->setToolTip("Margin around the selected contact");
   auto * cloud_pane = make_pane(
     "MBES 3D", cloud_split_,
-    {cloud_color_combo_, zexag_spin_, point_size_spin_, cloud_palette_});
+    {clip_contact_check_, clip_margin_spin_,
+      cloud_color_combo_, zexag_spin_, point_size_spin_, cloud_palette_});
 
   // 2x2 grid of the four sonar views, each pane independently resizable:
   //   sidescan waterfall (UL) | MBES backscatter (UR)
@@ -914,6 +924,21 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, [this](bool on) {canvas_->setNavTrackVisible(on);});
   connect(show_grid_check_, &QCheckBox::toggled,
     this, [this](bool on) {canvas_->setIndexTilesVisible(on);});
+  // Clip changes re-run the selection load (cheap: the query is local, the
+  // read is the same windowed machinery).
+  const auto reload_selection = [this]() {
+      if (selection_cloud_) {
+        onTileSelectionChanged();
+      }
+    };
+  connect(clip_contact_check_, &QCheckBox::toggled, this, reload_selection);
+  connect(clip_margin_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, reload_selection);
+  connect(contact_list_, &QListWidget::currentRowChanged, this, [this](int) {
+      if (selection_cloud_ && clip_contact_check_->isChecked()) {
+        onTileSelectionChanged();
+      }
+    });
   connect(canvas_, &SidescanCanvas::tileSelectionChanged,
     this, &SidescanViewerWindow::onTileSelectionChanged);
   connect(canvas_, &SidescanCanvas::hoverGeo, this, [this](double lat, double lon) {
@@ -966,12 +991,27 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       QAction * copy_ll = menu.addAction("Copy lat, lon");
       copy_ll->setEnabled(has_geo);
       QAction * copy_row = menu.addAction("Copy row");
+      QAction * remove = menu.addAction("Delete contact");
       QAction * chosen = menu.exec(contact_list_->viewport()->mapToGlobal(pos));
       if (chosen == copy_ll && has_geo) {
         QApplication::clipboard()->setText(
           QString("%1, %2").arg(g.latitude, 0, 'f', 6).arg(g.longitude, 0, 'f', 6));
       } else if (chosen == copy_row) {
         QApplication::clipboard()->setText(item->text());
+      } else if (chosen == remove) {
+        // The store's API is add-only: rebuild it without the removed row.
+        marine_contacts::ContactStore fresh;
+        const auto & all = contact_store_.contacts();
+        for (int i = 0; i < static_cast<int>(all.size()); ++i) {
+          if (i != row) {
+            fresh.add(all[static_cast<std::size_t>(i)]);
+          }
+        }
+        contact_store_ = std::move(fresh);
+        refreshContacts();
+        if (selection_cloud_ && clip_contact_check_->isChecked()) {
+          onTileSelectionChanged();   // the clipped cloud may have lost its contact
+        }
       }
     });
   connect(cloud_color_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -1912,17 +1952,38 @@ void SidescanViewerWindow::onTileSelectionChanged()
     return;
   }
 
+  // Contact clip (#24 desk finding): bound the cloud to the SELECTED
+  // contact's neighbourhood when asked to.
+  std::optional<GeoClip> clip;
+  if (clip_contact_check_->isChecked()) {
+    const int row = contact_list_->currentRow();
+    if (row >= 0 && row < static_cast<int>(contact_store_.contacts().size())) {
+      const auto & g = contact_store_.contacts()[static_cast<std::size_t>(row)]
+        .geo_pose.position;
+      if (std::isfinite(g.latitude) && std::isfinite(g.longitude)) {
+        clip = GeoClip{g.latitude, g.longitude, 0.0, clip_margin_spin_->value()};
+      }
+    }
+    if (!clip) {
+      status_->setText(
+        "Clip to contact: select a contact with a geo position first — "
+        "loading unclipped.");
+    }
+  }
+
   cloud_passes_ = cloud_passes;
   status_->setText(
-    QString("Loading %1 mbes-bathy pass%2 from %3 selected tile%4…")
+    QString("Loading %1 mbes-bathy pass%2 from %3 selected tile%4%5…")
     .arg(cloud_passes.size()).arg(cloud_passes.size() == 1 ? "" : "es")
-    .arg(selection.size()).arg(selection.size() == 1 ? "" : "s"));
+    .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
+    .arg(clip ? QString(" (clipped to contact, %1 m)").arg(clip->margin_m) :
+    QString()));
   const auto gen = cloud_gen_;
   const auto snapshot = std::move(cloud_passes);   // worker owns its own copy
-  cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen]() {
+  cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen, clip]() {
       CloudLoadTicket ticket;
       ticket.generation = gen;
-      ticket.outcome = load_cloud_passes(snapshot);
+      ticket.outcome = load_cloud_passes(snapshot, clip);
       return ticket;
     }));
 }
