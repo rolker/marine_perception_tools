@@ -70,6 +70,10 @@ public:
   // Replaces the pass bars; the extent grows to cover them and the view
   // re-fits when the user hasn't taken it over.
   void setPasses(std::vector<TimelinePassInfo> passes);
+  // Drops the pass bars AND resets the extent (to empty) and the user's
+  // view-override flag — i.e. it clears the setExtent state too, not just the
+  // passes. A caller that wants to keep an explicit extent must re-apply it
+  // after (as exitSelectionCloud does when returning to bag mode).
   void clearPasses();
   int passCount() const {return static_cast<int>(passes_.size());}
 
