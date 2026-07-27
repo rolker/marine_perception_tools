@@ -258,3 +258,26 @@ Specialists: Claude Adversarial Lens A + Lens B (Deep, fresh-context), Governanc
 ### Notes
 - Deferred / carried forward (not agent-actionable): the Local Review R2 "GeoZui4D port attribution" question is now resolved by the operator decision above and checked off in that entry.
 - Build not run: the worktree's lower layers (underlay/core/…/simulation `install/`) are unbuilt, so `marine_autonomy` (a `find_package` dep) is unresolvable and the package cannot compile here — a pre-existing environment gap, unrelated to #24. Changes verified by inspection: the channel check is an `int32_t` range compare against `kNumSidescanChannels` (in scope via the header chain); the temp cleanup is the same `std::filesystem::remove(tmp, ec)` call already used on the rename-failure path; the remaining edits are comment-only. Pre-commit hooks (lint) passed on every commit.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-27 19:43 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-24 at `62f63c2` (code) / `371e954` (progress tip)
+**Mode**: pre-push (gh unauthenticated + code remote is `gitcloud`; reviewed vs local `origin/jazzy`)
+**Depth**: Deep-context, delta-scoped (reason: round-3 verification of the 20-line Integrated-Review fix delta since R2 `6164ca8`; full branch is Deep and twice-reviewed at R1/R2)
+**Must-fix**: 0 | **Suggestions**: 0
+**Round**: 3 | **Ship**: recommended — zero must-fix; the delta correctly closes all three Integrated-Review findings plus the GeoZui4D attribution decision, verified by inspection, an independent fresh-context adversarial pass (no findings), and cppcheck (clean on touched lines).
+
+Specialists: Static Analysis (cppcheck on `session_index_io.cpp`, the only code-bearing delta file — clean on touched lines; sole hit is a pre-existing `useStlAlgorithm` style nit on an untouched context line in `sidescan_geometry.hpp`). Claude Adversarial (one fresh-context combined-lens pass on the delta — no findings). Copilot: off (default). Local: not run (delta-scoped round-3 verification). Governance/Plan-Drift: delta introduces no new consequences or scope; plan reconciled in R1/R2.
+
+### Findings
+- [ ] No issues found. LGTM.
+
+### Verified fixes (delta since R2 `6164ca8`)
+- [x] (must-fix, closed) Cached sidescan channel range-validated in `getPing()`; out-of-range → `false` → `loadSessionIndex` returns `nullopt` → bag re-indexes (prevents OOB `kNumSidescanChannels`-element array index) — `src/session_index_io.cpp:108`
+- [x] (suggestion, closed) Per-writer temp file removed on the `saveSessionIndex()` write-failure path (mirrors the rename-failure `remove`; `ec` in scope) — `src/session_index_io.cpp:243`
+- [x] (suggestion, closed) `clearPasses()` doc documents the extent + `user_adjusted_` reset; matches the implementation and the `exitSelectionCloud` re-apply — `src/time_bar_widget.hpp:76`
+- [x] (operator decision, closed) GeoZui4D TimeControl port attributed to the author's personal copyright in the 3 ported time-bar files — `src/time_bar_model.hpp`, `src/time_bar_widget.hpp`, `src/time_bar_widget.cpp`
