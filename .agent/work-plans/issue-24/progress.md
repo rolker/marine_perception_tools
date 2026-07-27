@@ -215,7 +215,7 @@ Specialists: Claude Adversarial Lens A + Lens B (Deep, fresh-context), Governanc
 - [x] (suggestion) Zero-size layer-cache pixmap guard
 - [x] (suggestion) const ticket defeated the pass-clouds move (full copy on UI thread) — non-const now
 - [x] (suggestion) monthName comment inaccuracy
-- [ ] (note) GeoZui4D port attribution assumes personal (not CCOM-institutional) copyright — Roland to confirm; his call as author
+- [x] (note) GeoZui4D port attribution assumes personal (not CCOM-institutional) copyright — Roland to confirm; his call as author (resolved: operator confirmed **personal**; attribution added to ported time-bar file headers, `62f63c2`)
 
 ## Integrated Review
 **Status**: complete
@@ -228,9 +228,9 @@ Specialists: Claude Adversarial Lens A + Lens B (Deep, fresh-context), Governanc
 **CI**: all-pass (build-and-test success, copilot-pull-request-reviewer success)
 
 ### Findings
-- [ ] (must-fix, Copilot) Cached ping channel is cast to `SidescanChannel` without range validation; a readable-but-corrupt cache can yield channel >= 3, which is then used to index a 3-element `std::array` (`sidescan_bag_session.cpp:822` slot write, `:852` read) — out-of-bounds write, not merely bad enum data. Validate `channel` in [0, kNumSidescanChannels) in `getPing()` and return false so `loadSessionIndex` rejects the cache and the bag re-indexes — `src/session_index_io.cpp:90-109`
-- [ ] (suggestion, Copilot) `saveSessionIndex()` leaves the per-writer temp file (`*.tmp.<pid>`) behind on the post-write failure return; only the rename-failure path removes it. Stale temps accumulate in the cache dir over repeated failures (full disk is the likely trigger, and it makes the disk-full state worse). Remove `tmp` before returning false at the write-failure path — `src/session_index_io.cpp:237`
-- [ ] (suggestion, Copilot) `TimeBarWidget::clearPasses()` also zeroes the extent and `user_adjusted_`, which the header's `setExtent` comment presents as pass-independent state. The sole caller (`exitSelectionCloud`) deliberately re-applies extent and visibility right after, so no live defect — but the undocumented coupling is a trap for the next caller. Document the reset in the `clearPasses()` header comment (behavior is intended; the doc is what is missing) — `src/time_bar_widget.hpp:73`
+- [x] (must-fix, Copilot) Cached ping channel is cast to `SidescanChannel` without range validation; a readable-but-corrupt cache can yield channel >= 3, which is then used to index a 3-element `std::array` (`sidescan_bag_session.cpp:822` slot write, `:852` read) — out-of-bounds write, not merely bad enum data. Validate `channel` in [0, kNumSidescanChannels) in `getPing()` and return false so `loadSessionIndex` rejects the cache and the bag re-indexes — `src/session_index_io.cpp:90-109`
+- [x] (suggestion, Copilot) `saveSessionIndex()` leaves the per-writer temp file (`*.tmp.<pid>`) behind on the post-write failure return; only the rename-failure path removes it. Stale temps accumulate in the cache dir over repeated failures (full disk is the likely trigger, and it makes the disk-full state worse). Remove `tmp` before returning false at the write-failure path — `src/session_index_io.cpp:237`
+- [x] (suggestion, Copilot) `TimeBarWidget::clearPasses()` also zeroes the extent and `user_adjusted_`, which the header's `setExtent` comment presents as pass-independent state. The sole caller (`exitSelectionCloud`) deliberately re-applies extent and visibility right after, so no live defect — but the undocumented coupling is a trap for the next caller. Document the reset in the `clearPasses()` header comment (behavior is intended; the doc is what is missing) — `src/time_bar_widget.hpp:73`
 
 ### False positives
 - (none) All three Copilot comments describe real code properties; two are latent rather than live, but per the Quality Standard validation/silent-failure concerns are not dismissed as nits.
@@ -238,3 +238,23 @@ Specialists: Claude Adversarial Lens A + Lens B (Deep, fresh-context), Governanc
 ### Notes
 - Local review R2 finding "shared .tmp cache path raced across processes" touches the same function as the Copilot temp-leak finding but is a distinct concern (race vs. leak) — not counted as a cross-source confirmation.
 - Carried forward, unresolved from Local Review R2: GeoZui4D port attribution (personal vs. CCOM-institutional copyright) awaits Roland's call — not an agent-actionable item.
+- **Operator decisions (2026-07-27 checkpoint, Roland)**: (1) address all three findings above in one fix pass; (2) GeoZui4D port attribution is **personal** (credit the original author personally in the ported files' copyright headers) — apply the header attribution in the same pass and check off the carried-forward note in the Local Review R2 entry.
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-27 19:37 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-24 at `62f63c2`
+**Addressed**: Integrated Review (When 2026-07-27 15:20 -04:00, PR #25 @ `59d8ba8`) + operator decisions in that entry's Notes
+**Commits**: `80c8bc0`, `964de87`, `79ab657`, `62f63c2`
+
+### Actions
+- [x] (must-fix) Validate cached sidescan channel range in `getPing()`; reject out-of-range cache so the bag re-indexes (prevents OOB array index) — `src/session_index_io.cpp:102` — `80c8bc0`
+- [x] (suggestion) Remove the per-writer temp file on the `saveSessionIndex()` write-failure path, not just the rename-failure path — `src/session_index_io.cpp:237` — `964de87`
+- [x] (suggestion) Document that `clearPasses()` also resets the extent + `user_adjusted_` state — `src/time_bar_widget.hpp:73` — `79ab657`
+- [x] (operator decision) GeoZui4D TimeControl port attributed to the original author's **personal** copyright in the ported time-bar headers — `src/time_bar_model.hpp`, `src/time_bar_widget.hpp`, `src/time_bar_widget.cpp` — `62f63c2` (also checked off the carried-forward note in Local Review R2)
+
+### Notes
+- Deferred / carried forward (not agent-actionable): the Local Review R2 "GeoZui4D port attribution" question is now resolved by the operator decision above and checked off in that entry.
+- Build not run: the worktree's lower layers (underlay/core/…/simulation `install/`) are unbuilt, so `marine_autonomy` (a `find_package` dep) is unresolvable and the package cannot compile here — a pre-existing environment gap, unrelated to #24. Changes verified by inspection: the channel check is an `int32_t` range compare against `kNumSidescanChannels` (in scope via the header chain); the temp cleanup is the same `std::filesystem::remove(tmp, ec)` call already used on the rename-failure path; the remaining edits are comment-only. Pre-commit hooks (lint) passed on every commit.
