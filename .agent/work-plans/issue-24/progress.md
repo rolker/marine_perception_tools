@@ -216,3 +216,25 @@ Specialists: Claude Adversarial Lens A + Lens B (Deep, fresh-context), Governanc
 - [x] (suggestion) const ticket defeated the pass-clouds move (full copy on UI thread) — non-const now
 - [x] (suggestion) monthName comment inaccuracy
 - [ ] (note) GeoZui4D port attribution assumes personal (not CCOM-institutional) copyright — Roland to confirm; his call as author
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-27 15:20 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #25 at `59d8ba8`
+**Sources**: 3 (Copilot R1 @ `59d8ba8`, Local Review (Pre-Push) R1 @ `f9fae4d` + R2 @ `6164ca8`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test success, copilot-pull-request-reviewer success)
+
+### Findings
+- [ ] (must-fix, Copilot) Cached ping channel is cast to `SidescanChannel` without range validation; a readable-but-corrupt cache can yield channel >= 3, which is then used to index a 3-element `std::array` (`sidescan_bag_session.cpp:822` slot write, `:852` read) — out-of-bounds write, not merely bad enum data. Validate `channel` in [0, kNumSidescanChannels) in `getPing()` and return false so `loadSessionIndex` rejects the cache and the bag re-indexes — `src/session_index_io.cpp:90-109`
+- [ ] (suggestion, Copilot) `saveSessionIndex()` leaves the per-writer temp file (`*.tmp.<pid>`) behind on the post-write failure return; only the rename-failure path removes it. Stale temps accumulate in the cache dir over repeated failures (full disk is the likely trigger, and it makes the disk-full state worse). Remove `tmp` before returning false at the write-failure path — `src/session_index_io.cpp:237`
+- [ ] (suggestion, Copilot) `TimeBarWidget::clearPasses()` also zeroes the extent and `user_adjusted_`, which the header's `setExtent` comment presents as pass-independent state. The sole caller (`exitSelectionCloud`) deliberately re-applies extent and visibility right after, so no live defect — but the undocumented coupling is a trap for the next caller. Document the reset in the `clearPasses()` header comment (behavior is intended; the doc is what is missing) — `src/time_bar_widget.hpp:73`
+
+### False positives
+- (none) All three Copilot comments describe real code properties; two are latent rather than live, but per the Quality Standard validation/silent-failure concerns are not dismissed as nits.
+
+### Notes
+- Local review R2 finding "shared .tmp cache path raced across processes" touches the same function as the Copilot temp-leak finding but is a distinct concern (race vs. leak) — not counted as a cross-source confirmation.
+- Carried forward, unresolved from Local Review R2: GeoZui4D port attribution (personal vs. CCOM-institutional copyright) awaits Roland's call — not an agent-actionable item.
