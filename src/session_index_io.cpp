@@ -102,6 +102,12 @@ bool getPing(std::istream & is, SidescanPing & p)
   if (!ok) {
     return false;
   }
+  // A readable-but-corrupt cache can carry an out-of-range channel; casting it
+  // to SidescanChannel and later using it to index a kNumSidescanChannels-element
+  // array is an out-of-bounds access. Reject the cache so the bag re-indexes.
+  if (channel < 0 || channel >= kNumSidescanChannels) {
+    return false;
+  }
   p.channel = static_cast<SidescanChannel>(channel);
   p.has_pose = has_pose != 0;
   p.geometry.lateral_sign = lateral_sign;
