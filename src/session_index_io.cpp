@@ -240,6 +240,7 @@ bool saveSessionIndex(
       putMbes(os, p);
     }
     if (!os) {
+      std::filesystem::remove(tmp, ec);   // don't leak the partial temp (disk-full is the likely trigger)
       return false;
     }
   }
