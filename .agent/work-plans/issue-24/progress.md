@@ -349,3 +349,34 @@ multiplies by a precomputed ns/px factor rather than `spp_ * 1e9`.
 ### False positives
 - (none; the two inline comments at this head are the previously fixed
   R1/R2 threads re-anchored by GitHub, not new findings)
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-31 12:20 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #25 at `7040499`
+**Sources**: 2 (Copilot re-review @ `7040499`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test green 8m54s on `7040499`)
+
+Copilot again generated no new inline comments; both SUPPRESSED
+(low-confidence) comments were valid members of the same conversion
+family and are fixed, plus one more found by a local truncation/cast
+sweep of the touched files (sweep is now clean — no truncating ns
+divisions or unguarded narrowing casts remain).
+
+### Findings
+- [x] (suggestion, Copilot suppressed) `isoUtc()` truncating ns->ms
+  division shifts the displayed second within 1 ms past a pre-epoch
+  second boundary; floor-divided — `src/time_bar_widget.cpp:57`
+- [x] (suggestion, Copilot suppressed) `indexedTiles()` negative guard
+  still let over-uint32 row/col wrap to small values; cast now bounded
+  both sides + fixture rows — `src/survey_index_bridge.cpp:90`
+- [x] (suggestion, local sweep) animation interpolation subtracted
+  `anim_to_ns_ - anim_from_ns_` in int64, overflowing when one end is at
+  a saturation extreme; computed in double via new `saturateNs()` —
+  `src/time_bar_widget.cpp:94`
+
+### False positives
+- (none)
