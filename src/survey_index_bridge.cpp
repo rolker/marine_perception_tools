@@ -84,11 +84,15 @@ std::vector<IndexedTile> SurveyIndexBridge::indexedTiles() const
   int rc;
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     const auto level = sqlite3_column_int64(stmt, 0);
-    const auto row = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 1));
-    const auto col = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 2));
-    if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size()) {
+    const auto row_i = sqlite3_column_int64(stmt, 1);
+    const auto col_i = sqlite3_column_int64(stmt, 2);
+    if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size() ||
+      row_i < 0 || col_i < 0)
+    {
       continue;   // out-of-contract row; the schema check already vouched
     }
+    const auto row = static_cast<std::uint32_t>(row_i);
+    const auto col = static_cast<std::uint32_t>(col_i);
     const auto & spec = gggs::levels[level];
     IndexedTile tile;
     tile.level = static_cast<std::uint8_t>(level);
