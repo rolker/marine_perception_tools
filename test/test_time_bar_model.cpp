@@ -123,6 +123,20 @@ TEST(TimeBarModel, DegenerateInputsYieldNoTicks)
   }
 }
 
+TEST(TimeBarModel, PreEpochLeftEdgeKeepsTickPhase)
+{
+  // Left edge 0.5 s BEFORE the epoch (reachable by panning/zooming left of
+  // 1970): the minute boundary at t=0 sits 0.5 s -> 0.5 px into the window.
+  // Truncating division would decompose -0.5 s as 00:00:00 - 0.5 and place
+  // the first minute tick a full minute late (60.5 px) instead.
+  const auto rows = computeTickLadder(-kNsPerS / 2, 1.0, 600.0);
+  const auto * minutes = rowFor(rows, 60.0);
+  ASSERT_NE(minutes, nullptr);
+  ASSERT_FALSE(minutes->ticks.empty());
+  EXPECT_NEAR(minutes->ticks.front().x_px, 0.5, 1e-6);
+  EXPECT_EQ(minutes->ticks.front().label, "0m");
+}
+
 TEST(TimeBarModel, OffsetTimeNsIsExactInRangeAndSaturatesBeyond)
 {
   // Normal interactive spans stay exact.

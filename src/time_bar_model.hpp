@@ -158,8 +158,17 @@ inline std::vector<TickRow> computeTickLadder(
     return rows;
   }
 
-  const auto whole_s = static_cast<time_t>(left_ns / 1000000000LL);
-  const double frac = static_cast<double>(left_ns % 1000000000LL) / 1e9;
+  // Floor-divide: '/' and '%' truncate toward zero, so a pre-epoch left edge
+  // (reachable by panning or zooming left of 1970) would get a negative frac
+  // and a whole second off by one, misplacing every tick in the ladder.
+  std::int64_t whole = left_ns / 1000000000LL;
+  std::int64_t rem = left_ns % 1000000000LL;
+  if (rem < 0) {
+    --whole;
+    rem += 1000000000LL;
+  }
+  const auto whole_s = static_cast<time_t>(whole);
+  const double frac = static_cast<double>(rem) / 1e9;
   std::tm g{};
   gmtime_r(&whole_s, &g);
   const double sec = g.tm_sec + frac;
