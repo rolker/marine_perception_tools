@@ -207,8 +207,7 @@ double TimeBarWidget::xOfTime(std::int64_t t_ns) const
 
 std::int64_t TimeBarWidget::timeOfX(double x_px) const
 {
-  return center_ns_ + static_cast<std::int64_t>(
-    (x_px - width() * 0.5) * spp_ * 1e9);
+  return offsetTimeNs(center_ns_, x_px - width() * 0.5, spp_);
 }
 
 int TimeBarWidget::laneOf(const std::string & sensor_type) const
@@ -455,8 +454,7 @@ void TimeBarWidget::mouseMoveEvent(QMouseEvent * event)
     // original's combined pan+zoom gesture.
     const double stretch = (dy > 100.0) ? 1.0 + (dy - 100.0) / 3.0 : 1.0;
     spp_ = std::clamp(drag_start_spp_ * stretch, kMinSpp, kMaxSpp);
-    center_ns_ = drag_start_center_ -
-      static_cast<std::int64_t>(dx * spp_ * 1e9);
+    center_ns_ = offsetTimeNs(drag_start_center_, -dx, spp_);
     if (std::abs(dx) > 3.0 || dy > 3.0) {
       drag_moved_ = true;
       user_adjusted_ = true;
@@ -585,7 +583,7 @@ void TimeBarWidget::commitTime()
 
 void TimeBarWidget::pageBy(int direction)
 {
-  center_ns_ += static_cast<std::int64_t>(direction * width() * spp_ * 1e9);
+  center_ns_ = offsetTimeNs(center_ns_, static_cast<double>(direction) * width(), spp_);
   user_adjusted_ = true;
   update();
   emit centerTimeChanged(static_cast<qlonglong>(center_ns_));

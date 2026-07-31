@@ -23,6 +23,7 @@ namespace
 {
 
 using marine_perception_tools::computeTickLadder;
+using marine_perception_tools::offsetTimeNs;
 using marine_perception_tools::TickRow;
 
 constexpr std::int64_t kNsPerS = 1000000000LL;
@@ -120,6 +121,20 @@ TEST(TimeBarModel, DegenerateInputsYieldNoTicks)
   for (const auto & row : computeTickLadder(kMonday, 1.0, 0.0)) {
     EXPECT_TRUE(row.ticks.empty());
   }
+}
+
+TEST(TimeBarModel, OffsetTimeNsIsExactInRangeAndSaturatesBeyond)
+{
+  // Normal interactive spans stay exact.
+  EXPECT_EQ(offsetTimeNs(kMonday, 25.0, 2.0), kMonday + 50 * kNsPerS);
+  EXPECT_EQ(offsetTimeNs(kMonday, -25.0, 2.0), kMonday - 50 * kNsPerS);
+  // A 4096 px page at the kMaxSpp zoom clamp is ~1.1e19 ns — past int64
+  // range; the raw cast was UB. Both directions saturate instead.
+  constexpr std::int64_t kSatNs = static_cast<std::int64_t>(9.2e18);
+  EXPECT_EQ(offsetTimeNs(0, 4096.0, 2.7e6), kSatNs);
+  EXPECT_EQ(offsetTimeNs(0, -4096.0, 2.7e6), -kSatNs);
+  // The addition saturates too, even when the span alone is representable.
+  EXPECT_EQ(offsetTimeNs(kSatNs, 4096.0, 2.7e6), kSatNs);
 }
 
 TEST(TimeBarModel, LabelsAppearOnlyWithRoom)
