@@ -380,3 +380,31 @@ divisions or unguarded narrowing casts remain).
 
 ### False positives
 - (none)
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-31 12:45 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #25 at `966f604`
+**Sources**: 2 (Copilot re-review @ `966f604`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test green 8m48s on `966f604`)
+
+No new inline comments; the one SUPPRESSED comment does not survive
+verification.
+
+### Findings
+- (none)
+
+### False positives
+- (Copilot suppressed) `--warm-cache` allegedly scans the CWD / writes a
+  misleading cache entry on an empty or NULL bag path — every link is
+  already guarded: `bagPaths()` maps a NULL column to `""`
+  (`survey_index_bridge.cpp:178`); `bagIdentity("")` uses
+  `directory_iterator("", ec)`, which errors on the empty path (it is not
+  CWD — that would be ".") and iterates nothing, leaving `size_bytes == 0`;
+  the warm loop's existing `size_bytes == 0` branch then reports the bag
+  as unreadable and `continue`s before any session build, and
+  `saveSessionIndex` runs only after a successful build, so no cache
+  entry can be written for such a row.
