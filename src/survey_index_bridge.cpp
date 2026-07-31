@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -86,8 +87,9 @@ std::vector<IndexedTile> SurveyIndexBridge::indexedTiles() const
     const auto level = sqlite3_column_int64(stmt, 0);
     const auto row_i = sqlite3_column_int64(stmt, 1);
     const auto col_i = sqlite3_column_int64(stmt, 2);
+    constexpr sqlite3_int64 kMaxRowCol = std::numeric_limits<std::uint32_t>::max();
     if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size() ||
-      row_i < 0 || col_i < 0)
+      row_i < 0 || col_i < 0 || row_i > kMaxRowCol || col_i > kMaxRowCol)
     {
       continue;   // out-of-contract row; the schema check already vouched
     }

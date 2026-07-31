@@ -152,15 +152,18 @@ TEST_F(BridgeFixture, IndexedTileBoundsMatchGridIndex)
 
 TEST_F(BridgeFixture, OutOfContractTileRowsAreSkipped)
 {
-  // A corrupt (but readable) index can hold negative row/col or an unknown
-  // level; those rows must be skipped like the level guard already does —
-  // a raw uint32 cast would wrap a negative row to ~4e9 and fabricate a
-  // selectable tile with nonsense bounds.
+  // A corrupt (but readable) index can hold negative or oversized row/col or
+  // an unknown level; those rows must be skipped like the level guard
+  // already does — a raw uint32 cast would wrap a negative row to ~4e9 (or
+  // an over-uint32 row to a small one) and fabricate a selectable tile with
+  // nonsense bounds.
   sqlite3 * db = marine_survey_index::openIndexDb(path_);
   exec(db, "INSERT INTO passes (bag_id, level, tile_row, tile_col, sensor_type,"
     " topic, t_start_ns, t_end_ns, ping_count)"
     " VALUES (1, 14, -3, 100, 'mbes-bathy', '/detections', 1, 2, 1),"
     " (1, 14, 100, -3, 'mbes-bathy', '/detections', 1, 2, 1),"
+    " (1, 14, 5000000000, 100, 'mbes-bathy', '/detections', 1, 2, 1),"
+    " (1, 14, 100, 5000000000, 'mbes-bathy', '/detections', 1, 2, 1),"
     " (1, 99, 100, 100, 'mbes-bathy', '/detections', 1, 2, 1);");
   sqlite3_close(db);
   const marine_perception_tools::SurveyIndexBridge bridge(path_);
