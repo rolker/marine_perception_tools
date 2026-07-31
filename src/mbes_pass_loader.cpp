@@ -12,64 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "mbes_cloud_window.hpp"
+#include "mbes_pass_loader.hpp"
 
-#include <QColor>
-#include <QHeaderView>
-#include <QPixmap>
-#include <QSplitter>
-#include <QStatusBar>
 #include <QString>
-#include <QtConcurrent>
 
+#include <algorithm>
+#include <exception>
 #include <utility>
-#include <vector>
 
 #include "mbes_window_reader.hpp"
+#include "sidescan_geometry.hpp"
 
 namespace marine_perception_tools
 {
 
-MbesCloudWindow::MbesCloudWindow(
-  std::vector<CloudPassInfo> passes, QWidget * parent)
-: QMainWindow(parent), passes_(std::move(passes))
+CloudLoadOutcome load_cloud_passes(
+  const std::vector<CloudPassInfo> & passes, const std::optional<GeoClip> & clip)
 {
-  setWindowTitle(QString("MBES cloud — %1 pass%2")
-    .arg(passes_.size()).arg(passes_.size() == 1 ? "" : "es"));
-
-  auto * splitter = new QSplitter(this);
-  view_ = new PointCloudView(splitter);
-  view_->setColorMode(PointCloudView::ColorMode::Pass);
-  legend_ = new QTreeWidget(splitter);
-  legend_->setHeaderLabels({"Pass", "Soundings"});
-  legend_->setRootIsDecorated(false);
-  legend_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-  splitter->addWidget(view_);
-  splitter->addWidget(legend_);
-  splitter->setStretchFactor(0, 1);
-  splitter->setSizes({900, 340});
-  setCentralWidget(splitter);
-  resize(1240, 800);
-
-  statusBar()->showMessage(
-    QString("Loading %1 pass%2…").arg(passes_.size())
-    .arg(passes_.size() == 1 ? "" : "es"));
-
-  connect(&watcher_, &QFutureWatcher<LoadOutcome>::finished,
-    this, &MbesCloudWindow::onLoaded);
-  const auto snapshot = passes_;   // worker owns its own copy
-  watcher_.setFuture(QtConcurrent::run([snapshot]() {return loadPasses(snapshot);}));
-}
-
-MbesCloudWindow::~MbesCloudWindow()
-{
-  watcher_.waitForFinished();
-}
-
-MbesCloudWindow::LoadOutcome MbesCloudWindow::loadPasses(
-  const std::vector<CloudPassInfo> & passes)
-{
-  LoadOutcome out;
+  CloudLoadOutcome out;
   out.pass_clouds.resize(passes.size());
   out.sounding_counts.assign(passes.size(), 0);
 
@@ -94,9 +54,43 @@ MbesCloudWindow::LoadOutcome MbesCloudWindow::loadPasses(
       continue;
     }
     out.skipped_pings += res.skipped_pings;
+
+    // Contact clip: drop soundings outside the margin, in THIS bag's own
+    // world frame (geo point -> ECEF -> inverse earth anchor). Without a geo
+    // anchor the pass cannot be clipped — keep it whole, and say so.
+    if (clip && !res.world_soundings.empty()) {
+      if (res.has_geo) {
+        double ex = 0.0;
+        double ey = 0.0;
+        double ez = 0.0;
+        geodetic_to_ecef(clip->lat, clip->lon, clip->alt, ex, ey, ez);
+        const auto & t = res.earth_from_world.transform;
+        double cx = 0.0;
+        double cy = 0.0;
+        double cz = 0.0;
+        rotate_by_quat(
+          -t.rotation.x, -t.rotation.y, -t.rotation.z, t.rotation.w,
+          ex - t.translation.x, ey - t.translation.y, ez - t.translation.z,
+          cx, cy, cz);
+        const double m2 = clip->margin_m * clip->margin_m;
+        res.world_soundings.erase(
+          std::remove_if(
+            res.world_soundings.begin(), res.world_soundings.end(),
+            [&](const MbesSounding & s) {
+              const double dx = s.x - cx;
+              const double dy = s.y - cy;
+              return dx * dx + dy * dy > m2;
+            }),
+          res.world_soundings.end());
+      } else {
+        out.notes << QString("%1: no geo anchor — not clipped")
+          .arg(QString::fromStdString(pass.label));
+      }
+    }
     if (res.world_soundings.empty()) {
-      out.notes << QString("%1: no soundings in window")
-        .arg(QString::fromStdString(pass.label));
+      out.notes << QString("%1: no soundings %2")
+        .arg(QString::fromStdString(pass.label))
+        .arg(clip ? "within the contact margin" : "in window");
       continue;
     }
 
@@ -134,47 +128,6 @@ MbesCloudWindow::LoadOutcome MbesCloudWindow::loadPasses(
     out.sounding_counts[i] = static_cast<int>(cloud.size());
   }
   return out;
-}
-
-void MbesCloudWindow::onLoaded()
-{
-  const LoadOutcome out = watcher_.result();
-
-  view_->resetView();
-  view_->setMultiPassPoints(out.pass_clouds);
-
-  legend_->clear();
-  int total = 0;
-  for (std::size_t i = 0; i < passes_.size(); ++i) {
-    auto * item = new QTreeWidgetItem(legend_, {
-        QString::fromStdString(passes_[i].label),
-        QString::number(out.sounding_counts[i])});
-    QPixmap swatch(12, 12);
-    float r = 1.0f;
-    float g = 1.0f;
-    float b = 1.0f;
-    pass_color(static_cast<int>(i), r, g, b);
-    swatch.fill(QColor::fromRgbF(r, g, b));
-    item->setIcon(0, swatch);
-    if (out.sounding_counts[i] == 0) {
-      item->setDisabled(true);
-    }
-    total += out.sounding_counts[i];
-  }
-
-  QString message = QString("%1 soundings from %2 pass%3")
-    .arg(total).arg(passes_.size()).arg(passes_.size() == 1 ? "" : "es");
-  if (out.skipped_passes > 0) {
-    message += QString(", %1 pass%2 skipped")
-      .arg(out.skipped_passes).arg(out.skipped_passes == 1 ? "" : "es");
-  }
-  if (out.skipped_pings > 0) {
-    message += QString(", %1 pings without TF").arg(out.skipped_pings);
-  }
-  if (!out.notes.isEmpty()) {
-    message += " — " + out.notes.join("; ");
-  }
-  statusBar()->showMessage(message);
 }
 
 }  // namespace marine_perception_tools

@@ -94,6 +94,11 @@ public:
   void resetView();
 
   void setColorMode(ColorMode mode);
+
+  // 1 = full density; N > 1 = the last upload exceeded the render budget and
+  // shows every Nth sounding (see set_points_impl) — surface it, never cap
+  // silently.
+  int decimationStride() const {return decimation_stride_;}
   void setZExaggeration(float z);          // >= 1; stretches depth
   void setColorMap(int palette_index);     // marine_colormap palette index
   void setPointSize(float px);             // GL point size in pixels (>= 1)
@@ -178,6 +183,7 @@ private:
   float cursor_x_ = 0.0f;
   float cursor_y_ = 0.0f;
   ColorMode mode_ = ColorMode::Depth;
+  int decimation_stride_ = 1;
   int palette_index_ = 0;
   QPoint last_mouse_;
 };

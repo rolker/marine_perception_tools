@@ -209,6 +209,11 @@ public:
   using ProgressFn = std::function<void(double resolved_distance_m, bool complete)>;
   void buildIndex(const ProgressFn & progress = {});
 
+  // Install a complete pre-built index (the bag-index cache, #24): published
+  // as the snapshot so every reader works immediately; buildIndex is skipped.
+  // The index must be for THIS bag — the cache layer verifies identity.
+  void adoptIndex(SessionIndex index);
+
   // The current immutable index snapshot (lock-free for the caller once held). Null
   // until buildIndex publishes its first snapshot.
   std::shared_ptr<const SessionIndex> snapshot() const;

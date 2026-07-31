@@ -600,6 +600,14 @@ void SidescanBagSession::publishSnapshot(bool complete)
   snap_ = std::move(idx);
 }
 
+void SidescanBagSession::adoptIndex(SessionIndex index)
+{
+  index.complete = true;
+  auto idx = std::make_shared<const SessionIndex>(std::move(index));
+  std::lock_guard<std::mutex> lock(snap_mutex_);
+  snap_ = std::move(idx);
+}
+
 std::shared_ptr<const SessionIndex> SidescanBagSession::snapshot() const
 {
   std::lock_guard<std::mutex> lock(snap_mutex_);

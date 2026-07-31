@@ -108,6 +108,7 @@ set(SIDESCAN_CORE_DEPS
 )
 add_library(sidescan_core
   src/sidescan_bag_session.cpp
+  src/session_index_io.cpp
   src/coverage_raster.cpp
   src/mbes_window_reader.cpp
 )
@@ -118,7 +119,6 @@ ament_target_dependencies(sidescan_core ${SIDESCAN_CORE_DEPS})
 add_executable(sidescan_probe src/sidescan_probe.cpp)
 target_link_libraries(sidescan_probe sidescan_core)
 
-# Qt app: offline georeferenced sidescan viewer + target tracker (issue #7).
 # Headless survey-index bridge (#19): map click -> pass list, reusing the
 # marine_survey_index query library. Qt-free so it unit-tests without a display.
 add_library(survey_index_bridge src/survey_index_bridge.cpp)
@@ -128,16 +128,18 @@ target_link_libraries(survey_index_bridge SQLite::SQLite3)
 # transitively via marine_survey_index; depend on it explicitly.
 ament_target_dependencies(survey_index_bridge marine_autonomy marine_survey_index)
 
-add_executable(sidescan_target_viewer
-  src/sidescan_viewer_main.cpp
+# Qt app: the survey explorer (#24; grew out of the offline sidescan viewer /
+# target tracker, issues #7/#8) — bag scrub viewer + survey-index explorer in
+# one window.
+add_executable(survey_explorer
+  src/survey_explorer_main.cpp
   src/sidescan_viewer_window.cpp
   src/sidescan_canvas.cpp
   src/point_cloud_view.cpp
-  src/survey_overview_canvas.cpp
-  src/survey_overview_window.cpp
-  src/mbes_cloud_window.cpp
+  src/mbes_pass_loader.cpp
+  src/time_bar_widget.cpp
 )
-target_link_libraries(sidescan_target_viewer
+target_link_libraries(survey_explorer
   sidescan_core
   survey_index_bridge
   marine_contacts::marine_contacts
@@ -145,10 +147,13 @@ target_link_libraries(sidescan_target_viewer
   Qt${QT_VERSION_MAJOR}::Concurrent
   Qt${QT_VERSION_MAJOR}::Gui
   Qt${QT_VERSION_MAJOR}::OpenGL)
-ament_target_dependencies(sidescan_target_viewer
+ament_target_dependencies(survey_explorer
   marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
 
-install(TARGETS sea_surface_tuner sidescan_probe sidescan_target_viewer
+# Back-compat shim (#22): the old executable name execs the explorer.
+add_executable(sidescan_target_viewer src/sidescan_target_viewer_shim.cpp)
+
+install(TARGETS sea_surface_tuner sidescan_probe survey_explorer sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -194,9 +199,30 @@ if(BUILD_TESTING)
   target_include_directories(test_survey_projection PRIVATE src)
 
   # Survey-index bridge: click -> pass rows against a file-backed fixture DB
-  # written through the marine_survey_index schema (#19).
+  # written through the marine_survey_index schema (#19); tile-selection and
+  # nav-track accessors (#24).
   ament_add_gtest(test_survey_index_bridge test/test_survey_index_bridge.cpp)
   target_link_libraries(test_survey_index_bridge survey_index_bridge SQLite::SQLite3)
+
+  # Pure tile-selection math (tile_selection.hpp, #24) — header-only.
+  ament_add_gtest(test_tile_selection test/test_tile_selection.cpp)
+  target_include_directories(test_tile_selection PRIVATE src)
+
+  # Pure multi-resolution tick ladder for the GeoZui-style time bar
+  # (time_bar_model.hpp, #24) — header-only.
+  ament_add_gtest(test_time_bar_model test/test_time_bar_model.cpp)
+  target_include_directories(test_time_bar_model PRIVATE src)
+
+  # Pure time -> nav-track fix interpolation for the time-bar position arrow
+  # (nav_track_lookup.hpp, #24) — header-only + the query lib's NavPoint.
+  ament_add_gtest(test_nav_track_lookup test/test_nav_track_lookup.cpp)
+  target_include_directories(test_nav_track_lookup PRIVATE src)
+  ament_target_dependencies(test_nav_track_lookup marine_survey_index)
+
+  # Bag-index cache serialization (#24): round-trip + identity/version/
+  # truncation invalidation — links sidescan_core (SessionIndex).
+  ament_add_gtest(test_session_index_io test/test_session_index_io.cpp)
+  target_link_libraries(test_session_index_io sidescan_core)
 
   # Multi-pass windowed-read pure parts (#21): cross-bag frame reprojection +
   # the shared tf_lift helpers. No bag I/O; links sidescan_core.
@@ -216,6 +242,49 @@ if(BUILD_TESTING)
   target_link_libraries(test_point_cloud_view
     Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::OpenGL)
   set_tests_properties(test_point_cloud_view PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;LIBGL_ALWAYS_SOFTWARE=1")
+
+  # Pure map-ENU -> geo anchor probe (map_geo_anchor.hpp, #24) — header-only.
+  ament_add_gtest(test_map_geo_anchor test/test_map_geo_anchor.cpp)
+  target_include_directories(test_map_geo_anchor PRIVATE src)
+
+  # Robust basemap contrast (basemap_contrast.hpp, #24) — header-only. Pins
+  # the desk-verify bug: store outlier cells must not own the colour scale.
+  ament_add_gtest(test_basemap_contrast test/test_basemap_contrast.cpp)
+  target_include_directories(test_basemap_contrast PRIVATE src)
+
+  # Multi-pass cloud loader (#24): error paths (missing bag, empty input) —
+  # the happy path needs a real bag and is covered by test_mbes_window_reader's
+  # units plus the window smoke below. QtCore only (QStringList notes).
+  ament_add_gtest(test_mbes_pass_loader
+    test/test_mbes_pass_loader.cpp
+    src/mbes_pass_loader.cpp)
+  target_include_directories(test_mbes_pass_loader PRIVATE src)
+  target_link_libraries(test_mbes_pass_loader sidescan_core Qt${QT_VERSION_MAJOR}::Core)
+
+  # Survey-explorer window smoke (#24; offscreen GL, self-skips headless):
+  # --index path constructs against a fixture DB, loads tiles + track, and
+  # survives a programmatic tile selection driving the cloud loader.
+  ament_add_gtest(test_survey_explorer_window
+    test/test_survey_explorer_window.cpp
+    src/sidescan_viewer_window.cpp
+    src/sidescan_canvas.cpp
+    src/point_cloud_view.cpp
+    src/mbes_pass_loader.cpp
+    src/time_bar_widget.cpp)
+  target_include_directories(test_survey_explorer_window PRIVATE src)
+  ament_target_dependencies(test_survey_explorer_window
+    marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
+  target_link_libraries(test_survey_explorer_window
+    sidescan_core
+    survey_index_bridge
+    marine_contacts::marine_contacts
+    SQLite::SQLite3
+    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Concurrent
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::OpenGL)
+  set_tests_properties(test_survey_explorer_window PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;LIBGL_ALWAYS_SOFTWARE=1")
 
   find_package(ament_lint_auto REQUIRED)
