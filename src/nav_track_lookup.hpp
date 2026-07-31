@@ -49,10 +49,11 @@ inline std::optional<TrackFix> fixAtTime(
 {
   auto seg_begin = track.begin();
   while (seg_begin != track.end()) {
-    auto seg_end = seg_begin;
-    while (seg_end != track.end() && seg_end->bag_id == seg_begin->bag_id) {
-      ++seg_end;
-    }
+    const auto seg_end = std::upper_bound(
+      seg_begin, track.end(), seg_begin->bag_id,
+      [](std::int64_t id, const marine_survey_index::NavPoint & p) {
+        return id < p.bag_id;
+      });
     if (t_ns >= seg_begin->t_ns && t_ns <= (seg_end - 1)->t_ns) {
       // In this bag: bracket by time (the segment is time-ordered).
       const auto after = std::lower_bound(
