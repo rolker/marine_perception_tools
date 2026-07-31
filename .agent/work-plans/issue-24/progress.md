@@ -408,3 +408,34 @@ verification.
   as unreadable and `continue`s before any session build, and
   `saveSessionIndex` runs only after a successful build, so no cache
   entry can be written for such a row.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-31 13:25 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #25 at `291c903`
+**Sources**: 2 (Copilot re-review @ `291c903`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test green 8m22s on `291c903`)
+
+Round 5: 1 new visible comment + 2 suppressed; one visible comment is
+the settled R1 clearPasses thread re-anchored (documented behavior, not
+re-triaged). The rest are valid second-order members of the saturation
+family — subtractions that overflow precisely because `offsetTimeNs()`
+now makes extreme values representable.
+
+### Findings
+- [x] (suggestion, Copilot) `xOfTime()` subtracts `t_ns - center_ns_` in
+  int64 before the double cast; overflows when center is saturated —
+  per-operand double casts — `src/time_bar_widget.cpp:215`
+- [x] (suggestion, Copilot suppressed) same pattern in `thumbSpan()`
+  (`left_ns/right_ns - extent_t0_`) — `src/time_bar_widget.cpp:270`
+- [x] (suggestion, Copilot suppressed) `indexedTiles()` uint32 `row + 1`
+  wraps at UINT32_MAX, aliasing a corrupt row onto tile 0's real
+  location; bounds arithmetic now in double — `src/survey_index_bridge.cpp:107`
+
+### False positives
+- (Copilot re-anchor) clearPasses() extent reset — R1 finding, resolved
+  in the 2026-07-27 round by documenting the reset as intended API
+  behavior (callers re-apply extent; exitSelectionCloud does).
