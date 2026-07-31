@@ -100,11 +100,15 @@ std::vector<IndexedTile> SurveyIndexBridge::indexedTiles() const
     tile.level = static_cast<std::uint8_t>(level);
     tile.row = row;
     tile.col = col;
-    tile.south = std::clamp(-96.0 + row * spec.grid_angular_span, -90.0, 90.0);
-    tile.north = std::clamp(-96.0 + (row + 1) * spec.grid_angular_span, -90.0, 90.0);
+    // Bounds arithmetic in double: a uint32 `row + 1` wraps at UINT32_MAX,
+    // which would alias a corrupt row's tile onto tile 0's real location.
+    const double row_d = static_cast<double>(row);
+    const double col_d = static_cast<double>(col);
+    tile.south = std::clamp(-96.0 + row_d * spec.grid_angular_span, -90.0, 90.0);
+    tile.north = std::clamp(-96.0 + (row_d + 1.0) * spec.grid_angular_span, -90.0, 90.0);
     const double lon_span = spec.gridLongitudinalSpan(row);
-    tile.west = -180.0 + col * lon_span;
-    tile.east = -180.0 + (col + 1) * lon_span;
+    tile.west = -180.0 + col_d * lon_span;
+    tile.east = -180.0 + (col_d + 1.0) * lon_span;
     tiles.push_back(tile);
   }
   sqlite3_finalize(stmt);
