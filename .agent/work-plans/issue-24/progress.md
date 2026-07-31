@@ -439,3 +439,27 @@ now makes extreme values representable.
 - (Copilot re-anchor) clearPasses() extent reset — R1 finding, resolved
   in the 2026-07-27 round by documenting the reset as intended API
   behavior (callers re-apply extent; exitSelectionCloud does).
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-31 13:55 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #25 at `9848ac9`
+**Sources**: 2 (Copilot re-review @ `9848ac9`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test green 10m2s on `9848ac9`)
+
+Round 6: no visible comments; both suppressed comments valid and fixed.
+
+### Findings
+- [x] (suggestion, Copilot suppressed) `bagIdentity()` added
+  `file_size(fec)` unguarded; the error-path -1 sentinel poisons
+  `size_bytes`, so the cache identity never validates and every warm run
+  re-indexes — entry skipped on metadata error — `src/session_index_io.cpp:161`
+- [x] (suggestion, Copilot suppressed) `fixAtTime()` linear segment walk
+  made live tape-drag lookups O(total nav points); segment ends now via
+  `upper_bound` on bag_id — `src/nav_track_lookup.hpp:52`
+
+### False positives
+- (none)
