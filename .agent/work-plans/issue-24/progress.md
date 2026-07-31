@@ -293,10 +293,34 @@ Specialists: Static Analysis (cppcheck on `session_index_io.cpp`, the only code-
 **CI**: all-pass (build-and-test green on `0e8fb0d`)
 
 ### Findings
-- [ ] (suggestion, Copilot R2) `pageBy()` computes the page delta as `direction * width() * spp_ * 1e9` in double and casts to `int64_t`; at `kMaxSpp` (2.7e6, reachable via zoom-out clamp at line 457) with a ~4K-wide widget the product (~1.1e19) exceeds `INT64_MAX` → out-of-range float→int cast is UB. Fix: compute delta in double and clamp before casting (shared helper) — `src/time_bar_widget.cpp:588`
-- [ ] (suggestion, local sweep — same root cause) identical unclamped `double → int64_t` ns casts in `timeOfX()` (`x_px - width()/2` up to ±width) and the drag-pan branch (`dx` up to ±width); fix with the same clamped helper — `src/time_bar_widget.cpp:210`, `src/time_bar_widget.cpp:459`
-- [ ] (suggestion, Copilot R3) `indexedTiles()` casts `tile_row`/`tile_col` straight to `uint32_t`; a negative out-of-contract row wraps to ~4e9 and yields nonsense bounds/keys. `level` is already guarded — guard `row/col < 0 → continue` before converting, consistent with it — `src/survey_index_bridge.cpp:87-88`
-- [ ] (suggestion, Copilot R3) `computeTickLadder()` uses truncating `/` and signed `%` on `left_ns`; for pre-epoch left edges (reachable: full zoom-out at `kMaxSpp` puts the left edge ~171 years before center, or plain leftward pan — center/pan are unclamped) `frac` goes negative and `whole_s` is off by one → misplaced ticks/labels. Normalize the remainder into [0, 1e9) — `src/time_bar_model.hpp:150-151`
+- [x] (suggestion, Copilot R2) `pageBy()` computes the page delta as `direction * width() * spp_ * 1e9` in double and casts to `int64_t`; at `kMaxSpp` (2.7e6, reachable via zoom-out clamp at line 457) with a ~4K-wide widget the product (~1.1e19) exceeds `INT64_MAX` → out-of-range float→int cast is UB. Fix: compute delta in double and clamp before casting (shared helper) — `src/time_bar_widget.cpp:588`
+- [x] (suggestion, local sweep — same root cause) identical unclamped `double → int64_t` ns casts in `timeOfX()` (`x_px - width()/2` up to ±width) and the drag-pan branch (`dx` up to ±width); fix with the same clamped helper — `src/time_bar_widget.cpp:210`, `src/time_bar_widget.cpp:459`
+- [x] (suggestion, Copilot R3) `indexedTiles()` casts `tile_row`/`tile_col` straight to `uint32_t`; a negative out-of-contract row wraps to ~4e9 and yields nonsense bounds/keys. `level` is already guarded — guard `row/col < 0 → continue` before converting, consistent with it — `src/survey_index_bridge.cpp:87-88`
+- [x] (suggestion, Copilot R3) `computeTickLadder()` uses truncating `/` and signed `%` on `left_ns`; for pre-epoch left edges (reachable: full zoom-out at `kMaxSpp` puts the left edge ~171 years before center, or plain leftward pan — center/pan are unclamped) `frac` goes negative and `whole_s` is off by one → misplaced ticks/labels. Normalize the remainder into [0, 1e9) — `src/time_bar_model.hpp:150-151`
 
 ### False positives
 - (none)
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-31 11:32 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**Branch**: feature/issue-24 at `dd7b797`
+
+All four findings from the 2026-07-31 Integrated Review addressed, one
+atomic commit each:
+
+- `785503b` — saturating `offsetTimeNs()` in `time_bar_model.hpp` replaces
+  the raw `double -> int64` ns casts in `pageBy()`, `timeOfX()`, and the
+  drag-pan branch (covers the additive overflow as well as the cast UB);
+  unit test pins exactness in range + saturation both directions.
+- `cc730b8` — `computeTickLadder()` floor-divides `left_ns` so pre-epoch
+  window edges keep tick phase; test pins the minute tick at 0.5 px for a
+  left edge 0.5 s before the epoch.
+- `dd7b797` — `indexedTiles()` skips rows with negative `tile_row`/
+  `tile_col` (matching the existing level guard); fixture test injects
+  negative row, negative col, and unknown-level rows.
+
+Verified: package rebuild clean; 434 tests, 0 failures (62 skipped =
+display-gated); cpplint/uncrustify/copyright/cppcheck/lint_cmake all clean.
