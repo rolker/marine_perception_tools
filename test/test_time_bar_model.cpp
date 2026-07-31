@@ -107,6 +107,7 @@ TEST(TimeBarModel, TickHeightGrowsWithSpacing)
   const auto * sec = rowFor(rows, 1.0);      // 1 px apart -> hidden? 1 < 3 hidden!
   const auto * minutes = rowFor(rows, 60.0);   // 60 px apart
   const auto * hours = rowFor(rows, 3600.0);   // 3600 px apart
+  ASSERT_NE(sec, nullptr);
   ASSERT_NE(minutes, nullptr);
   ASSERT_NE(hours, nullptr);
   EXPECT_TRUE(sec->ticks.empty());   // 1 px spacing is below the 3 px floor
