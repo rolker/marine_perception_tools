@@ -155,6 +155,15 @@ void TimeBarWidget::clearPasses()
   hover_bar_ = -1;
   extent_t0_ = extent_t1_ = 0;
   user_adjusted_ = false;
+  // Return to a fully inert state: a stale fit_pending_ would re-fit the
+  // empty extent every paint, and an in-flight animation or page repeat
+  // would keep emitting times aimed at the dataset just cleared.
+  fit_pending_ = false;
+  anim_timer_.stop();
+  page_timer_.stop();
+  dragging_tape_ = false;
+  dragging_thumb_ = false;
+  drag_moved_ = false;
   update();
 }
 
