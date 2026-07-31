@@ -486,3 +486,27 @@ fixed.
 
 ### False positives
 - (none)
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-31 14:50 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #25 at `d2725ab`
+**Sources**: 2 (Copilot re-review @ `d2725ab`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test green 8m47s on `d2725ab`)
+
+Round 8: no visible comments; one suppressed test-hygiene nit
+(pre-existing), fixed as a one-liner. Standing cut applied going
+forward: further defer-grade suppressed nits are recorded here rather
+than iterated — 8 rounds have moved from UB through perf to test
+hygiene, the severity floor for blocking is passed.
+
+### Findings
+- [x] (suggestion, Copilot suppressed) `TickHeightGrowsWithSpacing`
+  dereferenced `rowFor()` result without `ASSERT_NE`; crash instead of
+  clean failure if the ladder ever changes — `test/test_time_bar_model.cpp:110`
+
+### False positives
+- (none)
