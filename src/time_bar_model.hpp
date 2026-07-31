@@ -132,15 +132,21 @@ inline TickRow makeRow(
 
 }  // namespace time_bar_detail
 
+// A nanosecond count computed in double, saturated just inside int64 range —
+// an out-of-range float->int cast is UB, not a clamp.
+inline std::int64_t saturateNs(double t_ns)
+{
+  constexpr double kMaxNs = 9.2e18;   // inside int64 range after the cast
+  return static_cast<std::int64_t>(std::clamp(t_ns, -kMaxNs, kMaxNs));
+}
+
 // `base_ns` shifted by a pixel span at `spp` seconds per pixel. At kMaxSpp a
 // span the width of a large window is ~1e19 ns — past int64 range — so both
 // the raw float->int cast and the subsequent addition would be UB; do the sum
-// in double and saturate just inside the representable range instead.
+// in double and saturate instead.
 inline std::int64_t offsetTimeNs(std::int64_t base_ns, double span_px, double spp)
 {
-  constexpr double kMaxNs = 9.2e18;   // inside int64 range after the cast
-  const double t = static_cast<double>(base_ns) + span_px * spp * 1e9;
-  return static_cast<std::int64_t>(std::clamp(t, -kMaxNs, kMaxNs));
+  return saturateNs(static_cast<double>(base_ns) + span_px * spp * 1e9);
 }
 
 // The full ladder for a window whose LEFT edge is `left_ns` (UNIX ns, UTC)

@@ -56,7 +56,13 @@ const char * kPreferredLanes[] = {"mbes-bathy", "sidescan-port", "sidescan-starb
 
 QString isoUtc(std::int64_t t_ns)
 {
-  return QDateTime::fromMSecsSinceEpoch(t_ns / 1000000LL, QTimeZone::utc())
+  // Floor-divide: truncation rounds pre-epoch times toward zero, shifting
+  // the displayed second when within 1 ms past a second boundary.
+  std::int64_t ms = t_ns / 1000000LL;
+  if (t_ns % 1000000LL < 0) {
+    --ms;
+  }
+  return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::utc())
          .toString("yyyy-MM-dd HH:mm:ss");
 }
 
@@ -91,8 +97,12 @@ TimeBarWidget::TimeBarWidget(QWidget * parent)
         commitTime();
         return;
       }
-      center_ns_ = anim_from_ns_ + static_cast<std::int64_t>(
-        static_cast<double>(anim_to_ns_ - anim_from_ns_) * anim_progress_);
+      // All in double: from/to can sit at opposite saturation extremes,
+      // where even the int64 difference overflows.
+      center_ns_ = saturateNs(
+        static_cast<double>(anim_from_ns_) +
+        (static_cast<double>(anim_to_ns_) - static_cast<double>(anim_from_ns_)) *
+        anim_progress_);
       update();
       emit centerTimeChanged(static_cast<qlonglong>(center_ns_));
     });
