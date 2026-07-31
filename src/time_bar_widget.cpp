@@ -211,8 +211,11 @@ QRectF TimeBarWidget::scrollRect() const
 
 double TimeBarWidget::xOfTime(std::int64_t t_ns) const
 {
+  // Subtract in double: center_ns_ can sit at a saturation extreme where
+  // the int64 difference from a real data time overflows.
   return width() * 0.5 +
-         static_cast<double>(t_ns - center_ns_) / 1e9 / spp_;
+         (static_cast<double>(t_ns) - static_cast<double>(center_ns_)) /
+         1e9 / spp_;
 }
 
 std::int64_t TimeBarWidget::timeOfX(double x_px) const
@@ -266,10 +269,12 @@ std::pair<double, double> TimeBarWidget::thumbSpan() const
   const double dur = static_cast<double>(extent_t1_ - extent_t0_);
   const std::int64_t left_ns = timeOfX(0.0);
   const std::int64_t right_ns = timeOfX(width());
+  // Same double-subtraction rule: the window edges saturate under extreme
+  // pan/zoom while the extent stays at real data times.
   double x0 = sr.left() + sr.width() *
-    static_cast<double>(left_ns - extent_t0_) / dur;
+    (static_cast<double>(left_ns) - static_cast<double>(extent_t0_)) / dur;
   double x1 = sr.left() + sr.width() *
-    static_cast<double>(right_ns - extent_t0_) / dur;
+    (static_cast<double>(right_ns) - static_cast<double>(extent_t0_)) / dur;
   if (x1 - x0 < kMinThumbPx) {
     const double pad = (kMinThumbPx - (x1 - x0)) / 2.0;
     x0 -= pad;
