@@ -463,3 +463,26 @@ Round 6: no visible comments; both suppressed comments valid and fixed.
 
 ### False positives
 - (none)
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-31 14:25 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #25 at `f22b8ae`
+**Sources**: 2 (Copilot re-review @ `f22b8ae`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test green 8m46s on `f22b8ae`)
+
+Round 7: no visible comments; the one suppressed comment is valid and
+fixed.
+
+### Findings
+- [x] (suggestion, Copilot suppressed) `clearPasses()` left
+  `fit_pending_`, the anim/page timers, and drag flags live — stale
+  re-fit every paint and signals aimed at the cleared dataset (reachable:
+  change tile selection right after double-clicking a pass); now stops
+  timers and resets interaction state — `src/time_bar_widget.cpp:151`
+
+### False positives
+- (none)
