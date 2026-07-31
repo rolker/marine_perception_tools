@@ -158,7 +158,11 @@ BagIdentity bagIdentity(const std::string & bag_uri)
     if (!entry.is_regular_file(fec)) {
       continue;
     }
-    id.size_bytes += entry.file_size(fec);
+    const auto size = entry.file_size(fec);
+    if (fec) {
+      continue;   // metadata race/error: -1 sentinel would poison the identity
+    }
+    id.size_bytes += size;
     const auto mtime = entry.last_write_time(fec);
     if (!fec) {
       const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
