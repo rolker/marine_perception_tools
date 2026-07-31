@@ -467,8 +467,8 @@ void TimeBarWidget::mouseMoveEvent(QMouseEvent * event)
     const QRectF sr = scrollRect();
     const double per_px = static_cast<double>(extent_t1_ - extent_t0_) /
       std::max(1.0, sr.width());
-    center_ns_ = thumb_start_center_ + static_cast<std::int64_t>(
-      (pos.x() - thumb_grab_x_) * per_px);
+    center_ns_ = offsetTimeNs(
+      thumb_start_center_, pos.x() - thumb_grab_x_, per_px / 1e9);
     user_adjusted_ = true;
     update();
     emit centerTimeChanged(static_cast<qlonglong>(center_ns_));

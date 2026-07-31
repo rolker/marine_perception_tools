@@ -324,3 +324,28 @@ atomic commit each:
 
 Verified: package rebuild clean; 434 tests, 0 failures (62 skipped =
 display-gated); cpplint/uncrustify/copyright/cppcheck/lint_cmake all clean.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-31 11:58 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #25 at `50e4370`
+**Sources**: 2 (Copilot re-review @ `50e4370`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (build-and-test green 9m17s on `50e4370`)
+
+Copilot's re-review generated no new comments; its one SUPPRESSED
+(low-confidence) comment is a valid catch — the fourth member of the
+overflow family fixed in `785503b`, missed by the local sweep because it
+multiplies by a precomputed ns/px factor rather than `spp_ * 1e9`.
+
+### Findings
+- [x] (suggestion, Copilot suppressed) scrollbar-thumb drag computes
+  `center_ns_` via an unbounded `double -> int64` cast
+  (`thumb_start_center_ + (dx_px) * per_px`); routed through
+  `offsetTimeNs()` like the other three interactions — `src/time_bar_widget.cpp:470`
+
+### False positives
+- (none; the two inline comments at this head are the previously fixed
+  R1/R2 threads re-anchored by GitHub, not new findings)
