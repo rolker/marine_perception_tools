@@ -132,6 +132,10 @@ struct DrapeTicket
 {
   std::uint64_t generation = 0;
   SidescanDrape drape;
+  // The terrain the drape marched on: the CUBE surface extended to the
+  // pass's swath, holes filled / edges extrapolated (uncertainty NaN on
+  // interpolated nodes — never presented as bathymetry).
+  CubeSurface terrain;
   QStringList notes;
   qint64 elapsed_ms = 0;
 };
@@ -413,6 +417,7 @@ private:
   QComboBox * cube_drape_combo_ = nullptr;
   std::vector<DrapePassEntry> drape_passes_;
   SidescanDrape cube_drape_;
+  CubeSurface cube_drape_terrain_;   // the extended terrain the drape rode
   QFutureWatcher<DrapeTicket> drape_watcher_;
   std::uint64_t drape_gen_ = 0;
   std::string cube_ref_bag_;

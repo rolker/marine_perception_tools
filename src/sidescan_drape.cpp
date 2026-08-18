@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "sidescan_geometry.hpp"
@@ -72,9 +73,11 @@ inline bool surfaceZNear(
 // `half_width_m`: half the along-track strip this ping paints — the ping's
 // share of the pass footprint (half the ping-to-ping spacing), so
 // consecutive pings tile the grid without grey gaps between their rays.
+// `ping_score` (0..1] is the ping's straightness quality; the per-cell
+// score is ping_score x range-closeness, higher wins.
 void drapePing(
   const CubeSurface & surface, const WindowPing & ping, double half_width_m,
-  SidescanDrape & out)
+  double ping_score, SidescanDrape & out)
 {
   const PingGeometry & g = ping.geometry;
   if (g.metres_per_sample <= 0.0 || g.lateral_sign == 0 ||
@@ -170,8 +173,13 @@ void drapePing(
       continue;   // beyond the recording (or inside the pre-gate)
     }
     const float amplitude = ping.amplitudes[static_cast<std::size_t>(sample_i)];
-    // Nearest sample, no averaging; the smaller slant range wins a conflict
-    // (better across-track resolution near nadir).
+    // Nearest sample, no averaging; the QUALITY score decides conflicts:
+    // straightness x range-closeness, so a straight-running near sample
+    // beats a mid-turn or far-edge one (the composite's "better pixels
+    // through" rule; single-pass conflicts reduce to nearer-wins).
+    const double range_score =
+      std::max(0.05, 1.0 - slant / std::max(1e-6, max_slant));
+    const float score = static_cast<float>(ping_score * range_score);
     for (const double o : offsets) {
       const auto cell = cellAt(surface, px + head_x * o, py + head_y * o);
       if (cell < 0 ||
@@ -180,9 +188,9 @@ void drapePing(
         continue;
       }
       const auto ci = static_cast<std::size_t>(cell);
-      if (!std::isfinite(out.amplitude[ci]) || slant < out.painted_slant[ci]) {
+      if (!std::isfinite(out.amplitude[ci]) || score > out.painted_score[ci]) {
         out.amplitude[ci] = amplitude;
-        out.painted_slant[ci] = static_cast<float>(slant);
+        out.painted_score[ci] = score;
         out.shadow[ci] = 0;
       }
     }
@@ -191,6 +199,162 @@ void drapePing(
 }
 
 }  // namespace
+
+CubeSurface extend_surface_for_drape(
+  const CubeSurface & surface, const std::vector<WindowPing> & pings,
+  std::uint64_t max_nodes, std::string & note)
+{
+  if (!surface.ok()) {
+    return surface;
+  }
+  // Desired bounds: the old grid plus every usable ping's across-track
+  // reach (sensor -> outer endpoint, with a small along-track margin).
+  double min_x = surface.origin_x;
+  double min_y = surface.origin_y;
+  double max_x = surface.origin_x + (surface.nx - 1) * surface.cell_m;
+  double max_y = surface.origin_y + (surface.ny - 1) * surface.cell_m;
+  const double margin = 2.0;
+  bool any = false;
+  for (const auto & p : pings) {
+    const auto & g = p.geometry;
+    if (g.metres_per_sample <= 0.0 || g.lateral_sign == 0 ||
+      p.amplitudes.empty())
+    {
+      continue;
+    }
+    const double reach = slant_range_at(
+      p.amplitudes.size() - 1, g.sample0, g.metres_per_sample);
+    const double ex = g.sensor_x + g.lateral_sign * -std::sin(g.yaw) * reach;
+    const double ey = g.sensor_y + g.lateral_sign * std::cos(g.yaw) * reach;
+    min_x = std::min({min_x, g.sensor_x - margin, ex - margin});
+    max_x = std::max({max_x, g.sensor_x + margin, ex + margin});
+    min_y = std::min({min_y, g.sensor_y - margin, ey - margin});
+    max_y = std::max({max_y, g.sensor_y + margin, ey + margin});
+    any = true;
+  }
+  if (!any) {
+    return surface;
+  }
+
+  // Grow in WHOLE cells so old and new node lattices align exactly.
+  auto cellsBelow = [&](double lo, double origin) {
+      return std::max<std::ptrdiff_t>(
+        0, static_cast<std::ptrdiff_t>(std::ceil((origin - lo) / surface.cell_m)));
+    };
+  std::ptrdiff_t grow_left = cellsBelow(min_x, surface.origin_x);
+  std::ptrdiff_t grow_down = cellsBelow(min_y, surface.origin_y);
+  std::ptrdiff_t grow_right = std::max<std::ptrdiff_t>(
+    0, static_cast<std::ptrdiff_t>(std::ceil(
+      (max_x - (surface.origin_x + (surface.nx - 1) * surface.cell_m)) /
+      surface.cell_m)));
+  std::ptrdiff_t grow_up = std::max<std::ptrdiff_t>(
+    0, static_cast<std::ptrdiff_t>(std::ceil(
+      (max_y - (surface.origin_y + (surface.ny - 1) * surface.cell_m)) /
+      surface.cell_m)));
+
+  // The operator's grid guard caps the growth: shrink all sides by the same
+  // factor until the node count fits, and say so.
+  for (int guard = 0; guard < 64; ++guard) {
+    const auto nx = static_cast<std::uint64_t>(surface.nx) + grow_left + grow_right;
+    const auto ny = static_cast<std::uint64_t>(surface.ny) + grow_down + grow_up;
+    if (nx * ny <= max_nodes) {
+      break;
+    }
+    grow_left = grow_left * 3 / 4;
+    grow_right = grow_right * 3 / 4;
+    grow_down = grow_down * 3 / 4;
+    grow_up = grow_up * 3 / 4;
+    if (note.empty()) {
+      note = "drape terrain clipped by the max-nodes limit";
+    }
+    if (grow_left + grow_right + grow_down + grow_up == 0) {
+      break;
+    }
+  }
+
+  CubeSurface ext;
+  ext.cell_m = surface.cell_m;
+  ext.origin_x = surface.origin_x - grow_left * surface.cell_m;
+  ext.origin_y = surface.origin_y - grow_down * surface.cell_m;
+  ext.nx = surface.nx + static_cast<int>(grow_left + grow_right);
+  ext.ny = surface.ny + static_cast<int>(grow_down + grow_up);
+  const std::size_t n =
+    static_cast<std::size_t>(ext.nx) * static_cast<std::size_t>(ext.ny);
+  ext.depth.assign(n, std::nanf(""));
+  ext.uncertainty.assign(n, std::nanf(""));   // NaN == interpolated, not measured
+  ext.intensity.assign(n, std::nanf(""));
+  ext.soundings_in = surface.soundings_in;
+
+  // Copy the measured region into the shifted lattice.
+  for (int y = 0; y < surface.ny; ++y) {
+    for (int x = 0; x < surface.nx; ++x) {
+      const std::size_t src = static_cast<std::size_t>(y) * surface.nx + x;
+      const std::size_t dst =
+        static_cast<std::size_t>(y + grow_down) * ext.nx + (x + grow_left);
+      ext.depth[dst] = surface.depth[src];
+      ext.uncertainty[dst] = surface.uncertainty[src];
+      ext.intensity[dst] = surface.intensity[src];
+    }
+  }
+
+  // Membrane fill: multi-source BFS seeds every unmeasured node with its
+  // nearest measured depth, then Jacobi relaxation smooths the fill while
+  // measured nodes stay pinned. Display-grade interpolation/extrapolation —
+  // terrain for the drape to land on, never presented as bathymetry
+  // (uncertainty stays NaN on filled nodes).
+  std::vector<std::int32_t> frontier;
+  std::vector<std::uint8_t> measured(n, 0);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (std::isfinite(ext.depth[i])) {
+      measured[i] = 1;
+      frontier.push_back(static_cast<std::int32_t>(i));
+    }
+  }
+  if (frontier.empty() || frontier.size() == n) {
+    return ext;
+  }
+  std::vector<std::int32_t> next;
+  auto visit = [&](std::int32_t from, std::int32_t to) {
+      if (!std::isfinite(ext.depth[static_cast<std::size_t>(to)])) {
+        ext.depth[static_cast<std::size_t>(to)] =
+          ext.depth[static_cast<std::size_t>(from)];
+        next.push_back(to);
+      }
+    };
+  while (!frontier.empty()) {
+    next.clear();
+    for (const auto i : frontier) {
+      const int x = static_cast<int>(i % ext.nx);
+      const int y = static_cast<int>(i / ext.nx);
+      if (x > 0) {visit(i, i - 1);}
+      if (x + 1 < ext.nx) {visit(i, i + 1);}
+      if (y > 0) {visit(i, i - ext.nx);}
+      if (y + 1 < ext.ny) {visit(i, i + ext.nx);}
+    }
+    frontier.swap(next);
+  }
+  std::vector<float> relaxed(ext.depth);
+  for (int sweep = 0; sweep < 32; ++sweep) {
+    for (std::size_t i = 0; i < n; ++i) {
+      if (measured[i]) {
+        continue;
+      }
+      const int x = static_cast<int>(i % ext.nx);
+      const int y = static_cast<int>(i / ext.nx);
+      float sum = 0.0f;
+      int cnt = 0;
+      if (x > 0) {sum += ext.depth[i - 1]; ++cnt;}
+      if (x + 1 < ext.nx) {sum += ext.depth[i + 1]; ++cnt;}
+      if (y > 0) {sum += ext.depth[i - ext.nx]; ++cnt;}
+      if (y + 1 < ext.ny) {sum += ext.depth[i + ext.nx]; ++cnt;}
+      if (cnt > 0) {
+        relaxed[i] = sum / static_cast<float>(cnt);
+      }
+    }
+    ext.depth.swap(relaxed);
+  }
+  return ext;
+}
 
 SidescanDrape drape_pass(
   const CubeSurface & surface, const std::vector<WindowPing> & pings)
@@ -205,7 +369,7 @@ SidescanDrape drape_pass(
     static_cast<std::size_t>(surface.nx) * static_cast<std::size_t>(surface.ny);
   out.amplitude.assign(n, std::nanf(""));
   out.shadow.assign(n, 0);
-  out.painted_slant.assign(n, std::numeric_limits<float>::max());
+  out.painted_score.assign(n, 0.0f);
 
   // Per-ping along-track strip width: half the larger neighbour spacing (a
   // ping owns the ground up to halfway to its neighbours), floored at one
@@ -227,7 +391,28 @@ SidescanDrape drape_pass(
     }
     const double half_width = std::min(
       kMaxHalfWidth, std::max(0.5 * spacing, surface.cell_m));
-    drapePing(surface, pings[i], half_width, out);
+
+    // Straightness: the yaw rate against the neighbours (rad per metre of
+    // track, angle-wrapped). ~3 deg/m halves the score; a pass boundary's
+    // position jump drives the rate toward zero, so concatenated passes
+    // score independently without explicit boundaries.
+    double rate = 0.0;
+    const auto yaw_rate = [&g](const PingGeometry & o) {
+        const double d =
+          std::hypot(g.sensor_x - o.sensor_x, g.sensor_y - o.sensor_y);
+        if (d < 1e-6) {return 0.0;}
+        const double dy = std::remainder(g.yaw - o.yaw, 2.0 * M_PI);
+        return std::abs(dy) / d;
+      };
+    if (i > 0) {rate = yaw_rate(pings[i - 1].geometry);}
+    if (i + 1 < pings.size()) {
+      rate = std::max(rate, yaw_rate(pings[i + 1].geometry));
+    }
+    constexpr double kRateHalf = 0.05;   // rad/m at which the score halves
+    const double ping_score =
+      1.0 / (1.0 + (rate / kRateHalf) * (rate / kRateHalf));
+
+    drapePing(surface, pings[i], half_width, ping_score, out);
   }
   return out;
 }

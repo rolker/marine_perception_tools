@@ -775,6 +775,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     this, [this](int idx) {
       if (idx <= 0) {
         cube_drape_ = SidescanDrape{};
+        cube_drape_terrain_ = CubeSurface{};
         refreshCubeSurface();
         return;
       }
@@ -786,6 +787,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         return;   // a newer drape (or a new CUBE run) superseded this one
       }
       cube_drape_ = std::move(ticket.drape);
+      cube_drape_terrain_ = std::move(ticket.terrain);
       refreshCubeSurface();
       std::size_t painted = 0;
       for (const auto & a : cube_drape_.amplitude) {
@@ -831,6 +833,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_ref_anchor_ = ticket.ref_earth_from_world;
       ++drape_gen_;
       cube_drape_ = SidescanDrape{};
+      cube_drape_terrain_ = CubeSurface{};
       populateDrapePasses();
       refreshCubeSurface();
       status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5")
@@ -981,9 +984,13 @@ void SidescanViewerWindow::refreshCubeSurface()
   // identically), acoustic shadows near-black, ensonified-but-unseen nodes
   // dim grey (the relief stays legible).
   if (shade_i == 3) {
+    // The drape rides its own extended terrain (surface grown to the
+    // swath); fall back to the CUBE surface for pre-terrain drapes.
+    const CubeSurface & terrain =
+      cube_drape_terrain_.ok() ? cube_drape_terrain_ : cube_surface_;
     const std::size_t n_nodes =
-      static_cast<std::size_t>(cube_surface_.nx) *
-      static_cast<std::size_t>(cube_surface_.ny);
+      static_cast<std::size_t>(terrain.nx) *
+      static_cast<std::size_t>(terrain.ny);
     if (!cube_drape_.ok() ||
       cube_drape_.amplitude.size() != n_nodes)
     {
@@ -1018,9 +1025,15 @@ void SidescanViewerWindow::refreshCubeSurface()
       }
     }
     const float span = (hi > lo) ? (hi - lo) : 1.0f;
+    // Colour per node; interpolated terrain that the pass never touched is
+    // a HOLE (invented bathymetry must never render as relief), while
+    // measured-but-unseen nodes stay dim grey. isfinite(uncertainty) is
+    // the measured flag (extend_surface_for_drape leaves it NaN on fills).
+    CubeSurface render = terrain;
     std::vector<float> node_rgb(n_nodes * 3, 0.25f);   // unseen = dim grey
     for (std::size_t i = 0; i < n_nodes; ++i) {
       const float a = cube_drape_.amplitude[i];
+      const bool measured = std::isfinite(terrain.uncertainty[i]);
       if (std::isfinite(a)) {
         const float t = std::clamp((a - lo) / span, 0.0f, 1.0f);
         const auto & c = ss_lut[static_cast<std::size_t>(
@@ -1032,9 +1045,11 @@ void SidescanViewerWindow::refreshCubeSurface()
         node_rgb[i * 3] = 0.05f;   // acoustic shadow: near-black
         node_rgb[i * 3 + 1] = 0.05f;
         node_rgb[i * 3 + 2] = 0.05f;
+      } else if (!measured) {
+        render.depth[i] = std::nanf("");   // no data, no invented relief
       }
     }
-    auto mesh = build_cube_mesh_colored(cube_surface_, node_rgb, flat);
+    auto mesh = build_cube_mesh_colored(render, node_rgb, flat);
     cloud_->setSurface(
       std::move(mesh.positions), std::move(mesh.colors),
       std::move(mesh.indices));
@@ -1095,6 +1110,10 @@ void SidescanViewerWindow::populateDrapePasses()
         drape_passes_.push_back({p.bag_path, p.t_start_ns, p.t_end_ns});
       }
     }
+    if (drape_passes_.size() > 1) {
+      cube_drape_combo_->addItem(
+        QString("composite: best pixel (%1 passes)").arg(drape_passes_.size()));
+    }
     for (const auto & e : drape_passes_) {
       cube_drape_combo_->addItem(
         QString::fromStdString(passLabel(e.t0_ns, e.bag_path)));
@@ -1107,35 +1126,63 @@ void SidescanViewerWindow::populateDrapePasses()
 void SidescanViewerWindow::requestDrape()
 {
   const int idx = cube_drape_combo_ ? cube_drape_combo_->currentIndex() : 0;
-  if (idx <= 0 || static_cast<std::size_t>(idx) > drape_passes_.size() ||
-    !cube_surface_.ok())
-  {
+  if (idx <= 0 || !cube_surface_.ok()) {
     return;
   }
-  const DrapePassEntry entry = drape_passes_[static_cast<std::size_t>(idx - 1)];
+  // Item layout: [0] none, [1] composite (only when >1 pass), then passes.
+  const bool has_composite = drape_passes_.size() > 1;
+  std::vector<DrapePassEntry> targets;
+  if (has_composite && idx == 1) {
+    targets = drape_passes_;   // best-pixel composite over every pass
+  } else {
+    const int entry_i = idx - (has_composite ? 2 : 1);
+    if (entry_i < 0 || static_cast<std::size_t>(entry_i) >= drape_passes_.size()) {
+      return;
+    }
+    targets.push_back(drape_passes_[static_cast<std::size_t>(entry_i)]);
+  }
   const CubeSurface surface = cube_surface_;   // worker's own copy
   const std::string cache_dir = cache_dir_;
   const std::string ref_bag = cube_ref_bag_;
   const bool ref_has_geo = cube_ref_has_geo_;
   const geometry_msgs::msg::TransformStamped ref_anchor = cube_ref_anchor_;
+  const std::uint64_t max_nodes = cube_tuning_.max_nodes;
   ++drape_gen_;
   const auto gen = drape_gen_;
-  status_->setText(QString("Draping %1 …")
-    .arg(QFileInfo(QString::fromStdString(entry.bag_path)).fileName()));
+  status_->setText(targets.size() == 1 ?
+    QString("Draping %1 …")
+    .arg(QFileInfo(QString::fromStdString(targets.front().bag_path)).fileName()) :
+    QString("Draping composite of %1 passes …").arg(targets.size()));
   drape_watcher_.setFuture(QtConcurrent::run(
-      [entry, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor, gen]() {
+      [targets, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor,
+      max_nodes, gen]() {
         DrapeTicket ticket;
         ticket.generation = gen;
         QElapsedTimer timer;
         timer.start();
-        const auto loaded = load_drape_pings(
-          entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
-          ref_bag, ref_has_geo, ref_anchor);
-        for (const auto & n : loaded.notes) {
-          ticket.notes << QString::fromStdString(n);
+        std::vector<WindowPing> pings;
+        for (const auto & entry : targets) {
+          const auto loaded = load_drape_pings(
+            entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
+            ref_bag, ref_has_geo, ref_anchor);
+          for (const auto & n : loaded.notes) {
+            ticket.notes << QString::fromStdString(n);
+          }
+          if (loaded.ok) {
+            pings.insert(pings.end(), loaded.pings.begin(), loaded.pings.end());
+          }
         }
-        if (loaded.ok) {
-          ticket.drape = drape_pass(surface, loaded.pings);
+        if (!pings.empty()) {
+          // The sidescan outreaches the MBES: extend the surface to the
+          // swath (holes filled, edges extrapolated) so the drape has
+          // terrain to land on beyond the bathymetry.
+          std::string grow_note;
+          ticket.terrain = extend_surface_for_drape(
+            surface, pings, max_nodes, grow_note);
+          if (!grow_note.empty()) {
+            ticket.notes << QString::fromStdString(grow_note);
+          }
+          ticket.drape = drape_pass(ticket.terrain, pings);
           if (ticket.drape.pings_skipped > 0) {
             ticket.notes << QString("%1 pings unusable (no altitude/side or "
               "off the surface)").arg(ticket.drape.pings_skipped);
@@ -2690,6 +2737,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
   // drop it rather than draw it misplaced (#27).
   cube_surface_ = CubeSurface{};
   cube_drape_ = SidescanDrape{};
+  cube_drape_terrain_ = CubeSurface{};
   ++drape_gen_;
   cloud_->clearSurface();
   selection_cloud_ = true;
@@ -2774,6 +2822,7 @@ void SidescanViewerWindow::exitSelectionCloud()
   selection_passes_.clear();
   cube_surface_ = CubeSurface{};   // the scrub cloud is a different frame (#27)
   cube_drape_ = SidescanDrape{};
+  cube_drape_terrain_ = CubeSurface{};
   ++drape_gen_;
   cloud_->clearSurface();
   if (time_bar_) {

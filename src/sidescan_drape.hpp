@@ -30,6 +30,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "cube_lab.hpp"           // CubeSurface (the grid being draped)
@@ -48,18 +49,39 @@ struct SidescanDrape
   int ny = 0;
   std::vector<float> amplitude;
   std::vector<std::uint8_t> shadow;
-  std::vector<float> painted_slant;   // slant range that painted each cell
+  // Quality score of the sample that painted each cell — higher wins a
+  // conflict. score = straightness x range-closeness: pings on a straight
+  // course beat pings mid-turn, and nearer (better-resolved) samples beat
+  // far ones, so composites of several passes let the better pixels
+  // through (Roland's design, 2026-08-18). Still never averaged.
+  std::vector<float> painted_score;
   std::size_t pings_used = 0;
   std::size_t pings_skipped = 0;      // no altitude / no side / off-surface
   bool ok() const {return nx > 0 && ny > 0;}
 };
 
-// Drape one pass (its pings in the SAME world frame as `surface`) onto the
-// surface. Pings without altitude or a lateral side, or whose nadir has no
-// estimated surface within a few cells (sensor z is anchored as nadir
-// surface z + altitude), are counted skipped.
+// Drape pings (in the SAME world frame as `surface`) onto the surface. One
+// pass or a concatenation of several (the composite mode): the per-cell
+// quality score decides conflicts either way. Pings without altitude or a
+// lateral side, or whose nadir has no estimated surface within a few cells
+// (sensor z is anchored as nadir surface z + altitude), are counted skipped.
+// Straightness is derived from each ping's yaw rate against its neighbours
+// in the vector; a pass boundary's position jump makes the rate negligible,
+// so concatenated passes need no explicit boundaries.
 SidescanDrape drape_pass(
   const CubeSurface & surface, const std::vector<WindowPing> & pings);
+
+// Drape terrain (#29 follow-up): the sidescan reaches past the MBES, so the
+// surface is extended to the pass's swath before marching — the grid grows
+// (whole cells, same origin lattice) to cover each ping's across-track
+// reach, holes fill and edges extrapolate with a smooth membrane (nearest-
+// measured seed + Laplacian relaxation, measured nodes pinned). Every node
+// of the result is finite; `uncertainty` stays NaN on interpolated nodes so
+// callers can tell measured from inferred terrain. Growth is capped by
+// `max_nodes` (clamped proportionally, noted) — the operator's grid guard.
+CubeSurface extend_surface_for_drape(
+  const CubeSurface & surface, const std::vector<WindowPing> & pings,
+  std::uint64_t max_nodes, std::string & note);
 
 }  // namespace marine_perception_tools
 

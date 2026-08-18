@@ -141,6 +141,79 @@ TEST(SidescanDrape, PingStripsTileTheAlongTrackGaps)
     std::isfinite(drape.amplitude[static_cast<std::size_t>(cy) * 40 + cx]));
 }
 
+TEST(SidescanDrape, ExtendedTerrainReachesTheSwathAndFillsSmoothly)
+{
+  // A ping whose starboard swath (30 m of samples) runs far past the 20x20
+  // (10 m) grid: the extended terrain must cover the reach, fill with the
+  // plane depth, and mark every filled node as interpolated (NaN
+  // uncertainty) while measured nodes keep theirs.
+  const auto surface = flatSurface(20, 20, -10.0f);
+  auto ping = makePing(5.0, 9.0);
+  std::string note;
+  const auto ext = marine_perception_tools::extend_surface_for_drape(
+    surface, {ping}, 100000000ULL, note);
+  ASSERT_TRUE(ext.ok());
+  EXPECT_TRUE(note.empty());
+  // Swath endpoint ~ (5, 9 - 30): well below the old grid's y=0 edge.
+  EXPECT_LT(ext.origin_y, -20.0);
+  std::size_t measured = 0;
+  std::size_t filled = 0;
+  for (std::size_t i = 0; i < ext.depth.size(); ++i) {
+    ASSERT_TRUE(std::isfinite(ext.depth[i]));
+    EXPECT_NEAR(ext.depth[i], -10.0f, 0.01f);   // membrane of a flat plane
+    if (std::isfinite(ext.uncertainty[i])) {
+      ++measured;
+    } else {
+      ++filled;
+    }
+  }
+  EXPECT_EQ(measured, surface.depth.size());
+  EXPECT_GT(filled, 0u);
+  // Draping on the extended terrain paints beyond the old bathymetry.
+  const auto drape = drape_pass(ext, {ping});
+  bool painted_beyond = false;
+  for (int y = 0; y < ext.ny; ++y) {
+    const double wy = ext.origin_y + y * ext.cell_m;
+    if (wy >= 0.0) {
+      continue;   // inside the old grid's y range
+    }
+    for (int x = 0; x < ext.nx; ++x) {
+      if (std::isfinite(
+          drape.amplitude[static_cast<std::size_t>(y) * ext.nx + x]))
+      {
+        painted_beyond = true;
+      }
+    }
+  }
+  EXPECT_TRUE(painted_beyond);
+}
+
+TEST(SidescanDrape, StraightPassBeatsTurningPassInComposite)
+{
+  // Two three-ping sequences covering the same mid-swath cell: one running
+  // straight (amplitudes = sample index), one mid-turn (constant 999).
+  // The straightness score must let the straight pass's pixel through.
+  const auto surface = flatSurface(40, 40, -10.0f);
+  std::vector<WindowPing> pings;
+  for (int i = -1; i <= 1; ++i) {
+    pings.push_back(makePing(10.0 + 0.5 * i, 18.0));   // straight, yaw 0
+  }
+  for (int i = -1; i <= 1; ++i) {
+    auto p = makePing(10.0 + 0.5 * i, 18.0);           // same track...
+    p.geometry.yaw = 0.4 * i;                          // ...but turning hard
+    for (auto & a : p.amplitudes) {
+      a = 999.0f;
+    }
+    pings.push_back(p);
+  }
+  const auto drape = drape_pass(surface, pings);
+  const int cx = 20;
+  const int cy = static_cast<int>(std::lround(12.0 / 0.5));
+  const float a = drape.amplitude[static_cast<std::size_t>(cy) * 40 + cx];
+  ASSERT_TRUE(std::isfinite(a));
+  EXPECT_NE(a, 999.0f);   // the turning pass lost the cell
+}
+
 TEST(SidescanDrape, UnusablePingsAreCountedSkipped)
 {
   const auto surface = flatSurface(20, 20, -10.0f);
