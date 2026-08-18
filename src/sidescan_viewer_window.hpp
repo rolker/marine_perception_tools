@@ -378,6 +378,7 @@ private:
   QPushButton * cube_run_btn_ = nullptr;
   QCheckBox * cube_points_check_ = nullptr;
   QCheckBox * cube_surf_check_ = nullptr;
+  QCheckBox * cube_flat_check_ = nullptr;   // true-resolution flat cells
   QPushButton * cube_params_btn_ = nullptr;
   CubeTuning cube_tuning_;   // seeded from the library defaults in setupCubeLab
   // File-menu quick reload: shows the remembered index (QSettings) and

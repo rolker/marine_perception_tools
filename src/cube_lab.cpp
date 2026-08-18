@@ -181,7 +181,7 @@ CubeSurface run_cube(
 
 CubeSurfaceMesh build_cube_mesh(
   const CubeSurface & surface, CubeShade shade,
-  const std::vector<marine_colormap::Rgba8> & lut)
+  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells)
 {
   CubeSurfaceMesh mesh;
   if (!surface.ok() || lut.empty()) {
@@ -208,6 +208,48 @@ CubeSurfaceMesh build_cube_mesh(
   mesh.scalar_lo = lo;
   mesh.scalar_hi = hi;
   const float span = (hi > lo) ? (hi - lo) : 1.0f;
+
+  // Flat cells (true resolution): each estimated node is one flat quad at
+  // its own depth and colour — a CUBE cell reads as a single crisp "pixel",
+  // no interpolation with its neighbours. Adjacent quads touch exactly
+  // (node spacing == cell size); unestimated nodes stay holes.
+  if (flat_cells) {
+    const float half = static_cast<float>(0.5 * surface.cell_m);
+    for (int y = 0; y < surface.ny; ++y) {
+      for (int x = 0; x < surface.nx; ++x) {
+        const std::size_t i = static_cast<std::size_t>(y) * surface.nx + x;
+        if (!std::isfinite(surface.depth[i])) {
+          continue;
+        }
+        const float cx = static_cast<float>(surface.origin_x + x * surface.cell_m);
+        const float cy = static_cast<float>(surface.origin_y + y * surface.cell_m);
+        const float cz = surface.depth[i];
+        const float v = std::isfinite(scalar[i]) ? scalar[i] : lo;
+        const float t = std::clamp((v - lo) / span, 0.0f, 1.0f);
+        const auto & c = lut[static_cast<std::size_t>(
+              t * static_cast<float>(lut.size() - 1) + 0.5f)];
+        const auto base =
+          static_cast<std::uint32_t>(mesh.positions.size() / 3);
+        const float xs[4] = {cx - half, cx + half, cx + half, cx - half};
+        const float ys[4] = {cy - half, cy - half, cy + half, cy + half};
+        for (int k = 0; k < 4; ++k) {
+          mesh.positions.push_back(xs[k]);
+          mesh.positions.push_back(ys[k]);
+          mesh.positions.push_back(cz);
+          mesh.colors.push_back(c.r / 255.0f);
+          mesh.colors.push_back(c.g / 255.0f);
+          mesh.colors.push_back(c.b / 255.0f);
+        }
+        mesh.indices.push_back(base);
+        mesh.indices.push_back(base + 1);
+        mesh.indices.push_back(base + 2);
+        mesh.indices.push_back(base);
+        mesh.indices.push_back(base + 2);
+        mesh.indices.push_back(base + 3);
+      }
+    }
+    return mesh;
+  }
 
   // Vertices: one per estimated node; grid index -> compact vertex index.
   const std::size_t n_nodes =

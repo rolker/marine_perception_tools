@@ -114,9 +114,14 @@ enum class CubeShade { Depth, Uncertainty, Intensity };
 
 // Triangulate + colour a surface with the given palette LUT. The colour
 // ramp auto-scales to the finite range of the chosen scalar.
+// `flat_cells` (the true-resolution view, default in the lab): every
+// estimated node renders as a flat cell_m quad at its own depth and colour —
+// no cross-node blending, each CUBE cell visible as one "pixel". Costs 4
+// vertices per node instead of 1. false = the smooth-shaded relief (vertex
+// colours interpolate across triangles).
 CubeSurfaceMesh build_cube_mesh(
   const CubeSurface & surface, CubeShade shade,
-  const std::vector<marine_colormap::Rgba8> & lut);
+  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells = false);
 
 }  // namespace marine_perception_tools
 

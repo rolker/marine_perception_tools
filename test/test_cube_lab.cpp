@@ -116,6 +116,32 @@ TEST(BuildCubeMesh, TriangulatesEstimatedCellsOnly)
   }
 }
 
+TEST(BuildCubeMesh, FlatCellsRenderEachNodeAsOneQuad)
+{
+  const auto surface = run_cube(flatPatch(), 0.5);
+  ASSERT_TRUE(surface.ok());
+  const auto lut = marine_colormap::bake_lut(
+    marine_colormap::palette(0), marine_colormap::TransferParams{}, 256);
+  const auto mesh = build_cube_mesh(surface, CubeShade::Depth, lut, true);
+  ASSERT_FALSE(mesh.positions.empty());
+  // 4 vertices + 2 triangles per estimated node, all four sharing the
+  // node's depth and colour (no cross-node blending).
+  const std::size_t n_verts = mesh.positions.size() / 3;
+  EXPECT_EQ(n_verts % 4, 0u);
+  EXPECT_EQ(mesh.indices.size(), (n_verts / 4) * 6);
+  for (std::size_t q = 0; q + 3 < n_verts; q += 4) {
+    const float z0 = mesh.positions[q * 3 + 2];
+    for (int k = 1; k < 4; ++k) {
+      EXPECT_EQ(mesh.positions[(q + k) * 3 + 2], z0);
+      EXPECT_EQ(mesh.colors[(q + k) * 3], mesh.colors[q * 3]);
+    }
+    // The quad spans exactly one cell.
+    EXPECT_NEAR(
+      mesh.positions[(q + 1) * 3] - mesh.positions[q * 3],
+      surface.cell_m, 1e-5);
+  }
+}
+
 TEST(BuildCubeMesh, EmptySurfaceYieldsEmptyMesh)
 {
   const auto lut = marine_colormap::bake_lut(

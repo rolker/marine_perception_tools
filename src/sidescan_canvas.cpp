@@ -531,7 +531,8 @@ void SidescanCanvas::rebuildLayerCache()
   painter.fillRect(layer_cache_.rect(), QColor(20, 24, 28));
 
   if (geo_mode_ && !store_tile_rects_.empty()) {
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    // Nearest-neighbour on purpose: store cells must stay crisp pixels so
+    // the imagery reads at its true resolution — never bilinear-blended.
     for (std::size_t i = 0; i < store_tile_rects_.size(); ++i) {
       const auto & r = store_tile_rects_[i];
       const QPointF nw = mapToScreen(r.left(), r.top() + r.height());
@@ -542,7 +543,6 @@ void SidescanCanvas::rebuildLayerCache()
       }
       painter.drawImage(target, store_tiles_[i].image);
     }
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
   }
 
   drawGrid(painter);

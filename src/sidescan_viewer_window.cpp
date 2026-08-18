@@ -609,6 +609,12 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_shade_combo_->addItems({"Depth", "Uncertainty", "Backscatter"});
   cube_shade_combo_->setToolTip(
     "Surface colouring: depth, CUBE uncertainty, or CUBE-settled backscatter");
+  cube_flat_check_ = new QCheckBox("flat", this);
+  cube_flat_check_->setChecked(true);   // true resolution by default
+  cube_flat_check_->setToolTip(
+    "Flat cells: each CUBE node renders as one crisp cell at its own depth "
+    "and colour — the estimate's true resolution, no blending. Uncheck for "
+    "the smooth-shaded relief.");
 
   auto * row = new QHBoxLayout();
   row->setContentsMargins(2, 0, 2, 0);
@@ -622,6 +628,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(cube_surf_check_);
   row->addWidget(cube_alpha_spin_);
   row->addWidget(cube_shade_combo_);
+  row->addWidget(cube_flat_check_);
   // make_pane builds a QVBoxLayout(header, view); the lab row slots between.
   if (auto * v = qobject_cast<QVBoxLayout *>(cloud_pane->layout())) {
     v->insertLayout(1, row);
@@ -740,6 +747,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     this, [this](double a) {cloud_->setSurfaceAlpha(static_cast<float>(a));});
   connect(cube_shade_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {refreshCubeSurface();});
+  connect(cube_flat_check_, &QCheckBox::toggled,
+    this, [this](bool) {refreshCubeSurface();});
   connect(&cube_watcher_, &QFutureWatcher<CubeLabTicket>::finished, this, [this]() {
       CubeLabTicket ticket = cube_watcher_.result();
       if (ticket.generation != cube_gen_) {
@@ -914,7 +923,9 @@ void SidescanViewerWindow::refreshCubeSurface()
       static_cast<int>(n_pal - 1))) : 0;
   const auto lut = marine_colormap::bake_lut(
     marine_colormap::palette(pal_i), marine_colormap::TransferParams{}, 256);
-  auto mesh = build_cube_mesh(cube_surface_, shade, lut);
+  auto mesh = build_cube_mesh(
+    cube_surface_, shade, lut,
+    cube_flat_check_ && cube_flat_check_->isChecked());
   cloud_->setSurface(
     std::move(mesh.positions), std::move(mesh.colors), std::move(mesh.indices));
 }
