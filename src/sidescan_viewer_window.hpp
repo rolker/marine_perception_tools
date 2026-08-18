@@ -38,6 +38,7 @@
 #include "survey_index_bridge.hpp"
 #include "time_bar_widget.hpp"   // TimelinePassInfo (pass bars on the time bar)
 
+class QAction;
 class QLabel;
 class QSlider;
 class QDoubleSpinBox;
@@ -172,6 +173,7 @@ signals:
 private slots:
   void onOpenBag();
   void onOpenIndex();   // File menu: pick a survey_index.db (#27 follow-up)
+  void onReopenLastIndex();   // File menu: reload the remembered index
   void onIndexProgress(quint64 epoch, double resolved_distance_m, bool done);
   void onSessionOpened(quint64 epoch);
   void onOpenFailed(quint64 epoch, const QString & message);
@@ -220,6 +222,10 @@ private:
   // Build + wire the CUBE-lab controls row (#27) into the cloud pane;
   // ctor helper, run after the pane exists.
   void setupCubeLab(QWidget * cloud_pane);
+  // Open an index with the default sibling stores root; errors -> message box.
+  void openIndexWithDefaults(const std::string & index_path);
+  // Sync the Reopen Last Index action's label/enabled state with QSettings.
+  void refreshReopenIndexAction();
   // Gather the box's mbes passes, load + clip their soundings, run CUBE at
   // the chosen cell size on a worker; results land in onCubeLabFinished.
   void runCubeLab();
@@ -374,6 +380,9 @@ private:
   QCheckBox * cube_surf_check_ = nullptr;
   QPushButton * cube_params_btn_ = nullptr;
   CubeTuning cube_tuning_;   // seeded from the library defaults in setupCubeLab
+  // File-menu quick reload: shows the remembered index (QSettings) and
+  // refreshes after every successful openSurveyIndex.
+  QAction * reopen_index_action_ = nullptr;
   QDoubleSpinBox * cube_alpha_spin_ = nullptr;
   QComboBox * cube_shade_combo_ = nullptr;
   // Clip the selection cloud to the selected contact + margin (#24 desk

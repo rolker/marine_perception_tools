@@ -1198,6 +1198,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
   file_menu->addAction(
     "Open Survey &Index…", this, &SidescanViewerWindow::onOpenIndex);
+  reopen_index_action_ = file_menu->addAction(
+    "Reopen &Last Index", this, &SidescanViewerWindow::onReopenLastIndex);
+  refreshReopenIndexAction();
   file_menu->addAction("&Fit View", this, [this]() {
       canvas_->resetView();
       cloud_->resetView();
@@ -1543,15 +1546,35 @@ void SidescanViewerWindow::onOpenBag()
 
 void SidescanViewerWindow::onOpenIndex()
 {
+  // Start where the remembered index lives — reloading the usual campaign
+  // is one Enter away even without the quick-reload entry.
+  const QSettings settings("UNH-CCOM", "survey_explorer");
+  const QString last = settings.value("last_index").toString();
+  const QString start_dir =
+    last.isEmpty() ? QString() : QFileInfo(last).absolutePath();
   const QString path = QFileDialog::getOpenFileName(
-    this, "Open survey index", QString(),
+    this, "Open survey index", start_dir,
     "Survey index (*.db);;All files (*)");
   if (path.isEmpty()) {
     return;
   }
+  openIndexWithDefaults(path.toStdString());
+}
+
+void SidescanViewerWindow::onReopenLastIndex()
+{
+  const QSettings settings("UNH-CCOM", "survey_explorer");
+  const QString last = settings.value("last_index").toString();
+  if (last.isEmpty()) {
+    return;   // action is disabled without a remembered index; belt-and-braces
+  }
+  openIndexWithDefaults(last.toStdString());
+}
+
+void SidescanViewerWindow::openIndexWithDefaults(const std::string & index_path)
+{
   // Same stores default as the --stores CLI option: the sibling
   // bathymetry/survey layer next to the index (discovery finds the rest).
-  const std::string index_path = path.toStdString();
   const std::string stores_dir =
     (std::filesystem::path(index_path).parent_path() /
     "bathymetry" / "survey").string();
@@ -1560,6 +1583,24 @@ void SidescanViewerWindow::onOpenIndex()
   } catch (const std::exception & e) {
     QMessageBox::critical(
       this, "Open survey index failed", QString::fromUtf8(e.what()));
+  }
+}
+
+void SidescanViewerWindow::refreshReopenIndexAction()
+{
+  if (!reopen_index_action_) {
+    return;
+  }
+  const QSettings settings("UNH-CCOM", "survey_explorer");
+  const QString last = settings.value("last_index").toString();
+  const bool usable = !last.isEmpty() && QFileInfo::exists(last);
+  reopen_index_action_->setEnabled(usable);
+  reopen_index_action_->setText(
+    usable ?
+    QString("Reopen &Last Index (%1)").arg(QFileInfo(last).fileName()) :
+    QString("Reopen &Last Index"));
+  if (usable) {
+    reopen_index_action_->setToolTip(last);
   }
 }
 
@@ -2180,6 +2221,15 @@ void SidescanViewerWindow::openSurveyIndex(
   bridge_ = std::make_unique<SurveyIndexBridge>(index_path);   // throws on a bad DB
   setWindowTitle(QString("Survey Explorer — %1")
     .arg(QString::fromStdString(index_path)));
+  {
+    // Remember the index that actually opened (past the throwing ctor) for
+    // File -> Reopen Last Index and as the Open dialog's start directory.
+    QSettings settings("UNH-CCOM", "survey_explorer");
+    settings.setValue(
+      "last_index",
+      QFileInfo(QString::fromStdString(index_path)).absoluteFilePath());
+  }
+  refreshReopenIndexAction();
 
   // The canvas-metre plane needs a geographic origin before layers derive
   // their geometry: the index extent's centre. With an empty index the origin
