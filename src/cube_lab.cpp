@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
@@ -45,6 +46,78 @@ CubeTuning default_cube_tuning()
   t.runlength_threshold = params.runlength_threshold;
   t.extractor = static_cast<int>(params.extractor);
   return t;
+}
+
+std::string derive_box_curve(
+  const std::vector<MbesSounding> & soundings, double absorption_db_per_m,
+  const std::string & csv_path)
+{
+  constexpr double kBinDeg = 2.0;
+  constexpr std::size_t kMinPerBin = 200;   // sparse bins are noise, drop them
+  struct Bin
+  {
+    double sum = 0.0;
+    std::size_t n = 0;
+  };
+  std::vector<Bin> bins(46);   // 0..90 degrees in 2-degree bins
+  for (const auto & s : soundings) {
+    if (!std::isfinite(s.intensity) || !std::isfinite(s.beam_angle) ||
+      !std::isfinite(s.slant_range) || s.slant_range <= 0.0f)
+    {
+      continue;
+    }
+    const double angle_deg =
+      std::abs(static_cast<double>(s.beam_angle)) * 180.0 / M_PI;
+    const auto b = static_cast<std::size_t>(angle_deg / kBinDeg);
+    if (b >= bins.size()) {
+      continue;
+    }
+    // TL-removed sample (the tier-2 convention), so the derived residual
+    // composes with the same TL add-back run_cube applies.
+    const double r = static_cast<double>(s.slant_range);
+    bins[b].sum += static_cast<double>(s.intensity) +
+      40.0 * std::log10(r) + 2.0 * absorption_db_per_m * r;
+    bins[b].n += 1;
+  }
+  // Reference = the most-nadir populated bin; residual = bin mean - reference.
+  std::size_t ref = bins.size();
+  for (std::size_t b = 0; b < bins.size(); ++b) {
+    if (bins[b].n >= kMinPerBin) {
+      ref = b;
+      break;
+    }
+  }
+  if (ref >= bins.size()) {
+    return "too few beams per angle bin to self-calibrate";
+  }
+  std::size_t populated = 0;
+  for (const auto & b : bins) {
+    if (b.n >= kMinPerBin) {
+      ++populated;
+    }
+  }
+  if (populated < 3) {
+    return "not enough angular spread to self-calibrate (need >= 3 bins)";
+  }
+  const double nadir_mean = bins[ref].sum / static_cast<double>(bins[ref].n);
+  std::ofstream out(csv_path);
+  if (!out) {
+    return "could not write " + csv_path;
+  }
+  out << "# Box self-calibrated angular response (survey explorer CUBE lab, "
+    "mpt#27)\n";
+  out << "# tl_removed: true\n";
+  out << "# absorption_db_per_m: " << absorption_db_per_m << "\n";
+  out << "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n";
+  for (std::size_t b = 0; b < bins.size(); ++b) {
+    if (bins[b].n < kMinPerBin) {
+      continue;
+    }
+    const double mean = bins[b].sum / static_cast<double>(bins[b].n);
+    out << (b * kBinDeg + 0.5 * kBinDeg) << "," << mean << "," << bins[b].n
+        << "," << (mean - nadir_mean) << "\n";
+  }
+  return {};
 }
 
 CubeSurface run_cube(

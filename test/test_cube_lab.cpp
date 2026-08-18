@@ -132,6 +132,51 @@ TEST(RunCube, AraCurveCorrectsSettledBackscatter)
   }
 }
 
+TEST(RunCube, SelfCalCurveFlattensArbitraryGainBehaviour)
+{
+  // A sonar with made-up gain: raw = -30 - TL(R) - 0.2 deg quadratic-ish
+  // angular droop. Derive the curve from the beams themselves, feed it back,
+  // and the settled backscatter must come out flat at ~-30 dB.
+  const double alpha = 0.05;
+  std::vector<MbesSounding> soundings;
+  for (int p = 0; p < 220; ++p) {   // 220 pings: >200 beams per 2-deg bin
+    for (int a = 0; a <= 60; a += 2) {
+      const double th = a * M_PI / 180.0;
+      MbesSounding s;
+      s.x = 100.0 + 0.25 * p;
+      s.y = 200.0 + 10.0 * std::tan(th);
+      s.z = -10.0;
+      s.beam_angle = static_cast<float>(th);
+      s.slant_range = static_cast<float>(10.0 / std::cos(th));
+      const double tl = 40.0 * std::log10(s.slant_range) +
+        2.0 * alpha * s.slant_range;
+      s.intensity = static_cast<float>(-30.0 - tl - 0.005 * a * a);
+      soundings.push_back(s);
+    }
+  }
+  const char * dir = std::getenv("TMPDIR");
+  const std::string csv =
+    std::string(dir ? dir : "/tmp") + "/test_selfcal_curve.csv";
+  ASSERT_EQ(
+    marine_perception_tools::derive_box_curve(soundings, alpha, csv), "");
+  marine_perception_tools::CubeTuning tuning;
+  tuning.ara_curve_path = csv;
+  const auto surface = run_cube(soundings, 0.5, "order1a", tuning);
+  std::remove(csv.c_str());
+  ASSERT_TRUE(surface.ok()) << surface.note;
+  EXPECT_NE(surface.note.find("tier-2 TL"), std::string::npos);
+  int checked = 0;
+  for (std::size_t i = 0; i < surface.depth.size(); ++i) {
+    if (std::isfinite(surface.depth[i]) &&
+      std::isfinite(surface.intensity[i]))
+    {
+      ++checked;
+      EXPECT_NEAR(surface.intensity[i], -30.0f, 1.0f);
+    }
+  }
+  EXPECT_GT(checked, 50);
+}
+
 TEST(RunCube, MaxNodesIsOperatorOwnedNotHidden)
 {
   // The grid guard is the tuning's max_nodes — tightening it fails loud

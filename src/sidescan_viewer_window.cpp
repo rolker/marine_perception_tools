@@ -77,6 +77,7 @@
 
 #include "basemap_contrast.hpp"
 #include "basemap_lod.hpp"
+#include "cube_bathymetry/angular_response_curve.h"
 #include "cube_export.hpp"
 #include "sidescan_drape_loader.hpp"
 #include "marine_autonomy/gggs.h"
@@ -606,6 +607,12 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_params_btn_->setToolTip(
     "CUBE algorithm parameters (capture scale, median filter, intervention "
     "thresholds, extractor) — applied on the next Run CUBE");
+  cube_selfcal_btn_ = new QPushButton("self-cal BS", this);
+  cube_selfcal_btn_->setEnabled(false);   // needs a completed run's beams
+  cube_selfcal_btn_->setToolTip(
+    "Derive the angular-response curve from THIS box's own beams (TL-removed, "
+    "2-degree bins), save it as a curve CSV, adopt it and re-run — flattens "
+    "whatever gain behaviour the sonar actually has, by construction");
   cube_points_check_ = new QCheckBox("points", this);
   cube_points_check_->setChecked(true);
   cube_points_check_->setToolTip("Show/hide the point cloud");
@@ -678,6 +685,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(cube_order_combo_);
   row->addWidget(cube_params_btn_);
   row->addWidget(cube_run_btn_);
+  row->addWidget(cube_selfcal_btn_);
   row->addStretch(1);
   row->addWidget(cube_points_check_);
   row->addWidget(cube_surf_check_);
@@ -696,6 +704,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   }
 
   connect(cube_run_btn_, &QPushButton::clicked, this, [this]() {runCubeLab();});
+  connect(cube_selfcal_btn_, &QPushButton::clicked,
+    this, [this]() {selfCalibrateBackscatter();});
   connect(cube_params_btn_, &QPushButton::clicked, this, [this]() {
       // Modal CUBE-parameter editor, seeded from the current tuning; the
       // Defaults button restores the library's own values. Nothing re-runs
@@ -913,6 +923,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         cloud_color_combo_->currentIndex() == 1 ?
         PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
       cloud_->setPoints(ticket.soundings);
+      cube_soundings_ = std::move(ticket.soundings);   // self-cal input
+      cube_selfcal_btn_->setEnabled(!cube_soundings_.empty());
       // The drape frame follows the CUBE load: remember the reference and
       // re-offer the box's sidescan passes; any previous drape is stale.
       cube_ref_bag_ = ticket.ref_bag;
@@ -948,6 +960,47 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_run_btn_->setEnabled(false);
       status_->setText("CUBE box cleared.");
     });
+}
+
+void SidescanViewerWindow::selfCalibrateBackscatter()
+{
+  if (cube_soundings_.empty()) {
+    status_->setText("Self-cal: run CUBE first — no beams held.");
+    return;
+  }
+  // Compose with the same absorption the currently-loaded curve uses (the
+  // derive and the apply must share alpha); no curve -> 0 (self-consistent).
+  double alpha = 0.0;
+  if (!cube_tuning_.ara_curve_path.empty()) {
+    try {
+      alpha = cube::loadAngularResponseCurveWithHeader(
+        cube_tuning_.ara_curve_path).absorption_db_per_m;
+    } catch (const std::exception &) {
+    }
+  }
+  const QString path = QFileDialog::getSaveFileName(
+    this, "Save box self-calibrated ARA curve",
+    QDir::homePath() + "/data/logs/analysis/box_selfcal.csv",
+    "CSV (*.csv)");
+  if (path.isEmpty()) {
+    return;
+  }
+  const std::string err =
+    derive_box_curve(cube_soundings_, alpha, path.toStdString());
+  if (!err.empty()) {
+    QMessageBox::warning(
+      this, "Self-calibrate backscatter", QString::fromStdString(err));
+    return;
+  }
+  cube_tuning_.ara_curve_path = path.toStdString();
+  {
+    QSettings settings("UNH-CCOM", "survey_explorer");
+    settings.setValue("ara_curve_path", path);
+  }
+  status_->setText(
+    QString("Self-cal curve written to %1 — re-running CUBE with it.")
+    .arg(path));
+  runCubeLab();
 }
 
 void SidescanViewerWindow::runCubeLab()
@@ -3067,6 +3120,8 @@ void SidescanViewerWindow::onTileSelectionChanged()
   cube_surface_ = CubeSurface{};
   cube_drape_ = SidescanDrape{};
   cube_drape_terrain_ = CubeSurface{};
+  cube_soundings_.clear();
+  if (cube_selfcal_btn_) {cube_selfcal_btn_->setEnabled(false);}
   ++drape_gen_;
   cloud_->clearSurface();
   selection_cloud_ = true;

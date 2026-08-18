@@ -87,6 +87,19 @@ struct CubeTuning
 // The library's own defaults, read from a real cube::Parameters instance.
 CubeTuning default_cube_tuning();
 
+// Self-calibrated angular-response curve (#27, operator request 2026-08-18):
+// derive the residual empirically from a box's OWN beams instead of trusting
+// the campaign curve + physical TL model — kills whatever gain behaviour the
+// sonar actually has, by construction. Beams are TL-corrected
+// (40log10(R) + 2*alpha*R) then binned by |rx angle| (2-degree bins, sparse
+// bins dropped); the residual is each bin's mean relative to the most-nadir
+// bin. Writes the standard 4-column curve CSV with a tier-2 header (so
+// run_cube consumes it like any other curve). Returns "" on success, else
+// the reason (e.g. too few angled beams to calibrate).
+std::string derive_box_curve(
+  const std::vector<MbesSounding> & soundings, double absorption_db_per_m,
+  const std::string & csv_path);
+
 // Run CUBE over `soundings` (already gathered and box-clipped, all in one
 // world frame; z up, seabed negative — the cube depth convention) on a grid
 // of `cell_m` cells under the given IHO order ("order1a" etc., the

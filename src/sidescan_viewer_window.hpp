@@ -253,6 +253,8 @@ private:
   void openIndexWithDefaults(const std::string & index_path);
   // Sync the Reopen Last Index action's label/enabled state with QSettings.
   void refreshReopenIndexAction();
+  // Derive an ARA curve from the last run's own beams, adopt it, re-run.
+  void selfCalibrateBackscatter();
   // Gather the box's mbes passes, load + clip their soundings, run CUBE at
   // the chosen cell size on a worker; results land in onCubeLabFinished.
   void runCubeLab();
@@ -437,6 +439,8 @@ private:
   bool cube_ref_has_geo_ = false;
   geometry_msgs::msg::TransformStamped cube_ref_anchor_;
   QPushButton * cube_params_btn_ = nullptr;
+  QPushButton * cube_selfcal_btn_ = nullptr;   // derive ARA curve from the box
+  std::vector<MbesSounding> cube_soundings_;   // last run's beams (self-cal input)
   CubeTuning cube_tuning_;   // seeded from the library defaults in setupCubeLab
   // File-menu quick reload: shows the remembered index (QSettings) and
   // refreshes after every successful openSurveyIndex.
