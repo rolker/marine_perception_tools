@@ -369,6 +369,7 @@ private:
   QDoubleSpinBox * cube_cell_spin_ = nullptr;
   QComboBox * cube_order_combo_ = nullptr;
   QPushButton * cube_run_btn_ = nullptr;
+  QCheckBox * cube_points_check_ = nullptr;
   QCheckBox * cube_surf_check_ = nullptr;
   QDoubleSpinBox * cube_alpha_spin_ = nullptr;
   QComboBox * cube_shade_combo_ = nullptr;

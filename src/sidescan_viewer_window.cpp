@@ -586,6 +586,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_run_btn_->setToolTip(
     "Gather every MBES sounding in the shift-drag map box and CUBE it "
     "at the chosen cell size");
+  cube_points_check_ = new QCheckBox("points", this);
+  cube_points_check_->setChecked(true);
+  cube_points_check_->setToolTip("Show/hide the point cloud");
   cube_surf_check_ = new QCheckBox("surface", this);
   cube_surf_check_->setChecked(true);
   cube_alpha_spin_ = new QDoubleSpinBox(this);
@@ -606,6 +609,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(cube_order_combo_);
   row->addWidget(cube_run_btn_);
   row->addStretch(1);
+  row->addWidget(cube_points_check_);
   row->addWidget(cube_surf_check_);
   row->addWidget(cube_alpha_spin_);
   row->addWidget(cube_shade_combo_);
@@ -615,6 +619,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   }
 
   connect(cube_run_btn_, &QPushButton::clicked, this, [this]() {runCubeLab();});
+  connect(cube_points_check_, &QCheckBox::toggled,
+    this, [this](bool on) {cloud_->setPointsVisible(on);});
   connect(cube_surf_check_, &QCheckBox::toggled,
     this, [this](bool on) {cloud_->setSurfaceVisible(on);});
   connect(

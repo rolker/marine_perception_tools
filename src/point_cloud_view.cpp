@@ -273,6 +273,12 @@ void PointCloudView::setSurfaceVisible(bool on)
   update();
 }
 
+void PointCloudView::setPointsVisible(bool on)
+{
+  points_visible_ = on;
+  update();
+}
+
 void PointCloudView::setSurfaceAlpha(float alpha)
 {
   surface_alpha_ = std::clamp(alpha, 0.05f, 1.0f);
@@ -531,9 +537,11 @@ void PointCloudView::paintGL()
   program_.setUniformValue("u_mvp", mvp_);
   program_.setUniformValue("u_point_size", point_size_);
   program_.setUniformValue("u_alpha", 1.0f);
-  vao_.bind();
-  glDrawArrays(GL_POINTS, 0, static_cast<int>(pts_.size()));
-  vao_.release();
+  if (points_visible_) {
+    vao_.bind();
+    glDrawArrays(GL_POINTS, 0, static_cast<int>(pts_.size()));
+    vao_.release();
+  }
 
   // Boat-context arrow (same MVP; flat in the horizontal plane at the boat z).
   if (arrow_dirty_) {build_arrow();}

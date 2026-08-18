@@ -117,6 +117,8 @@ public:
   void clearSurface();
   void setSurfaceVisible(bool on);
   void setSurfaceAlpha(float alpha);   // clamped to [0.05, 1]
+  // Hide/show the point cloud itself (e.g. to view the CUBE surface alone).
+  void setPointsVisible(bool on);
   void setPointSize(float px);             // GL point size in pixels (>= 1)
 
   // Place a forward-pointing boat arrow (~2.4 m x 1 m) at a world position for
@@ -188,6 +190,7 @@ private:
   bool surface_dirty_ = false;
   bool surface_visible_ = true;
   float surface_alpha_ = 1.0f;
+  bool points_visible_ = true;
 
   // Recentred geometry + the per-point scalars used for colouring.
   std::vector<QVector3D> pts_;     // world soundings minus centroid
