@@ -142,6 +142,20 @@ TEST(BuildCubeMesh, FlatCellsRenderEachNodeAsOneQuad)
   }
 }
 
+TEST(BuildCubeMesh, ManualRangeOverridesTheAutoRamp)
+{
+  const auto surface = run_cube(flatPatch(), 0.5);
+  ASSERT_TRUE(surface.ok());
+  const auto lut = marine_colormap::bake_lut(
+    marine_colormap::palette(0), marine_colormap::TransferParams{}, 256);
+  const auto mesh = build_cube_mesh(
+    surface, CubeShade::Depth, lut, false,
+    std::pair<float, float>(-20.0f, -5.0f));
+  ASSERT_FALSE(mesh.positions.empty());
+  EXPECT_EQ(mesh.scalar_lo, -20.0f);
+  EXPECT_EQ(mesh.scalar_hi, -5.0f);
+}
+
 TEST(BuildCubeMesh, EmptySurfaceYieldsEmptyMesh)
 {
   const auto lut = marine_colormap::bake_lut(

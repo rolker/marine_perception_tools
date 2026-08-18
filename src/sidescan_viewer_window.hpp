@@ -416,6 +416,7 @@ private:
   };
   QComboBox * cube_drape_combo_ = nullptr;
   QComboBox * cube_range_score_combo_ = nullptr;   // near-wins vs mid-range-wins
+  RangeControls cube_srange_;   // surface-shade colour range (active shade's units)
   std::vector<DrapePassEntry> drape_passes_;
   SidescanDrape cube_drape_;
   CubeSurface cube_drape_terrain_;   // the extended terrain the drape rode

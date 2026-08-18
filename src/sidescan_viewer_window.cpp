@@ -630,6 +630,24 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "Flat cells: each CUBE node renders as one crisp cell at its own depth "
     "and colour — the estimate's true resolution, no blending. Uncheck for "
     "the smooth-shaded relief.");
+  cube_srange_.auto_check = new QCheckBox("auto", this);
+  cube_srange_.auto_check->setChecked(true);
+  cube_srange_.lo = new QDoubleSpinBox(this);
+  cube_srange_.hi = new QDoubleSpinBox(this);
+  for (auto * s : {cube_srange_.lo, cube_srange_.hi}) {
+    s->setRange(-12000.0, 12000.0);
+    s->setDecimals(2);
+    s->setSingleStep(0.5);
+    s->setEnabled(false);
+    s->setKeyboardTracking(false);
+  }
+  const QString srange_tip =
+    "Surface colour range in the ACTIVE shade's units (depth m, "
+    "uncertainty m, backscatter dB, sidescan amplitude). Auto shows the "
+    "computed range in the spins.";
+  cube_srange_.auto_check->setToolTip(srange_tip);
+  cube_srange_.lo->setToolTip(srange_tip);
+  cube_srange_.hi->setToolTip(srange_tip);
   cube_palette_ = new QComboBox(this);
   for (const auto & name : marine_colormap::palette_names()) {
     cube_palette_->addItem(QString::fromStdString(name));
@@ -653,6 +671,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(cube_surf_check_);
   row->addWidget(cube_alpha_spin_);
   row->addWidget(cube_shade_combo_);
+  row->addWidget(cube_srange_.auto_check);
+  row->addWidget(cube_srange_.lo);
+  row->addWidget(cube_srange_.hi);
   row->addWidget(cube_palette_);
   row->addWidget(cube_drape_combo_);
   row->addWidget(cube_range_score_combo_);
@@ -777,6 +798,19 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     this, [this](int) {refreshCubeSurface();});
   connect(cube_flat_check_, &QCheckBox::toggled,
     this, [this](bool) {refreshCubeSurface();});
+  connect(cube_srange_.auto_check, &QCheckBox::toggled, this, [this](bool on) {
+      cube_srange_.lo->setEnabled(!on);
+      cube_srange_.hi->setEnabled(!on);
+      refreshCubeSurface();
+    });
+  connect(cube_srange_.lo, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, [this](double) {
+      if (!cube_srange_.auto_check->isChecked()) {refreshCubeSurface();}
+    });
+  connect(cube_srange_.hi, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, [this](double) {
+      if (!cube_srange_.auto_check->isChecked()) {refreshCubeSurface();}
+    });
   connect(cube_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {refreshCubeSurface();});
   connect(
@@ -1017,7 +1051,11 @@ void SidescanViewerWindow::refreshCubeSurface()
       marine_colormap::TransferParams{}, 256);
     float lo = 0.0f;
     float hi = 1.0f;
-    if (ss_range_.auto_check && !ss_range_.auto_check->isChecked()) {
+    if (cube_srange_.auto_check && !cube_srange_.auto_check->isChecked()) {
+      // The CUBE row's own range outranks everything.
+      lo = static_cast<float>(cube_srange_.lo->value());
+      hi = static_cast<float>(cube_srange_.hi->value());
+    } else if (ss_range_.auto_check && !ss_range_.auto_check->isChecked()) {
       lo = static_cast<float>(ss_range_.lo->value());
       hi = static_cast<float>(ss_range_.hi->value());
     } else {
@@ -1064,6 +1102,14 @@ void SidescanViewerWindow::refreshCubeSurface()
     cloud_->setSurface(
       std::move(mesh.positions), std::move(mesh.colors),
       std::move(mesh.indices));
+    if (cube_srange_.auto_check && cube_srange_.auto_check->isChecked()) {
+      cube_srange_.lo->blockSignals(true);
+      cube_srange_.hi->blockSignals(true);
+      cube_srange_.lo->setValue(lo);
+      cube_srange_.hi->setValue(hi);
+      cube_srange_.lo->blockSignals(false);
+      cube_srange_.hi->blockSignals(false);
+    }
     return;
   }
 
@@ -1077,7 +1123,21 @@ void SidescanViewerWindow::refreshCubeSurface()
       static_cast<int>(n_pal - 1))) : 0;
   const auto lut = marine_colormap::bake_lut(
     marine_colormap::palette(pal_i), marine_colormap::TransferParams{}, 256);
-  auto mesh = build_cube_mesh(cube_surface_, shade, lut, flat);
+  std::optional<std::pair<float, float>> range;
+  if (cube_srange_.auto_check && !cube_srange_.auto_check->isChecked()) {
+    range = std::pair<float, float>(
+      static_cast<float>(cube_srange_.lo->value()),
+      static_cast<float>(cube_srange_.hi->value()));
+  }
+  auto mesh = build_cube_mesh(cube_surface_, shade, lut, flat, range);
+  if (cube_srange_.auto_check && cube_srange_.auto_check->isChecked()) {
+    cube_srange_.lo->blockSignals(true);
+    cube_srange_.hi->blockSignals(true);
+    cube_srange_.lo->setValue(mesh.scalar_lo);
+    cube_srange_.hi->setValue(mesh.scalar_hi);
+    cube_srange_.lo->blockSignals(false);
+    cube_srange_.hi->blockSignals(false);
+  }
   cloud_->setSurface(
     std::move(mesh.positions), std::move(mesh.colors), std::move(mesh.indices));
 }

@@ -24,7 +24,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "marine_colormap/colormap.hpp"
@@ -119,9 +121,12 @@ enum class CubeShade { Depth, Uncertainty, Intensity };
 // no cross-node blending, each CUBE cell visible as one "pixel". Costs 4
 // vertices per node instead of 1. false = the smooth-shaded relief (vertex
 // colours interpolate across triangles).
+// `range` (optional) fixes the colour ramp to [lo, hi] instead of the
+// scalar's finite extent — the CUBE row's manual range control (#27).
 CubeSurfaceMesh build_cube_mesh(
   const CubeSurface & surface, CubeShade shade,
-  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells = false);
+  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells = false,
+  const std::optional<std::pair<float, float>> & range = std::nullopt);
 
 // Mesh from explicit per-node colours (`node_rgb`: rgb triples in [0,1],
 // ny*nx*3, row-major like the surface arrays) — the sidescan drape's path

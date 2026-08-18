@@ -272,7 +272,8 @@ CubeSurfaceMesh build_cube_mesh_colored(
 
 CubeSurfaceMesh build_cube_mesh(
   const CubeSurface & surface, CubeShade shade,
-  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells)
+  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells,
+  const std::optional<std::pair<float, float>> & range)
 {
   if (!surface.ok() || lut.empty()) {
     return CubeSurfaceMesh{};
@@ -285,10 +286,15 @@ CubeSurfaceMesh build_cube_mesh(
   // that scalar — e.g. no intensity reported — draw at the ramp's bottom).
   float lo = std::numeric_limits<float>::max();
   float hi = std::numeric_limits<float>::lowest();
-  for (std::size_t i = 0; i < scalar.size(); ++i) {
-    if (std::isfinite(surface.depth[i]) && std::isfinite(scalar[i])) {
-      lo = std::min(lo, scalar[i]);
-      hi = std::max(hi, scalar[i]);
+  if (range) {
+    lo = range->first;
+    hi = range->second;
+  } else {
+    for (std::size_t i = 0; i < scalar.size(); ++i) {
+      if (std::isfinite(surface.depth[i]) && std::isfinite(scalar[i])) {
+        lo = std::min(lo, scalar[i]);
+        hi = std::max(hi, scalar[i]);
+      }
     }
   }
   if (!(hi >= lo)) {
