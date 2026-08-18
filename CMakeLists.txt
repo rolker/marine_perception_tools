@@ -284,6 +284,17 @@ if(BUILD_TESTING)
   target_include_directories(test_cube_lab SYSTEM PRIVATE
     ${CUBE_BATHYMETRY_INCLUDE_ROOT})
 
+  # Sidescan drape (#29): the first-return march over synthetic terrain —
+  # slant mapping, ridge shadows, the nearest-slant conflict rule.
+  ament_add_gtest(test_sidescan_drape
+    test/test_sidescan_drape.cpp
+    src/sidescan_drape.cpp)
+  target_include_directories(test_sidescan_drape PRIVATE src)
+  ament_target_dependencies(test_sidescan_drape
+    cube_bathymetry marine_colormap marine_acoustic_msgs rosbag2_cpp tf2_ros)
+  target_include_directories(test_sidescan_drape SYSTEM PRIVATE
+    ${CUBE_BATHYMETRY_INCLUDE_ROOT})
+
   # LOD level selection (#26): behavioural invariants of the camp ADR-0013
   # selector against the gggs ladder.
   ament_add_gtest(test_basemap_lod
