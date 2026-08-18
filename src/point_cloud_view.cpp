@@ -27,6 +27,7 @@
 #include <QtMath>
 
 #include <algorithm>
+#include <cstdint>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -60,10 +61,11 @@ void main()
 constexpr char kFragmentShader[] =
   R"(#version 330 core
 in vec3 v_col;
+uniform float u_alpha;
 out vec4 frag_color;
 void main()
 {
-  frag_color = vec4(v_col, 1.0);
+  frag_color = vec4(v_col, u_alpha);
 }
 )";
 }  // namespace
@@ -93,6 +95,10 @@ PointCloudView::~PointCloudView()
     arrow_vbo_.destroy();
     arrow_vao_.destroy();
     vao_.destroy();
+    surface_pos_vbo_.destroy();
+    surface_col_vbo_.destroy();
+    surface_ibo_.destroy();
+    surface_vao_.destroy();
     doneCurrent();
   }
 }
@@ -178,6 +184,7 @@ void PointCloudView::set_points_impl(
 
   rebuild_colors();
   buffers_dirty_ = true;
+  surface_dirty_ = true;   // the centroid moved; re-recentre the surface
   update();
 }
 
@@ -236,6 +243,39 @@ void PointCloudView::setScalarRange(
   scalar_range_ = range;
   rebuild_colors();
   buffers_dirty_ = true;
+  update();
+}
+
+void PointCloudView::setSurface(
+  std::vector<float> positions_xyz, std::vector<float> colors_rgb,
+  std::vector<std::uint32_t> indices)
+{
+  surface_pos_ = std::move(positions_xyz);
+  surface_col_ = std::move(colors_rgb);
+  surface_idx_ = std::move(indices);
+  surface_dirty_ = true;
+  update();
+}
+
+void PointCloudView::clearSurface()
+{
+  surface_pos_.clear();
+  surface_col_.clear();
+  surface_idx_.clear();
+  surface_index_count_ = 0;
+  surface_dirty_ = true;
+  update();
+}
+
+void PointCloudView::setSurfaceVisible(bool on)
+{
+  surface_visible_ = on;
+  update();
+}
+
+void PointCloudView::setSurfaceAlpha(float alpha)
+{
+  surface_alpha_ = std::clamp(alpha, 0.05f, 1.0f);
   update();
 }
 
@@ -383,6 +423,10 @@ void PointCloudView::initializeGL()
   col_vbo_.create();
   arrow_vao_.create();
   arrow_vbo_.create();
+  surface_vao_.create();
+  surface_pos_vbo_.create();
+  surface_col_vbo_.create();
+  surface_ibo_.create();
   gl_ready_ = true;
   if (!pts_.empty()) {upload();}
   if (boat_valid_) {build_arrow();}
@@ -407,6 +451,42 @@ void PointCloudView::upload()
 
   vao_.release();
   buffers_dirty_ = false;
+}
+
+void PointCloudView::upload_surface()
+{
+  if (!gl_ready_) {return;}
+  surface_index_count_ = 0;
+  if (surface_pos_.empty() || surface_idx_.empty()) {
+    surface_dirty_ = false;
+    return;
+  }
+  // Recentre by the CLOUD's centroid so surface and points share the origin
+  // the camera orbits (setSurface contract: same load, same frame).
+  std::vector<float> centred(surface_pos_.size());
+  for (std::size_t i = 0; i + 2 < surface_pos_.size(); i += 3) {
+    centred[i] = surface_pos_[i] - center_x_;
+    centred[i + 1] = surface_pos_[i + 1] - center_y_;
+    centred[i + 2] = surface_pos_[i + 2] - center_z_;
+  }
+  surface_vao_.bind();
+  surface_pos_vbo_.bind();
+  surface_pos_vbo_.allocate(
+    centred.data(), static_cast<int>(centred.size() * sizeof(float)));
+  program_.enableAttributeArray(0);
+  program_.setAttributeBuffer(0, GL_FLOAT, 0, 3, 3 * sizeof(float));
+  surface_col_vbo_.bind();
+  surface_col_vbo_.allocate(
+    surface_col_.data(), static_cast<int>(surface_col_.size() * sizeof(float)));
+  program_.enableAttributeArray(1);
+  program_.setAttributeBuffer(1, GL_FLOAT, 0, 3, 3 * sizeof(float));
+  surface_ibo_.bind();
+  surface_ibo_.allocate(
+    surface_idx_.data(),
+    static_cast<int>(surface_idx_.size() * sizeof(std::uint32_t)));
+  surface_vao_.release();
+  surface_index_count_ = static_cast<int>(surface_idx_.size());
+  surface_dirty_ = false;
 }
 
 void PointCloudView::resizeGL(int w, int h)
@@ -450,6 +530,7 @@ void PointCloudView::paintGL()
   program_.bind();
   program_.setUniformValue("u_mvp", mvp_);
   program_.setUniformValue("u_point_size", point_size_);
+  program_.setUniformValue("u_alpha", 1.0f);
   vao_.bind();
   glDrawArrays(GL_POINTS, 0, static_cast<int>(pts_.size()));
   vao_.release();
@@ -460,6 +541,27 @@ void PointCloudView::paintGL()
     arrow_vao_.bind();
     glDrawArrays(GL_TRIANGLES, 0, arrow_verts_);
     arrow_vao_.release();
+  }
+
+  // CUBE surface (#27): drawn after the points; translucent surfaces blend
+  // without writing depth so the cloud stays visible through them.
+  if (surface_dirty_) {upload_surface();}
+  if (surface_visible_ && surface_index_count_ > 0) {
+    program_.setUniformValue("u_alpha", surface_alpha_);
+    if (surface_alpha_ < 1.0f) {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      glDepthMask(GL_FALSE);
+    }
+    surface_vao_.bind();
+    glDrawElements(
+      GL_TRIANGLES, surface_index_count_, GL_UNSIGNED_INT, nullptr);
+    surface_vao_.release();
+    if (surface_alpha_ < 1.0f) {
+      glDepthMask(GL_TRUE);
+      glDisable(GL_BLEND);
+    }
+    program_.setUniformValue("u_alpha", 1.0f);
   }
   program_.release();
 

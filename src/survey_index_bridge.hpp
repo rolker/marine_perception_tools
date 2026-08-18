@@ -75,6 +75,14 @@ public:
   std::vector<marine_survey_index::PassRow> queryPoint(
     double lat, double lon, double radius_m = 25.0) const;
 
+  // Passes whose indexed footprint tiles intersect the geographic box,
+  // across every tile level the index holds, optionally filtered by sensor
+  // type (the queryPasses filter, e.g. "mbes-bathy"; "" = all). The box
+  // CUBE lab's pass gather (#27).
+  std::vector<marine_survey_index::PassRow> queryBox(
+    double south, double west, double north, double east,
+    const std::string & sensor_filter = "") const;
+
   // Union of the geographic bounds of every indexed pass tile — what the
   // overview fits its view to when no store tiles are available, so the map
   // click can still be aimed. nullopt when the index holds no passes.

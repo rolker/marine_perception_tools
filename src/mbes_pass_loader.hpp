@@ -64,6 +64,14 @@ struct GeoClip
   double lon = 0.0;
   double alt = 0.0;
   double margin_m = 25.0;
+  // Box clip (#27, the CUBE lab): when both half-extents are positive the
+  // clip is the axis-aligned box |east| <= half_east_m, |north| <= half_north_m
+  // about (lat, lon) instead of the circle — evaluated in each pass's own
+  // world frame, whose axes are assumed ENU-aligned (the same isotropy
+  // assumption the circular clip already makes).
+  double half_east_m = 0.0;
+  double half_north_m = 0.0;
+  bool isBox() const {return half_east_m > 0.0 && half_north_m > 0.0;}
 };
 
 // Load every pass's soundings into the first loadable pass's world frame.

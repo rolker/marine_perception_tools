@@ -25,6 +25,7 @@
 #include <QVector3D>
 
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -106,6 +107,16 @@ public:
   // Manual colour range for the scalar modes (Depth/Backscatter), in the
   // active scalar's units; nullopt (default) auto-scales to the data extent.
   void setScalarRange(const std::optional<std::pair<float, float>> & range);
+
+  // CUBE surface layer (#27): a triangulated heightmap in the SAME world
+  // frame as the current points (it recentres by the cloud's centroid, so
+  // set points from the same load first). xyz/rgb triples + triangle indices.
+  void setSurface(
+    std::vector<float> positions_xyz, std::vector<float> colors_rgb,
+    std::vector<std::uint32_t> indices);
+  void clearSurface();
+  void setSurfaceVisible(bool on);
+  void setSurfaceAlpha(float alpha);   // clamped to [0.05, 1]
   void setPointSize(float px);             // GL point size in pixels (>= 1)
 
   // Place a forward-pointing boat arrow (~2.4 m x 1 m) at a world position for
@@ -141,6 +152,7 @@ private:
     const std::vector<MbesSounding> & world_soundings, std::vector<int> pass_ids);
   void rebuild_colors();   // recompute the per-point colour buffer for the mode
   void upload();           // (re)upload position + colour buffers (GL-current)
+  void upload_surface();   // (re)upload the CUBE surface mesh (GL-current)
   void build_arrow();      // (re)build the boat-arrow vertices (GL-current)
   // Draw the 2D overlay (scale bar + E/N/Up orientation axes + linked cursor).
   void draw_overlay(const QMatrix4x4 & view, float metres_per_pixel);
@@ -163,6 +175,19 @@ private:
   float boat_heading_ = 0.0f;
   bool gl_ready_ = false;
   bool buffers_dirty_ = false;
+
+  // CUBE surface layer (#27).
+  QOpenGLVertexArrayObject surface_vao_;
+  QOpenGLBuffer surface_pos_vbo_{QOpenGLBuffer::VertexBuffer};
+  QOpenGLBuffer surface_col_vbo_{QOpenGLBuffer::VertexBuffer};
+  QOpenGLBuffer surface_ibo_{QOpenGLBuffer::IndexBuffer};
+  std::vector<float> surface_pos_;      // world frame; recentred at upload
+  std::vector<float> surface_col_;
+  std::vector<std::uint32_t> surface_idx_;
+  int surface_index_count_ = 0;
+  bool surface_dirty_ = false;
+  bool surface_visible_ = true;
+  float surface_alpha_ = 1.0f;
 
   // Recentred geometry + the per-point scalars used for colouring.
   std::vector<QVector3D> pts_;     // world soundings minus centroid

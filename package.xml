@@ -30,6 +30,7 @@
   <depend>marine_sonar_widgets</depend>
   <depend>marine_survey_index</depend>
   <depend>marine_tiled_raster_store</depend>
+  <depend>cube_bathymetry</depend>
   <depend>libsqlite3-dev</depend>
   <depend>geographic_msgs</depend>
   <depend>cv_bridge</depend>

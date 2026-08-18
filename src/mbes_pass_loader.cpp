@@ -72,16 +72,29 @@ CloudLoadOutcome load_cloud_passes(
           -t.rotation.x, -t.rotation.y, -t.rotation.z, t.rotation.w,
           ex - t.translation.x, ey - t.translation.y, ez - t.translation.z,
           cx, cy, cz);
-        const double m2 = clip->margin_m * clip->margin_m;
-        res.world_soundings.erase(
-          std::remove_if(
-            res.world_soundings.begin(), res.world_soundings.end(),
-            [&](const MbesSounding & s) {
-              const double dx = s.x - cx;
-              const double dy = s.y - cy;
-              return dx * dx + dy * dy > m2;
-            }),
-          res.world_soundings.end());
+        if (clip->isBox()) {
+          // Box clip (#27): axis-aligned about the centre in this frame.
+          const double he = clip->half_east_m;
+          const double hn = clip->half_north_m;
+          res.world_soundings.erase(
+            std::remove_if(
+              res.world_soundings.begin(), res.world_soundings.end(),
+              [&](const MbesSounding & s) {
+                return std::abs(s.x - cx) > he || std::abs(s.y - cy) > hn;
+              }),
+            res.world_soundings.end());
+        } else {
+          const double m2 = clip->margin_m * clip->margin_m;
+          res.world_soundings.erase(
+            std::remove_if(
+              res.world_soundings.begin(), res.world_soundings.end(),
+              [&](const MbesSounding & s) {
+                const double dx = s.x - cx;
+                const double dy = s.y - cy;
+                return dx * dx + dy * dy > m2;
+              }),
+            res.world_soundings.end());
+        }
       } else {
         out.notes << QString("%1: no geo anchor — not clipped")
           .arg(QString::fromStdString(pass.label));

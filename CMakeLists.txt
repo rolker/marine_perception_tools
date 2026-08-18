@@ -18,6 +18,13 @@ find_package(ffmpeg_encoder_decoder REQUIRED)
 find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(geographic_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
+find_package(cube_bathymetry REQUIRED)
+# cube_bathymetry's exported include interface stops at install/.../include,
+# but its headers install under include/cube_bathymetry/cube_bathymetry/…
+# (INSTALL_INTERFACE misses the include/${PROJECT_NAME} level — upstream
+# issue candidate). Resolve the real header root once, consumer-side.
+find_path(CUBE_BATHYMETRY_INCLUDE_ROOT cube_bathymetry/grid.h
+  PATHS ${cube_bathymetry_INCLUDE_DIRS} PATH_SUFFIXES cube_bathymetry REQUIRED)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(marine_autonomy REQUIRED)
 find_package(marine_colormap REQUIRED)
@@ -139,6 +146,7 @@ add_executable(survey_explorer
   src/mbes_pass_loader.cpp
   src/time_bar_widget.cpp
   src/basemap_lod.cpp
+  src/cube_lab.cpp
 )
 target_link_libraries(survey_explorer
   sidescan_core
@@ -149,7 +157,10 @@ target_link_libraries(survey_explorer
   Qt${QT_VERSION_MAJOR}::Gui
   Qt${QT_VERSION_MAJOR}::OpenGL)
 ament_target_dependencies(survey_explorer
-  marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
+  cube_bathymetry marine_autonomy marine_colormap marine_sonar_widgets
+  marine_tiled_raster_store)
+target_include_directories(survey_explorer SYSTEM PRIVATE
+  ${CUBE_BATHYMETRY_INCLUDE_ROOT})
 
 # Back-compat shim (#22): the old executable name execs the explorer.
 add_executable(sidescan_target_viewer src/sidescan_target_viewer_shim.cpp)
@@ -263,6 +274,16 @@ if(BUILD_TESTING)
   target_include_directories(test_mbes_pass_loader PRIVATE src)
   target_link_libraries(test_mbes_pass_loader sidescan_core Qt${QT_VERSION_MAJOR}::Core)
 
+  # Box CUBE lab (#27): the in-process CUBE runner + mesh builder against
+  # synthetic soundings.
+  ament_add_gtest(test_cube_lab
+    test/test_cube_lab.cpp
+    src/cube_lab.cpp)
+  target_include_directories(test_cube_lab PRIVATE src)
+  ament_target_dependencies(test_cube_lab cube_bathymetry marine_colormap)
+  target_include_directories(test_cube_lab SYSTEM PRIVATE
+    ${CUBE_BATHYMETRY_INCLUDE_ROOT})
+
   # LOD level selection (#26): behavioural invariants of the camp ADR-0013
   # selector against the gggs ladder.
   ament_add_gtest(test_basemap_lod
@@ -286,10 +307,14 @@ if(BUILD_TESTING)
     src/point_cloud_view.cpp
     src/mbes_pass_loader.cpp
     src/time_bar_widget.cpp
-    src/basemap_lod.cpp)
+    src/basemap_lod.cpp
+    src/cube_lab.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
   ament_target_dependencies(test_survey_explorer_window
-    marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
+    cube_bathymetry marine_autonomy marine_colormap marine_sonar_widgets
+    marine_tiled_raster_store)
+  target_include_directories(test_survey_explorer_window SYSTEM PRIVATE
+    ${CUBE_BATHYMETRY_INCLUDE_ROOT})
   target_link_libraries(test_survey_explorer_window
     sidescan_core
     survey_index_bridge

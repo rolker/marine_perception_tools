@@ -203,6 +203,11 @@ signals:
   // LOD basemap re-evaluates its level + visible-tile demand load (#26).
   void viewChanged();
 
+  // Shift-drag CUBE box (#27): a geographic box was drawn / cleared (a
+  // shift-click without a drag clears). The box stays as a map overlay.
+  void cubeBoxSelected(double south, double west, double north, double east);
+  void cubeBoxCleared();
+
 protected:
   void paintEvent(QPaintEvent * event) override;
   void resizeEvent(QResizeEvent * event) override;
@@ -276,6 +281,10 @@ private:
   bool band_selecting_ = false;   // mid ctrl-drag rubber band
   QPoint band_start_;
   QPoint band_cur_;
+  bool cube_box_selecting_ = false;   // mid shift-drag CUBE box (#27)
+  QPoint cube_box_start_;
+  QPoint cube_box_cur_;
+  std::optional<GeoRect> cube_box_geo_;   // the persistent box overlay
 
   // --- per-bag layers ---
   QImage coverage_;

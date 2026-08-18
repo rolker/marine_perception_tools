@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "cube_lab.hpp"
 #include "marine_contacts/contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
 #include "mbes_pass_loader.hpp"
@@ -106,6 +107,17 @@ struct CloudLoadTicket
 {
   std::uint64_t generation = 0;
   CloudLoadOutcome outcome;
+};
+
+// A box-CUBE run in flight (#27): the gathered box soundings (reference
+// world frame) + the estimated surface. Superseded via the generation.
+struct CubeLabTicket
+{
+  std::uint64_t generation = 0;
+  std::vector<MbesSounding> soundings;
+  CubeSurface surface;
+  QStringList notes;
+  qint64 elapsed_ms = 0;
 };
 
 
@@ -204,6 +216,15 @@ private:
   // Build + wire the per-pane colour-range controls (#26); ctor helper, must
   // run before the pane headers consume the widgets.
   void setupRangeControls();
+  // Build + wire the CUBE-lab controls row (#27) into the cloud pane;
+  // ctor helper, run after the pane exists.
+  void setupCubeLab(QWidget * cloud_pane);
+  // Gather the box's mbes passes, load + clip their soundings, run CUBE at
+  // the chosen cell size on a worker; results land in onCubeLabFinished.
+  void runCubeLab();
+  // Re-triangulate + recolour the stored surface for the shade combo (cheap;
+  // no CUBE re-run) and hand it to the cloud pane.
+  void refreshCubeSurface();
   // Re-render the legend's baked pass labels after a display-zone change.
   void refreshPassLabels();
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
@@ -339,6 +360,18 @@ private:
   RangeControls wc_range_;      // water column: black/white points, 0..1
   RangeControls cloud_range_;   // 3D cloud scalar (depth m / intensity)
   RangeControls map_range_;     // basemap contrast, layer units
+
+  // CUBE lab (#27): the shift-drag box, its in-flight run and last surface.
+  std::optional<GeoRect> cube_box_;
+  QFutureWatcher<CubeLabTicket> cube_watcher_;
+  std::uint64_t cube_gen_ = 0;
+  CubeSurface cube_surface_;
+  QDoubleSpinBox * cube_cell_spin_ = nullptr;
+  QComboBox * cube_order_combo_ = nullptr;
+  QPushButton * cube_run_btn_ = nullptr;
+  QCheckBox * cube_surf_check_ = nullptr;
+  QDoubleSpinBox * cube_alpha_spin_ = nullptr;
+  QComboBox * cube_shade_combo_ = nullptr;
   // Clip the selection cloud to the selected contact + margin (#24 desk
   // finding: several passes over a tile is millions of soundings).
   QCheckBox * clip_contact_check_ = nullptr;

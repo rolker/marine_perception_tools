@@ -23,6 +23,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFileDialog>
@@ -562,6 +563,214 @@ void SidescanViewerWindow::setupRangeControls()
     });
 }
 
+void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
+{
+  // CUBE-lab controls (#27) in their own row under the cloud pane's header:
+  // cell size, IHO order, the explicit Run trigger (CUBE is expensive — no
+  // auto-runs), and the surface's display controls.
+  cube_cell_spin_ = new QDoubleSpinBox(this);
+  cube_cell_spin_->setRange(0.02, 50.0);
+  cube_cell_spin_->setDecimals(2);
+  cube_cell_spin_->setSingleStep(0.05);
+  cube_cell_spin_->setValue(0.1);
+  cube_cell_spin_->setSuffix(" m");
+  cube_cell_spin_->setToolTip("CUBE node spacing");
+  cube_order_combo_ = new QComboBox(this);
+  for (const auto * order : {"exclusive", "special", "order1a", "order1b", "order2"}) {
+    cube_order_combo_->addItem(order);
+  }
+  cube_order_combo_->setCurrentText("order1a");
+  cube_order_combo_->setToolTip("IHO order (CUBE capture/hypothesis limits)");
+  cube_run_btn_ = new QPushButton("Run CUBE", this);
+  cube_run_btn_->setEnabled(false);   // until a shift-drag box exists
+  cube_run_btn_->setToolTip(
+    "Gather every MBES sounding in the shift-drag map box and CUBE it "
+    "at the chosen cell size");
+  cube_surf_check_ = new QCheckBox("surface", this);
+  cube_surf_check_->setChecked(true);
+  cube_alpha_spin_ = new QDoubleSpinBox(this);
+  cube_alpha_spin_->setRange(0.05, 1.0);
+  cube_alpha_spin_->setDecimals(2);
+  cube_alpha_spin_->setSingleStep(0.1);
+  cube_alpha_spin_->setValue(1.0);
+  cube_alpha_spin_->setToolTip("Surface opacity");
+  cube_shade_combo_ = new QComboBox(this);
+  cube_shade_combo_->addItems({"Depth", "Uncertainty", "Backscatter"});
+  cube_shade_combo_->setToolTip(
+    "Surface colouring: depth, CUBE uncertainty, or CUBE-settled backscatter");
+
+  auto * row = new QHBoxLayout();
+  row->setContentsMargins(2, 0, 2, 0);
+  row->addWidget(new QLabel("CUBE:", this));
+  row->addWidget(cube_cell_spin_);
+  row->addWidget(cube_order_combo_);
+  row->addWidget(cube_run_btn_);
+  row->addStretch(1);
+  row->addWidget(cube_surf_check_);
+  row->addWidget(cube_alpha_spin_);
+  row->addWidget(cube_shade_combo_);
+  // make_pane builds a QVBoxLayout(header, view); the lab row slots between.
+  if (auto * v = qobject_cast<QVBoxLayout *>(cloud_pane->layout())) {
+    v->insertLayout(1, row);
+  }
+
+  connect(cube_run_btn_, &QPushButton::clicked, this, [this]() {runCubeLab();});
+  connect(cube_surf_check_, &QCheckBox::toggled,
+    this, [this](bool on) {cloud_->setSurfaceVisible(on);});
+  connect(
+    cube_alpha_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, [this](double a) {cloud_->setSurfaceAlpha(static_cast<float>(a));});
+  connect(cube_shade_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {refreshCubeSurface();});
+  connect(&cube_watcher_, &QFutureWatcher<CubeLabTicket>::finished, this, [this]() {
+      CubeLabTicket ticket = cube_watcher_.result();
+      if (ticket.generation != cube_gen_) {
+        return;   // a newer run superseded this one
+      }
+      cube_surface_ = std::move(ticket.surface);
+      if (!cube_surface_.ok()) {
+        cloud_->clearSurface();
+        status_->setText(QString("CUBE: %1%2")
+        .arg(QString::fromStdString(cube_surface_.note))
+        .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
+        cube_run_btn_->setEnabled(cube_box_.has_value());
+        return;
+      }
+      // The lab owns the cloud pane now: plain points in the same frame as
+      // the surface, scalar modes + range controls live.
+      selection_cloud_ = false;
+      ++cloud_gen_;   // any tile-selection load in flight is stale
+      cloud_legend_->clear();
+      cloud_legend_->setVisible(false);
+      cloud_color_combo_->setEnabled(true);
+      cloud_->setColorMode(
+        cloud_color_combo_->currentIndex() == 1 ?
+        PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
+      cloud_->setPoints(ticket.soundings);
+      refreshCubeSurface();
+      status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5")
+      .arg(cube_surface_.cell_m)
+      .arg(cube_surface_.soundings_in)
+      .arg(QString::fromStdString(cube_surface_.note))
+      .arg(ticket.elapsed_ms / 1000.0, 0, 'f', 1)
+      .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
+      cube_run_btn_->setEnabled(cube_box_.has_value());
+    });
+
+  connect(canvas_, &SidescanCanvas::cubeBoxSelected, this,
+    [this](double s, double w, double n, double e) {
+      cube_box_ = GeoRect{s, w, n, e};
+      cube_run_btn_->setEnabled(true);
+      constexpr double kMetersPerDegLat = 111320.0;
+      const double h_m = (n - s) * kMetersPerDegLat;
+      const double w_m = (e - w) * kMetersPerDegLat *
+      std::max(0.01, std::cos(0.5 * (s + n) * M_PI / 180.0));
+      status_->setText(QString("CUBE box: %1 x %2 m — press Run CUBE.")
+      .arg(w_m, 0, 'f', 0).arg(h_m, 0, 'f', 0));
+    });
+  connect(canvas_, &SidescanCanvas::cubeBoxCleared, this, [this]() {
+      cube_box_.reset();
+      cube_run_btn_->setEnabled(false);
+      status_->setText("CUBE box cleared.");
+    });
+}
+
+void SidescanViewerWindow::runCubeLab()
+{
+  if (!bridge_ || !cube_box_) {
+    return;
+  }
+  std::vector<marine_survey_index::PassRow> rows;
+  try {
+    rows = bridge_->queryBox(
+      cube_box_->south, cube_box_->west, cube_box_->north, cube_box_->east,
+      "mbes-bathy");
+  } catch (const std::exception & e) {
+    status_->setText(QString("CUBE pass query failed: %1").arg(e.what()));
+    return;
+  }
+  std::vector<CloudPassInfo> passes;
+  for (const auto & p : coalescePasses(rows)) {
+    CloudPassInfo info;
+    info.bag_path = p.bag_path;
+    info.t_start_ns = p.t_start_ns;
+    info.t_end_ns = p.t_end_ns;
+    info.label = passLabel(p.t_start_ns, p.bag_path);
+    passes.push_back(std::move(info));
+  }
+  if (passes.empty()) {
+    status_->setText("CUBE: no MBES passes intersect the box.");
+    return;
+  }
+
+  // Load clip: the geographic box about its centre (evaluated per pass in
+  // its own world frame; the loader's ENU-alignment assumption).
+  constexpr double kMetersPerDegLat = 111320.0;
+  GeoClip clip;
+  clip.lat = 0.5 * (cube_box_->south + cube_box_->north);
+  clip.lon = 0.5 * (cube_box_->west + cube_box_->east);
+  clip.alt = 0.0;
+  clip.half_north_m =
+    0.5 * (cube_box_->north - cube_box_->south) * kMetersPerDegLat;
+  clip.half_east_m = 0.5 * (cube_box_->east - cube_box_->west) *
+    kMetersPerDegLat * std::max(0.01, std::cos(clip.lat * M_PI / 180.0));
+
+  const double cell_m = cube_cell_spin_->value();
+  const std::string order = cube_order_combo_->currentText().toStdString();
+  ++cube_gen_;
+  const auto gen = cube_gen_;
+  cube_run_btn_->setEnabled(false);
+  status_->setText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
+    .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
+  cube_watcher_.setFuture(
+    QtConcurrent::run([passes, clip, cell_m, order, gen]() {
+      CubeLabTicket ticket;
+      ticket.generation = gen;
+      QElapsedTimer timer;
+      timer.start();
+      try {
+        auto outcome = load_cloud_passes(passes, clip);
+        ticket.notes = std::move(outcome.notes);
+        std::size_t total = 0;
+        for (const auto & pc : outcome.pass_clouds) {
+          total += pc.size();
+        }
+        ticket.soundings.reserve(total);
+        for (auto & pc : outcome.pass_clouds) {
+          ticket.soundings.insert(ticket.soundings.end(), pc.begin(), pc.end());
+        }
+        ticket.surface = run_cube(ticket.soundings, cell_m, order);
+      } catch (const std::exception & e) {
+        ticket.surface = CubeSurface{};
+        ticket.surface.note = e.what();
+      }
+      ticket.elapsed_ms = timer.elapsed();
+      return ticket;
+    }));
+}
+
+void SidescanViewerWindow::refreshCubeSurface()
+{
+  if (!cube_surface_.ok()) {
+    cloud_->clearSurface();
+    return;
+  }
+  const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const CubeShade shade =
+    (shade_i == 1) ? CubeShade::Uncertainty :
+    (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
+  const std::size_t n_pal = marine_colormap::palette_count();
+  const auto pal_i = (n_pal > 0) ?
+    static_cast<std::size_t>(std::clamp(
+      cloud_palette_ ? cloud_palette_->currentIndex() : 0, 0,
+      static_cast<int>(n_pal - 1))) : 0;
+  const auto lut = marine_colormap::bake_lut(
+    marine_colormap::palette(pal_i), marine_colormap::TransferParams{}, 256);
+  auto mesh = build_cube_mesh(cube_surface_, shade, lut);
+  cloud_->setSurface(
+    std::move(mesh.positions), std::move(mesh.colors), std::move(mesh.indices));
+}
+
 SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 : QMainWindow(parent)
 {
@@ -778,6 +987,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     {clip_contact_check_, clip_margin_spin_, cloud_color_combo_,
       cloud_range_.auto_check, cloud_range_.lo, cloud_range_.hi,
       zexag_spin_, point_size_spin_, cloud_palette_});
+  setupCubeLab(cloud_pane);   // the CUBE-lab controls row (#27)
 
   // 2x2 grid of the four sonar views, each pane independently resizable:
   //   sidescan waterfall (UL) | MBES backscatter (UR)
@@ -1056,7 +1266,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(echo_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int i) {echogram_->set_color_map(marine_colormap::palette(i));});
   connect(cloud_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-    this, [this](int i) {cloud_->setColorMap(i);});
+    this, [this](int i) {
+      cloud_->setColorMap(i);
+      refreshCubeSurface();   // the surface shares the cloud palette (#27)
+    });
 
   // Cross-pane linked cursor + middle-click-to-seek. Every pane reports a hovered /
   // clicked world point (the echogram works in along-track fraction); the window
@@ -1118,6 +1331,7 @@ SidescanViewerWindow::~SidescanViewerWindow()
   }
   if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
   if (cloud_watcher_.isRunning()) {cloud_watcher_.waitForFinished();}
+  if (cube_watcher_.isRunning()) {cube_watcher_.waitForFinished();}
   // basemap_lod_ is a child QObject: its destructor (which cancels + waits
   // its own worker) runs during QObject teardown after this body.
 }
@@ -2025,6 +2239,10 @@ void SidescanViewerWindow::onTileSelectionChanged()
   time_bar_->setVisible(true);
 
   // Selection mode: the cloud pane belongs to the selection until it clears.
+  // A CUBE surface from a previous load is in a different reference frame —
+  // drop it rather than draw it misplaced (#27).
+  cube_surface_ = CubeSurface{};
+  cloud_->clearSurface();
   selection_cloud_ = true;
   cloud_->setColorMode(PointCloudView::ColorMode::Pass);
   cloud_color_combo_->setEnabled(false);
@@ -2105,6 +2323,8 @@ void SidescanViewerWindow::refreshPassLabels()
 void SidescanViewerWindow::exitSelectionCloud()
 {
   selection_passes_.clear();
+  cube_surface_ = CubeSurface{};   // the scrub cloud is a different frame (#27)
+  cloud_->clearSurface();
   if (time_bar_) {
     time_bar_->clearPasses();
     // The extent survives the selection: the campaign (index mode), else the
