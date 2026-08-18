@@ -1196,6 +1196,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
+  file_menu->addAction(
+    "Open Survey &Index…", this, &SidescanViewerWindow::onOpenIndex);
   file_menu->addAction("&Fit View", this, [this]() {
       canvas_->resetView();
       cloud_->resetView();
@@ -1537,6 +1539,28 @@ void SidescanViewerWindow::onOpenBag()
 {
   const QString dir = QFileDialog::getExistingDirectory(this, "Open ROS 2 bag directory");
   if (!dir.isEmpty()) {openBag(dir.toStdString());}
+}
+
+void SidescanViewerWindow::onOpenIndex()
+{
+  const QString path = QFileDialog::getOpenFileName(
+    this, "Open survey index", QString(),
+    "Survey index (*.db);;All files (*)");
+  if (path.isEmpty()) {
+    return;
+  }
+  // Same stores default as the --stores CLI option: the sibling
+  // bathymetry/survey layer next to the index (discovery finds the rest).
+  const std::string index_path = path.toStdString();
+  const std::string stores_dir =
+    (std::filesystem::path(index_path).parent_path() /
+    "bathymetry" / "survey").string();
+  try {
+    openSurveyIndex(index_path, stores_dir);
+  } catch (const std::exception & e) {
+    QMessageBox::critical(
+      this, "Open survey index failed", QString::fromUtf8(e.what()));
+  }
 }
 
 void SidescanViewerWindow::scheduleOpen(

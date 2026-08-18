@@ -171,6 +171,7 @@ signals:
 
 private slots:
   void onOpenBag();
+  void onOpenIndex();   // File menu: pick a survey_index.db (#27 follow-up)
   void onIndexProgress(quint64 epoch, double resolved_distance_m, bool done);
   void onSessionOpened(quint64 epoch);
   void onOpenFailed(quint64 epoch, const QString & message);
