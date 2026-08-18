@@ -615,6 +615,16 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "Flat cells: each CUBE node renders as one crisp cell at its own depth "
     "and colour — the estimate's true resolution, no blending. Uncheck for "
     "the smooth-shaded relief.");
+  cube_palette_ = new QComboBox(this);
+  for (const auto & name : marine_colormap::palette_names()) {
+    cube_palette_->addItem(QString::fromStdString(name));
+  }
+  if (const auto vi = marine_colormap::palette_index("bronze")) {
+    cube_palette_->setCurrentIndex(static_cast<int>(*vi));
+  }
+  cube_palette_->setToolTip(
+    "Surface palette — independent of the point cloud's, so cloud and "
+    "surface can contrast");
 
   auto * row = new QHBoxLayout();
   row->setContentsMargins(2, 0, 2, 0);
@@ -628,6 +638,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(cube_surf_check_);
   row->addWidget(cube_alpha_spin_);
   row->addWidget(cube_shade_combo_);
+  row->addWidget(cube_palette_);
   row->addWidget(cube_flat_check_);
   // make_pane builds a QVBoxLayout(header, view); the lab row slots between.
   if (auto * v = qobject_cast<QVBoxLayout *>(cloud_pane->layout())) {
@@ -749,6 +760,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     this, [this](int) {refreshCubeSurface();});
   connect(cube_flat_check_, &QCheckBox::toggled,
     this, [this](bool) {refreshCubeSurface();});
+  connect(cube_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {refreshCubeSurface();});
   connect(&cube_watcher_, &QFutureWatcher<CubeLabTicket>::finished, this, [this]() {
       CubeLabTicket ticket = cube_watcher_.result();
       if (ticket.generation != cube_gen_) {
@@ -919,7 +932,7 @@ void SidescanViewerWindow::refreshCubeSurface()
   const std::size_t n_pal = marine_colormap::palette_count();
   const auto pal_i = (n_pal > 0) ?
     static_cast<std::size_t>(std::clamp(
-      cloud_palette_ ? cloud_palette_->currentIndex() : 0, 0,
+      cube_palette_ ? cube_palette_->currentIndex() : 0, 0,
       static_cast<int>(n_pal - 1))) : 0;
   const auto lut = marine_colormap::bake_lut(
     marine_colormap::palette(pal_i), marine_colormap::TransferParams{}, 256);
@@ -1430,10 +1443,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(echo_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int i) {echogram_->set_color_map(marine_colormap::palette(i));});
   connect(cloud_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-    this, [this](int i) {
-      cloud_->setColorMap(i);
-      refreshCubeSurface();   // the surface shares the cloud palette (#27)
-    });
+    this, [this](int i) {cloud_->setColorMap(i);});
 
   // Cross-pane linked cursor + middle-click-to-seek. Every pane reports a hovered /
   // clicked world point (the echogram works in along-track fraction); the window

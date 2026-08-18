@@ -379,6 +379,7 @@ private:
   QCheckBox * cube_points_check_ = nullptr;
   QCheckBox * cube_surf_check_ = nullptr;
   QCheckBox * cube_flat_check_ = nullptr;   // true-resolution flat cells
+  QComboBox * cube_palette_ = nullptr;      // surface palette, independent of the cloud's
   QPushButton * cube_params_btn_ = nullptr;
   CubeTuning cube_tuning_;   // seeded from the library defaults in setupCubeLab
   // File-menu quick reload: shows the remembered index (QSettings) and
