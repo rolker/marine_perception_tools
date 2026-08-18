@@ -74,6 +74,7 @@
 #include <utility>
 #include <vector>
 
+#include "basemap_contrast.hpp"
 #include "basemap_lod.hpp"
 #include "cube_export.hpp"
 #include "sidescan_drape_loader.hpp"
@@ -1065,15 +1066,18 @@ void SidescanViewerWindow::refreshCubeSurface()
       lo = static_cast<float>(ss_range_.lo->value());
       hi = static_cast<float>(ss_range_.hi->value());
     } else {
-      // Auto: the painted amplitudes' own extent.
-      lo = std::numeric_limits<float>::max();
-      hi = std::numeric_limits<float>::lowest();
+      // Auto: robust percentiles of the painted amplitudes (the stores'
+      // contrast convention — outliers must not own the ramp).
+      std::vector<double> samples;
+      samples.reserve(cube_drape_.amplitude.size());
       for (const auto a : cube_drape_.amplitude) {
         if (std::isfinite(a)) {
-          lo = std::min(lo, a);
-          hi = std::max(hi, a);
+          samples.push_back(a);
         }
       }
+      const auto [rlo, rhi] = robust_range(samples);
+      lo = static_cast<float>(rlo);
+      hi = static_cast<float>(rhi);
       if (!(hi > lo)) {
         lo = 0.0f;
         hi = 1.0f;

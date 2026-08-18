@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "basemap_contrast.hpp"
 #include "cube_bathymetry/node.h"
 #include "cube_bathymetry/parameters.h"
 #include "cube_bathymetry/sizes.h"
@@ -368,12 +369,20 @@ CubeSurfaceMesh build_cube_mesh(
     lo = range->first;
     hi = range->second;
   } else {
+    // Robust percentile contrast (the stores' convention, basemap_contrast):
+    // a raw min/max ramp lets a few outlier cells own the whole scale, which
+    // is exactly why the backscatter shade looked washed out next to the
+    // store imagery.
+    std::vector<double> samples;
+    samples.reserve(scalar.size());
     for (std::size_t i = 0; i < scalar.size(); ++i) {
       if (std::isfinite(surface.depth[i]) && std::isfinite(scalar[i])) {
-        lo = std::min(lo, scalar[i]);
-        hi = std::max(hi, scalar[i]);
+        samples.push_back(scalar[i]);
       }
     }
+    const auto [rlo, rhi] = robust_range(samples);
+    lo = static_cast<float>(rlo);
+    hi = static_cast<float>(rhi);
   }
   if (!(hi >= lo)) {
     lo = 0.0f;
