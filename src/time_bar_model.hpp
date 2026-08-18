@@ -20,11 +20,12 @@
 
 // Pure tick-ladder math for the GeoZui-style time bar (#24): a continuous
 // multi-resolution ladder (milliseconds -> deciseconds -> seconds -> minutes
-// -> hours -> weekday-named days -> months -> years) where each level draws
+// -> hours -> dated days -> months -> years) where each level draws
 // only while its tick spacing is in [3 px, 100k px), tick height grows
 // smoothly with spacing, and labels appear as room allows. Ported from
-// GeoZui4D's TimeControl::drawTimeScale/drawTicks (rja, 2002) with the
-// calendar decomposition fixed to UTC (bag stamps are UTC). Qt-free and
+// GeoZui4D's TimeControl::drawTimeScale/drawTicks (rja, 2002). Times are
+// UNIX ns (UTC, like bag stamps); the calendar decomposition can be shifted
+// into a display timezone via `utc_offset_s` (#26). Qt-free and
 // unit-testable; the widget draws what this computes.
 
 #include <algorithm>
@@ -56,6 +57,8 @@ struct TickRow
 
 namespace time_bar_detail
 {
+
+constexpr double kDaySeconds = 3600.0 * 24.0;
 
 inline const char * dayName(int wday)
 {
@@ -130,6 +133,58 @@ inline TickRow makeRow(
   return row;
 }
 
+// Advance a civil date (0-based month) by one day, rolling weekday, month
+// and year.
+inline void advanceDay(int & wday, int & mday, int & mon, int & year)
+{
+  wday = (wday + 1) % 7;
+  if (++mday > daysInMonth(mon, year)) {
+    mday = 1;
+    if (++mon == 12) {
+      mon = 0;
+      ++year;
+    }
+  }
+}
+
+// The day-level row walks the civil calendar so labels can carry the date,
+// not just the weekday. `wday/mday/mon/year` describe the window's LEFT
+// edge; the first tick is the next midnight. Labels grow with the room a
+// tick has: "Mon 22" past the ladder's 50 px labelling threshold,
+// "Mon Jun 22" once ticks are 90 px apart.
+inline TickRow makeDayRow(
+  double start_px, int wday, int mday, int mon, int year,
+  double width_px, double spp)
+{
+  TickRow row;
+  row.interval_s = kDaySeconds;
+  const double px = kDaySeconds / spp;
+  row.px_interval = px;
+  if (px < 3.0 || px >= 100000.0 || width_px <= 0.0) {
+    return row;   // level invisible at this zoom
+  }
+  row.tick_frac = std::min(1.0, 0.8 * (1.0 - 3.0 / px));
+  for (double x = start_px; x < width_px; x += px) {
+    advanceDay(wday, mday, mon, year);
+    if (x <= 0.0) {
+      continue;
+    }
+    TimeTick tick;
+    tick.x_px = x;
+    if (px > 90.0) {
+      char buf[32];
+      std::snprintf(buf, sizeof(buf), "%s %s %i", dayName(wday), monthName(mon), mday);
+      tick.label = buf;
+    } else if (px > 50.0) {
+      char buf[32];
+      std::snprintf(buf, sizeof(buf), "%s %i", dayName(wday), mday);
+      tick.label = buf;
+    }
+    row.ticks.push_back(std::move(tick));
+  }
+  return row;
+}
+
 }  // namespace time_bar_detail
 
 // A nanosecond count computed in double, saturated just inside int64 range —
@@ -154,8 +209,13 @@ inline std::int64_t offsetTimeNs(std::int64_t base_ns, double span_px, double sp
 // invisible at this zoom come back with no ticks. Month/year stepping uses
 // the original's average-length approximation past the first (calendar-
 // derived) tick — display-grade, like the source design.
+// `utc_offset_s` shifts the calendar decomposition into a display timezone
+// (e.g. -14400 for EDT): tick POSITIONS stay at the same real instants, but
+// hour numbers, midnights and dates read in that zone. The offset is a
+// single value for the whole window — display-grade across a DST change
+// inside one view (the caller re-derives it per repaint).
 inline std::vector<TickRow> computeTickLadder(
-  std::int64_t left_ns, double spp, double width_px)
+  std::int64_t left_ns, double spp, double width_px, int utc_offset_s = 0)
 {
   using time_bar_detail::makeRow;
 
@@ -164,11 +224,17 @@ inline std::vector<TickRow> computeTickLadder(
     return rows;
   }
 
+  // The shifted value only feeds the civil-field decomposition below; sum in
+  // double and saturate, as a left edge already near the int64 rails plus an
+  // offset would overflow (UB) in int64.
+  const std::int64_t disp_ns = saturateNs(
+    static_cast<double>(left_ns) + static_cast<double>(utc_offset_s) * 1e9);
+
   // Floor-divide: '/' and '%' truncate toward zero, so a pre-epoch left edge
   // (reachable by panning or zooming left of 1970) would get a negative frac
   // and a whole second off by one, misplacing every tick in the ladder.
-  std::int64_t whole = left_ns / 1000000000LL;
-  std::int64_t rem = left_ns % 1000000000LL;
+  std::int64_t whole = disp_ns / 1000000000LL;
+  std::int64_t rem = disp_ns % 1000000000LL;
   if (rem < 0) {
     --whole;
     rem += 1000000000LL;
@@ -186,7 +252,7 @@ inline std::vector<TickRow> computeTickLadder(
   const int wday = g.tm_wday;
   const int yday = g.tm_yday;
 
-  constexpr double kDayS = 3600.0 * 24.0;
+  constexpr double kDayS = time_bar_detail::kDaySeconds;
   constexpr double kYearS = kDayS * 365.25;   // approximate, as in the original
   const double seconds_into_day = hour * 3600.0 + min * 60.0 + sec;
   const double seconds_into_year = yday * kDayS + seconds_into_day;
@@ -208,9 +274,9 @@ inline std::vector<TickRow> computeTickLadder(
   // hours
   rows.push_back(makeRow(3600.0, (3600.0 - (min * 60.0 + sec)) / spp, hour + 1,
     24, "%ih", 6, width_px, spp));
-  // days (weekday names)
-  rows.push_back(makeRow(kDayS, (kDayS - seconds_into_day) / spp, wday + 1, 7,
-    "d", 0, width_px, spp));
+  // days (weekday name + date, walking the civil calendar)
+  rows.push_back(time_bar_detail::makeDayRow(
+      (kDayS - seconds_into_day) / spp, wday, mday, mon, year, width_px, spp));
   // months (names; average-month stepping past the calendar-true first tick)
   const double dim = time_bar_detail::daysInMonth(mon, year) * kDayS;
   rows.push_back(makeRow(kYearS / 12.0,

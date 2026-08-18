@@ -89,6 +89,17 @@ public:
   void setCurrentTime(std::int64_t t_ns);
   std::int64_t currentTime() const {return center_ns_;}
 
+  // Display timezone (#26): false (default) renders the tick ladder, readout
+  // and tooltips in the system local zone (DST-aware, zone-abbreviated);
+  // true renders in UTC — the zone of bag stamps and survey_index_query
+  // output. Real times (signals, extents, passes) are always UNIX ns UTC.
+  void setDisplayUtc(bool utc);
+  bool displayUtc() const {return display_utc_;}
+  // The instant formatted in the current display zone with its abbreviation
+  // (e.g. "2026-06-22 10:38:56 EDT") — for status messages and labels that
+  // should read consistently with the bar.
+  QString formatTime(std::int64_t t_ns) const;
+
   QSize sizeHint() const override;
   QSize minimumSizeHint() const override {return sizeHint();}
 
@@ -120,6 +131,7 @@ private:
   QRectF passBarRect(std::size_t i) const;          // on the tape
   int barAt(const QPointF & pos) const;
   void fitExtent();                                 // view spans the extent
+  int displayOffsetS(std::int64_t t_ns) const;      // display zone's UTC offset
   void startJump(std::int64_t target_ns);
   void commitTime();                                // emit timeSelected(center)
   void pageBy(int direction);
@@ -132,6 +144,7 @@ private:
 
   std::int64_t center_ns_ = 0;                      // time at the centre cursor
   double spp_ = 1.0;                                // seconds per pixel (zoom)
+  bool display_utc_ = false;                        // false = system local zone
   bool user_adjusted_ = false;
   // A pre-layout setExtent must not fit against the unlaid widget width (the
   // canvas's stage-2 lesson): fits stay pending and apply at paint time,

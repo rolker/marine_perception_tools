@@ -54,7 +54,7 @@ constexpr double kMaxSpp = 2.7e6;
 
 const char * kPreferredLanes[] = {"mbes-bathy", "sidescan-port", "sidescan-starboard"};
 
-QString isoUtc(std::int64_t t_ns)
+std::int64_t floorMs(std::int64_t t_ns)
 {
   // Floor-divide: truncation rounds pre-epoch times toward zero, shifting
   // the displayed second when within 1 ms past a second boundary.
@@ -62,8 +62,7 @@ QString isoUtc(std::int64_t t_ns)
   if (t_ns % 1000000LL < 0) {
     --ms;
   }
-  return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::utc())
-         .toString("yyyy-MM-dd HH:mm:ss");
+  return ms;
 }
 
 QColor barColor(const TimelinePassInfo & info)
@@ -207,6 +206,37 @@ void TimeBarWidget::setCurrentTime(std::int64_t t_ns)
   emit centerTimeChanged(static_cast<qlonglong>(center_ns_));
 }
 
+void TimeBarWidget::setDisplayUtc(bool utc)
+{
+  if (display_utc_ == utc) {
+    return;
+  }
+  display_utc_ = utc;
+  update();
+}
+
+int TimeBarWidget::displayOffsetS(std::int64_t t_ns) const
+{
+  if (display_utc_) {
+    return 0;
+  }
+  // The zone's total offset (base + DST) at that instant — so a ladder over
+  // June reads EDT while one over January reads EST.
+  return QTimeZone::systemTimeZone().offsetFromUtc(
+    QDateTime::fromMSecsSinceEpoch(floorMs(t_ns), QTimeZone::utc()));
+}
+
+QString TimeBarWidget::formatTime(std::int64_t t_ns) const
+{
+  if (display_utc_) {
+    return QDateTime::fromMSecsSinceEpoch(floorMs(t_ns), QTimeZone::utc())
+           .toString("yyyy-MM-dd HH:mm:ss") + " UTC";
+  }
+  const QTimeZone tz = QTimeZone::systemTimeZone();
+  const QDateTime dt = QDateTime::fromMSecsSinceEpoch(floorMs(t_ns), tz);
+  return dt.toString("yyyy-MM-dd HH:mm:ss") + " " + tz.abbreviation(dt);
+}
+
 QRectF TimeBarWidget::tapeRect() const
 {
   return QRectF(0.0, 0.0, width(), height() * kTapeFraction);
@@ -320,7 +350,8 @@ void TimeBarWidget::paintEvent(QPaintEvent * event)
   // --- TAPE ----------------------------------------------------------------
   // Tick ladder, minor levels first so major ticks/labels draw over them.
   const std::int64_t left_ns = timeOfX(0.0);
-  const auto ladder = computeTickLadder(left_ns, spp_, width());
+  const auto ladder = computeTickLadder(
+    left_ns, spp_, width(), displayOffsetS(left_ns));
   painter.setFont(big);
   for (const auto & row : ladder) {
     for (const auto & tick : row.ticks) {
@@ -382,7 +413,7 @@ void TimeBarWidget::paintEvent(QPaintEvent * event)
   // Current-time readout, top-right.
   painter.setFont(big);
   painter.setPen(QColor(255, 255, 255));
-  const QString readout = isoUtc(center_ns_) + " UTC";
+  const QString readout = formatTime(center_ns_);
   const double rw = painter.fontMetrics().horizontalAdvance(readout);
   painter.fillRect(
     QRectF(width() - rw - 8.0, tape.top() + 1.0, rw + 8.0, 13.0), QColor(26, 26, 51));
@@ -396,7 +427,9 @@ void TimeBarWidget::paintEvent(QPaintEvent * event)
   const double sb_spp = static_cast<double>(extent_t1_ - extent_t0_) / 1e9 /
     std::max(1.0, sr.width());
   painter.setFont(small);
-  for (const auto & row : computeTickLadder(extent_t0_, sb_spp, sr.width())) {
+  for (const auto & row : computeTickLadder(
+      extent_t0_, sb_spp, sr.width(), displayOffsetS(extent_t0_)))
+  {
     for (const auto & tick : row.ticks) {
       painter.setPen(QColor(0, 160, 0));
       painter.drawLine(
@@ -509,7 +542,7 @@ void TimeBarWidget::mouseMoveEvent(QMouseEvent * event)
     const double dur_s = static_cast<double>(p.t_end_ns - p.t_start_ns) / 1e9;
     QToolTip::showText(event->globalPos(), QString("%1\n%2 — %3\n%4 s, %5 pings")
       .arg(QFileInfo(QString::fromStdString(p.bag_path)).fileName())
-      .arg(isoUtc(p.t_start_ns)).arg(isoUtc(p.t_end_ns))
+      .arg(formatTime(p.t_start_ns)).arg(formatTime(p.t_end_ns))
       .arg(dur_s, 0, 'f', 1).arg(p.ping_count), this);
   } else {
     QToolTip::hideText();

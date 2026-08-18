@@ -92,13 +92,57 @@ TEST(TimeBarModel, MinuteRolloverWrapsToZero)
 
 TEST(TimeBarModel, WeekdayNamesMatchTheCalendar)
 {
-  // Days at ~1000 s/px: day ticks are 86.4 px apart (labels need > 50 px).
-  // Left edge Monday 00:00 -> first day tick is TUESDAY's start.
+  // Days at ~1000 s/px: day ticks are 86.4 px apart (labels need > 50 px,
+  // the compact weekday+date form below the 90 px full-date threshold).
+  // Left edge Monday 00:00 -> first day tick is TUESDAY's start (Jan 6).
   const auto rows = computeTickLadder(kMonday + 1, 1000.0, 600.0);
   const auto * days = rowFor(rows, 24.0 * 3600.0);
   ASSERT_NE(days, nullptr);
   ASSERT_FALSE(days->ticks.empty());
-  EXPECT_EQ(days->ticks.front().label, "Tue");
+  EXPECT_EQ(days->ticks.front().label, "Tue 6");
+}
+
+TEST(TimeBarModel, DayLabelsGrowToFullDatesWithRoom)
+{
+  // 500 s/px: day ticks 172.8 px apart -> the "Tue Jan 6" full-date form.
+  const auto rows = computeTickLadder(kMonday + 1, 500.0, 600.0);
+  const auto * days = rowFor(rows, 24.0 * 3600.0);
+  ASSERT_NE(days, nullptr);
+  ASSERT_FALSE(days->ticks.empty());
+  EXPECT_EQ(days->ticks.front().label, "Tue Jan 6");
+}
+
+TEST(TimeBarModel, DayDatesRollAcrossTheMonthBoundary)
+{
+  // Left edge Friday 1970-01-30 00:00: ticks land on Sat Jan 31 then
+  // Sun Feb 1 — the civil-date walk must roll the month, not count to 32.
+  const std::int64_t jan30 = kMonday + 25LL * 24 * 3600 * kNsPerS;
+  const auto rows = computeTickLadder(jan30 + 1, 1000.0, 600.0);
+  const auto * days = rowFor(rows, 24.0 * 3600.0);
+  ASSERT_NE(days, nullptr);
+  ASSERT_GE(days->ticks.size(), 2u);
+  EXPECT_EQ(days->ticks[0].label, "Sat 31");
+  EXPECT_EQ(days->ticks[1].label, "Sun 1");
+}
+
+TEST(TimeBarModel, DisplayOffsetShiftsCalendarNotPositions)
+{
+  // UTC-5 (EST): the left edge kMonday (Mon 00:00 UTC) reads Sun 19:00
+  // local, so the next LOCAL midnight — Monday's start — is 5 h into the
+  // window: at 1000 s/px, x = 18 px, labelled with Monday's date (Jan 5).
+  const auto rows = computeTickLadder(kMonday, 1000.0, 600.0, -5 * 3600);
+  const auto * days = rowFor(rows, 24.0 * 3600.0);
+  ASSERT_NE(days, nullptr);
+  ASSERT_FALSE(days->ticks.empty());
+  EXPECT_NEAR(days->ticks.front().x_px, 18.0, 1e-6);
+  EXPECT_EQ(days->ticks.front().label, "Mon 5");
+  // Zero offset keeps the unshifted ladder byte-identical.
+  const auto base = computeTickLadder(kMonday + 1, 1000.0, 600.0);
+  const auto explicit_zero = computeTickLadder(kMonday + 1, 1000.0, 600.0, 0);
+  ASSERT_EQ(base.size(), explicit_zero.size());
+  for (std::size_t i = 0; i < base.size(); ++i) {
+    EXPECT_EQ(base[i].ticks.size(), explicit_zero[i].ticks.size());
+  }
 }
 
 TEST(TimeBarModel, TickHeightGrowsWithSpacing)

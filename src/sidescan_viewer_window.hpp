@@ -194,6 +194,10 @@ private:
   void requestBasemapLoad();
   // Leave selection-cloud mode: restore the scrub-window cloud + colour mode.
   void exitSelectionCloud();
+  // Cloud-legend label for a pass, in the time bar's display zone (#26).
+  std::string passLabel(std::int64_t t_start_ns, const std::string & bag_path) const;
+  // Re-render the legend's baked pass labels after a display-zone change.
+  void refreshPassLabels();
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
   // if a render is in flight, just flag a pending one and re-launch on finish
   // with the latest scrub position.
@@ -296,6 +300,7 @@ private:
   QComboBox * basemap_cmap_ = nullptr;
   QCheckBox * show_track_check_ = nullptr;
   QCheckBox * show_grid_check_ = nullptr;
+  QCheckBox * utc_check_ = nullptr;
   // Clip the selection cloud to the selected contact + margin (#24 desk
   // finding: several passes over a tile is millions of soundings).
   QCheckBox * clip_contact_check_ = nullptr;

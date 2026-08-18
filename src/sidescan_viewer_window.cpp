@@ -94,12 +94,6 @@ namespace marine_perception_tools
 namespace
 {
 
-QString isoUtc(std::int64_t t_ns)
-{
-  return QDateTime::fromMSecsSinceEpoch(t_ns / 1000000LL, QTimeZone::utc())
-         .toString("yyyy-MM-dd HH:mm:ss");
-}
-
 // Colormap one store tile's band 0 into an RGBA image: valid values span the
 // given range, NoData stays transparent so gaps read as gaps instead of
 // painting as the deepest colour. NoData is NaN (the float stores' sentinel);
@@ -783,6 +777,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   show_grid_check_->setToolTip(
     "Show the index-tile grid (selected tiles stay visible)");
   show_grid_check_->setVisible(false);
+  // Times display in the system local zone by default (#26); this switches
+  // the time bar, tooltips, status messages and pass labels to UTC — the
+  // zone of bag stamps and survey_index_query output.
+  utc_check_ = new QCheckBox("UTC", this);
+  utc_check_->setChecked(false);
+  utc_check_->setToolTip(
+    "Display times in UTC instead of local time "
+    "(bag stamps and survey_index_query output are UTC)");
   // Apply each combo's initial palette to its widget (combos don't fire on init).
   waterfall_->set_color_map(marine_colormap::palette(sidescan_cmap_->currentIndex()));
   mbes_waterfall_->set_color_map(marine_colormap::palette(mbes_cmap_->currentIndex()));
@@ -881,6 +883,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   srow->setContentsMargins(0, 0, 0, 0);
   srow->addWidget(status_, 1);
   srow->addWidget(hover_geo_);
+  srow->addWidget(utc_check_);   // right under the time bar it switches
 
   // GeoZui-style time bar (replaced phase d's gap-compressed axis at desk
   // verify): zoomable tape + extent scrollbar under the scrub controls, with
@@ -946,6 +949,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, [this](bool on) {canvas_->setNavTrackVisible(on);});
   connect(show_grid_check_, &QCheckBox::toggled,
     this, [this](bool on) {canvas_->setIndexTilesVisible(on);});
+  connect(utc_check_, &QCheckBox::toggled, this, [this](bool on) {
+      time_bar_->setDisplayUtc(on);
+      refreshPassLabels();
+    });
   // Clip changes re-run the selection load (cheap: the query is local, the
   // read is the same windowed machinery).
   const auto reload_selection = [this]() {
@@ -1976,10 +1983,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
       info.bag_path = p.bag_path;
       info.t_start_ns = p.t_start_ns;
       info.t_end_ns = p.t_end_ns;
-      info.label = QString("%1  (%2)")
-        .arg(isoUtc(p.t_start_ns))
-        .arg(QFileInfo(QString::fromStdString(p.bag_path)).fileName())
-        .toStdString();
+      info.label = passLabel(p.t_start_ns, p.bag_path);
       cloud_passes.push_back(std::move(info));
     }
     timeline_passes.push_back(std::move(bar));
@@ -2042,6 +2046,28 @@ void SidescanViewerWindow::onTileSelectionChanged()
       ticket.outcome = load_cloud_passes(snapshot, clip);
       return ticket;
     }));
+}
+
+std::string SidescanViewerWindow::passLabel(
+  std::int64_t t_start_ns, const std::string & bag_path) const
+{
+  return QString("%1  (%2)")
+         .arg(time_bar_->formatTime(t_start_ns))
+         .arg(QFileInfo(QString::fromStdString(bag_path)).fileName())
+         .toStdString();
+}
+
+void SidescanViewerWindow::refreshPassLabels()
+{
+  // The legend items bake formatted times at load; re-render them in the new
+  // display zone. Counts (column 1) and check states are untouched.
+  for (int i = 0; i < cloud_legend_->topLevelItemCount() &&
+    i < static_cast<int>(cloud_passes_.size()); ++i)
+  {
+    auto & pass = cloud_passes_[static_cast<std::size_t>(i)];
+    pass.label = passLabel(pass.t_start_ns, pass.bag_path);
+    cloud_legend_->topLevelItem(i)->setText(0, QString::fromStdString(pass.label));
+  }
 }
 
 void SidescanViewerWindow::exitSelectionCloud()
@@ -2153,11 +2179,9 @@ void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)
       }
     }
   }
-  const QString when = QDateTime::fromMSecsSinceEpoch(
-    static_cast<qint64>(t_ns / 1000000LL), QTimeZone::utc())
-    .toString("yyyy-MM-dd HH:mm:ss");
   status_->setText(
-    QString("No data at %1 in the open bag or campaign.").arg(when));
+    QString("No data at %1 in the open bag or campaign.")
+    .arg(time_bar_->formatTime(static_cast<std::int64_t>(t_ns))));
 }
 
 void SidescanViewerWindow::onCenterTimeChanged(qlonglong t_ns)
