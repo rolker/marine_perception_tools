@@ -198,6 +198,8 @@ signals:
 private slots:
   void onOpenBag();
   void onOpenIndex();   // File menu: pick a survey_index.db (#27 follow-up)
+  void onExportSurfaceData();   // GeoTIFF: float depth/uncertainty/backscatter
+  void onExportSurfaceRgba();   // GeoTIFF: the rendered shade, RGBA
   void onReopenLastIndex();   // File menu: reload the remembered index
   void onIndexProgress(quint64 epoch, double resolved_distance_m, bool done);
   void onSessionOpened(quint64 epoch);
@@ -257,6 +259,9 @@ private:
   // Re-triangulate + recolour the stored surface for the shade combo (cheap;
   // no CUBE re-run) and hand it to the cloud pane.
   void refreshCubeSurface();
+  // The CUBE frame's world->geo affine, probed through the reference
+  // earth anchor; nullopt without a geo reference (export refuses then).
+  std::optional<MapGeoAffine> cubeSurfaceAnchor() const;
   // Fill the drape pass combo with the sidescan passes crossing the box
   // (port + starboard of the same bag interval merged into one entry).
   void populateDrapePasses();

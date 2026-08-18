@@ -19,6 +19,7 @@ find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(geographic_msgs REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(cube_bathymetry REQUIRED)
+find_package(GDAL CONFIG REQUIRED)
 # cube_bathymetry's exported include interface stops at install/.../include,
 # but its headers install under include/cube_bathymetry/cube_bathymetry/…
 # (INSTALL_INTERFACE misses the include/${PROJECT_NAME} level — upstream
@@ -149,8 +150,10 @@ add_executable(survey_explorer
   src/cube_lab.cpp
   src/sidescan_drape.cpp
   src/sidescan_drape_loader.cpp
+  src/cube_export.cpp
 )
 target_link_libraries(survey_explorer
+  GDAL::GDAL
   sidescan_core
   survey_index_bridge
   marine_contacts::marine_contacts
@@ -297,6 +300,17 @@ if(BUILD_TESTING)
   target_include_directories(test_sidescan_drape SYSTEM PRIVATE
     ${CUBE_BATHYMETRY_INCLUDE_ROOT})
 
+  # GeoTIFF export (#27): write both variants to a temp dir and read them
+  # back with GDAL — geotransform, bands, NoData and pixel values.
+  ament_add_gtest(test_cube_export
+    test/test_cube_export.cpp
+    src/cube_export.cpp)
+  target_include_directories(test_cube_export PRIVATE src)
+  ament_target_dependencies(test_cube_export cube_bathymetry marine_colormap)
+  target_include_directories(test_cube_export SYSTEM PRIVATE
+    ${CUBE_BATHYMETRY_INCLUDE_ROOT})
+  target_link_libraries(test_cube_export GDAL::GDAL)
+
   # LOD level selection (#26): behavioural invariants of the camp ADR-0013
   # selector against the gggs ladder.
   ament_add_gtest(test_basemap_lod
@@ -323,7 +337,8 @@ if(BUILD_TESTING)
     src/basemap_lod.cpp
     src/cube_lab.cpp
     src/sidescan_drape.cpp
-    src/sidescan_drape_loader.cpp)
+    src/sidescan_drape_loader.cpp
+    src/cube_export.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
   ament_target_dependencies(test_survey_explorer_window
     cube_bathymetry marine_autonomy marine_colormap marine_sonar_widgets
@@ -331,6 +346,7 @@ if(BUILD_TESTING)
   target_include_directories(test_survey_explorer_window SYSTEM PRIVATE
     ${CUBE_BATHYMETRY_INCLUDE_ROOT})
   target_link_libraries(test_survey_explorer_window
+    GDAL::GDAL
     sidescan_core
     survey_index_bridge
     marine_contacts::marine_contacts

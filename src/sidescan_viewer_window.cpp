@@ -75,12 +75,14 @@
 #include <vector>
 
 #include "basemap_lod.hpp"
+#include "cube_export.hpp"
 #include "sidescan_drape_loader.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_contacts/contact_store.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
 #include "map_geo_anchor.hpp"
+#include "tf_lift.hpp"   // rotate_by_quat (the export anchor probe)
 #include "marine_colormap/colormap.hpp"
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
@@ -1146,6 +1148,196 @@ void SidescanViewerWindow::refreshCubeSurface()
     std::move(mesh.positions), std::move(mesh.colors), std::move(mesh.indices));
 }
 
+std::optional<MapGeoAffine> SidescanViewerWindow::cubeSurfaceAnchor() const
+{
+  if (!cube_ref_has_geo_ || !cube_surface_.ok()) {
+    return std::nullopt;
+  }
+  // Probe world->geo through the reference earth anchor at the surface's
+  // mean depth (the vertical offset moves lat/lon by ~nothing but keeps the
+  // ECEF conversion honest).
+  double z_sum = 0.0;
+  std::size_t z_cnt = 0;
+  for (const float d : cube_surface_.depth) {
+    if (std::isfinite(d)) {
+      z_sum += d;
+      ++z_cnt;
+    }
+  }
+  const double z0 = (z_cnt > 0) ? z_sum / static_cast<double>(z_cnt) : 0.0;
+  const auto & t = cube_ref_anchor_.transform;
+  return probe_map_anchor(
+    [&t, z0](double x, double y, double & lat, double & lon, double & alt) {
+      double ex = 0.0;
+      double ey = 0.0;
+      double ez = 0.0;
+      rotate_by_quat(
+        t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w,
+        x, y, z0, ex, ey, ez);
+      ecef_to_geodetic(
+        ex + t.translation.x, ey + t.translation.y, ez + t.translation.z,
+        lat, lon, alt);
+      return true;
+    });
+}
+
+void SidescanViewerWindow::onExportSurfaceData()
+{
+  if (!cube_surface_.ok()) {
+    status_->setText("Export: run CUBE first — no surface yet.");
+    return;
+  }
+  const auto anchor = cubeSurfaceAnchor();
+  if (!anchor) {
+    QMessageBox::warning(
+      this, "Export CUBE surface",
+      "No geographic anchor for the surface's frame — cannot georeference "
+      "the GeoTIFF (the CUBE load had no earth reference).");
+    return;
+  }
+  const QString path = QFileDialog::getSaveFileName(
+    this, "Export CUBE surface (data bands)", "cube_surface.tif",
+    "GeoTIFF (*.tif)");
+  if (path.isEmpty()) {
+    return;
+  }
+  const std::string err = write_cube_geotiff_float(
+    cube_surface_, *anchor, path.toStdString());
+  if (!err.empty()) {
+    QMessageBox::warning(
+      this, "Export CUBE surface", QString::fromStdString(err));
+    return;
+  }
+  status_->setText(QString(
+      "Exported %1x%2 nodes (depth/uncertainty/backscatter Float32) to %3")
+    .arg(cube_surface_.nx).arg(cube_surface_.ny).arg(path));
+}
+
+void SidescanViewerWindow::onExportSurfaceRgba()
+{
+  if (!cube_surface_.ok()) {
+    status_->setText("Export: run CUBE first — no surface yet.");
+    return;
+  }
+  const auto anchor = cubeSurfaceAnchor();
+  if (!anchor) {
+    QMessageBox::warning(
+      this, "Export CUBE surface",
+      "No geographic anchor for the surface's frame — cannot georeference "
+      "the GeoTIFF (the CUBE load had no earth reference).");
+    return;
+  }
+  // Render the ACTIVE shade to per-node RGBA, mirroring refreshCubeSurface:
+  // alpha 0 = hole (unestimated; or, in the Sidescan shade, interpolated
+  // terrain the pass never touched).
+  const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const CubeSurface * srf = &cube_surface_;
+  const std::size_t n_scalar =
+    static_cast<std::size_t>(cube_surface_.nx) *
+    static_cast<std::size_t>(cube_surface_.ny);
+  std::vector<std::uint8_t> rgba;
+  if (shade_i == 3) {
+    const CubeSurface & terrain =
+      cube_drape_terrain_.ok() ? cube_drape_terrain_ : cube_surface_;
+    const std::size_t n =
+      static_cast<std::size_t>(terrain.nx) *
+      static_cast<std::size_t>(terrain.ny);
+    if (!cube_drape_.ok() || cube_drape_.amplitude.size() != n) {
+      status_->setText("Export: no drape yet — pick a pass first.");
+      return;
+    }
+    srf = &terrain;
+    const auto ss_lut = marine_colormap::bake_lut(
+      marine_colormap::palette(static_cast<std::size_t>(
+        std::max(0, sidescan_cmap_->currentIndex()))),
+      marine_colormap::TransferParams{}, 256);
+    float lo = static_cast<float>(cube_srange_.lo->value());
+    float hi = static_cast<float>(cube_srange_.hi->value());
+    if (!(hi > lo)) {
+      lo = 0.0f;
+      hi = 1.0f;
+    }
+    const float span = hi - lo;
+    rgba.assign(n * 4, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+      const float a = cube_drape_.amplitude[i];
+      const bool measured = std::isfinite(terrain.uncertainty[i]);
+      if (std::isfinite(a)) {
+        const float u = std::clamp((a - lo) / span, 0.0f, 1.0f);
+        const auto & col = ss_lut[static_cast<std::size_t>(
+              u * static_cast<float>(ss_lut.size() - 1) + 0.5f)];
+        rgba[i * 4] = col.r;
+        rgba[i * 4 + 1] = col.g;
+        rgba[i * 4 + 2] = col.b;
+        rgba[i * 4 + 3] = 255;
+      } else if (cube_drape_.shadow[i]) {
+        rgba[i * 4] = 13;
+        rgba[i * 4 + 1] = 13;
+        rgba[i * 4 + 2] = 13;
+        rgba[i * 4 + 3] = 255;
+      } else if (measured) {
+        rgba[i * 4] = 64;
+        rgba[i * 4 + 1] = 64;
+        rgba[i * 4 + 2] = 64;
+        rgba[i * 4 + 3] = 255;
+      }
+    }
+  } else {
+    // Scalar shades: the spins hold the ramp in force (auto keeps them
+    // synced to the computed range), so read the ramp straight from them.
+    const CubeShade shade =
+      (shade_i == 1) ? CubeShade::Uncertainty :
+      (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
+    const auto & scalar =
+      (shade == CubeShade::Depth) ? cube_surface_.depth :
+      (shade == CubeShade::Uncertainty) ? cube_surface_.uncertainty :
+      cube_surface_.intensity;
+    const std::size_t n_pal = marine_colormap::palette_count();
+    const auto pal_i = (n_pal > 0) ?
+      static_cast<std::size_t>(std::clamp(
+        cube_palette_ ? cube_palette_->currentIndex() : 0, 0,
+        static_cast<int>(n_pal - 1))) : 0;
+    const auto lut = marine_colormap::bake_lut(
+      marine_colormap::palette(pal_i), marine_colormap::TransferParams{}, 256);
+    float lo = static_cast<float>(cube_srange_.lo->value());
+    float hi = static_cast<float>(cube_srange_.hi->value());
+    if (!(hi > lo)) {
+      lo = 0.0f;
+      hi = 1.0f;
+    }
+    const float span = hi - lo;
+    rgba.assign(n_scalar * 4, 0);
+    for (std::size_t i = 0; i < n_scalar; ++i) {
+      if (!std::isfinite(cube_surface_.depth[i])) {
+        continue;   // hole: alpha 0
+      }
+      const float v = std::isfinite(scalar[i]) ? scalar[i] : lo;
+      const float u = std::clamp((v - lo) / span, 0.0f, 1.0f);
+      const auto & col = lut[static_cast<std::size_t>(
+            u * static_cast<float>(lut.size() - 1) + 0.5f)];
+      rgba[i * 4] = col.r;
+      rgba[i * 4 + 1] = col.g;
+      rgba[i * 4 + 2] = col.b;
+      rgba[i * 4 + 3] = 255;
+    }
+  }
+  const QString path = QFileDialog::getSaveFileName(
+    this, "Export CUBE surface (coloured)", "cube_surface_rgba.tif",
+    "GeoTIFF (*.tif)");
+  if (path.isEmpty()) {
+    return;
+  }
+  const std::string err =
+    write_cube_geotiff_rgba(*srf, rgba, *anchor, path.toStdString());
+  if (!err.empty()) {
+    QMessageBox::warning(
+      this, "Export CUBE surface", QString::fromStdString(err));
+    return;
+  }
+  status_->setText(QString("Exported %1x%2 coloured nodes to %3")
+    .arg(srf->nx).arg(srf->ny).arg(path));
+}
+
 void SidescanViewerWindow::populateDrapePasses()
 {
   if (!cube_drape_combo_) {
@@ -1562,6 +1754,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   file_menu->addAction("&Save Contacts…", this, &SidescanViewerWindow::onSaveContacts);
   file_menu->addAction(
     "Export Contacts as &GeoJSON…", this, &SidescanViewerWindow::onExportGeoJson);
+  file_menu->addSeparator();
+  file_menu->addAction(
+    "Export CUBE Surface (&Data GeoTIFF)…", this,
+    &SidescanViewerWindow::onExportSurfaceData);
+  file_menu->addAction(
+    "Export CUBE Surface (Colo&ured GeoTIFF)…", this,
+    &SidescanViewerWindow::onExportSurfaceRgba);
   file_menu->addSeparator();
   file_menu->addAction("E&xit", this, &QWidget::close);
 
