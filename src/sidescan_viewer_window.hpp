@@ -18,8 +18,11 @@
 #include <QFutureWatcher>
 #include <QImage>
 #include <QMainWindow>
+#include <QMutex>
 #include <QString>
+#include <QTimer>
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -156,10 +159,16 @@ signals:
   // queued connection marshals it to the UI thread. `epoch` guards against a stale
   // bag's worker updating after a newer bag was opened.
   void indexProgress(quint64 epoch, double resolved_distance_m, bool done);
+  // The worker constructed the session (parked in pending_open_session_) /
+  // failed to open the bag. Queued to the UI thread like indexProgress.
+  void sessionOpened(quint64 epoch);
+  void openFailed(quint64 epoch, const QString & message);
 
 private slots:
   void onOpenBag();
   void onIndexProgress(quint64 epoch, double resolved_distance_m, bool done);
+  void onSessionOpened(quint64 epoch);
+  void onOpenFailed(quint64 epoch, const QString & message);
   void onRenderFinished();
   void onScrubChanged();
   void onGridSpacingChanged(double metres);
@@ -196,6 +205,8 @@ private:
   void exitSelectionCloud();
   // Cloud-legend label for a pass, in the time bar's display zone (#26).
   std::string passLabel(std::int64_t t_start_ns, const std::string & bag_path) const;
+  // Debounced scrub-driven open: the last commit before the hand settles wins.
+  void scheduleOpen(const std::string & bag_uri, int64_t t0_ns, int64_t t1_ns);
   // Re-render the legend's baked pass labels after a display-zone change.
   void refreshPassLabels();
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
@@ -249,6 +260,21 @@ private:
   // indexer's emit dereferences a freed window (found in #24 review).
   std::vector<QFuture<void>> superseded_index_futures_;
   uint64_t index_epoch_ = 0;             // bumped per opened bag; guards stale progress
+  // Cancel token for the CURRENT scan; superseding an open sets it so the
+  // abandoned worker stops streaming the bag instead of running to the end.
+  std::shared_ptr<std::atomic<bool>> scan_cancel_;
+  // Session handoff worker -> UI (the constructor runs in the worker so the
+  // UI never touches a multi-GB bag synchronously): the worker parks the
+  // session + its epoch here, then emits sessionOpened.
+  QMutex pending_open_mutex_;
+  std::shared_ptr<SidescanBagSession> pending_open_session_;
+  quint64 pending_open_epoch_ = 0;
+  // Debounce for scrub-driven opens (time-bar commits): rapid fine-tune
+  // commits collapse into one openBag once the hand settles.
+  QTimer open_debounce_;
+  std::string debounce_uri_;
+  int64_t debounce_t0_ns_ = 0;
+  int64_t debounce_t1_ns_ = 0;
   QFutureWatcher<SidescanRenderResult> render_watcher_;
   bool loading_ = false;
   bool rendering_ = false;

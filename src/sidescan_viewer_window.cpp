@@ -916,6 +916,21 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   connect(this, &SidescanViewerWindow::indexProgress,
     this, &SidescanViewerWindow::onIndexProgress);
+  connect(this, &SidescanViewerWindow::sessionOpened,
+    this, &SidescanViewerWindow::onSessionOpened);
+  connect(this, &SidescanViewerWindow::openFailed,
+    this, &SidescanViewerWindow::onOpenFailed);
+  // Scrub-driven opens are debounced: rapid time-bar commits while fine-tuning
+  // collapse into one openBag (~2 event-loop breaths after the hand settles).
+  open_debounce_.setSingleShot(true);
+  open_debounce_.setInterval(400);
+  connect(&open_debounce_, &QTimer::timeout, this, [this]() {
+      if (!debounce_uri_.empty()) {
+        const std::string uri = debounce_uri_;
+        debounce_uri_.clear();
+        openBag(uri, debounce_t0_ns_, debounce_t1_ns_);
+      }
+    });
   connect(&render_watcher_, &QFutureWatcher<SidescanRenderResult>::finished,
     this, &SidescanViewerWindow::onRenderFinished);
   connect(&cloud_watcher_, &QFutureWatcher<CloudLoadTicket>::finished,
@@ -1114,7 +1129,9 @@ SidescanViewerWindow::~SidescanViewerWindow()
 {
   // Don't let a worker outlive the widgets it would signal: wait for any in-flight
   // index/render to finish before the members tear down (~QObject then discards any
-  // already-queued indexProgress events targeted at this window).
+  // already-queued indexProgress events targeted at this window). Cancelling the
+  // live scan first turns a minutes-long wait into milliseconds.
+  if (scan_cancel_) {scan_cancel_->store(true);}
   if (index_watcher_.isRunning()) {index_watcher_.waitForFinished();}
   for (auto & f : superseded_index_futures_) {
     f.waitForFinished();   // orphaned indexers also captured `this`
@@ -1179,20 +1196,26 @@ void SidescanViewerWindow::onOpenBag()
   if (!dir.isEmpty()) {openBag(dir.toStdString());}
 }
 
+void SidescanViewerWindow::scheduleOpen(
+  const std::string & bag_uri, int64_t t0_ns, int64_t t1_ns)
+{
+  debounce_uri_ = bag_uri;
+  debounce_t0_ns_ = t0_ns;
+  debounce_t1_ns_ = t1_ns;
+  open_debounce_.start();   // restart on every commit; the last one wins
+  status_->setText(QString("Cueing %1 …")
+    .arg(QFileInfo(QString::fromStdString(bag_uri)).fileName()));
+}
+
 void SidescanViewerWindow::openBag(
   const std::string & bag_uri, int64_t cue_start_ns, int64_t cue_end_ns)
 {
-  // Construct the session cheaply (open + validate) on the UI thread so a bad bag
-  // surfaces immediately; then index in the background, growing the usable scrub
-  // range live as the bag resolves.
-  std::shared_ptr<SidescanBagSession> session;
-  try {
-    session = std::make_shared<SidescanBagSession>(bag_uri);
-  } catch (const std::exception & e) {
-    status_->setText("Open a bag to begin (File → Open Bag).");
-    QMessageBox::critical(this, "Open bag failed", QString::fromStdString(e.what()));
-    return;
-  }
+  // A direct open (menu, pass click) outranks a pending debounced one.
+  open_debounce_.stop();
+  debounce_uri_.clear();
+  // The session is constructed AND indexed on a worker: the UI thread never
+  // touches a multi-GB bag synchronously (#26 responsiveness). A bad bag
+  // surfaces via openFailed; the session arrives via sessionOpened.
 
   // Jump-to-pass cue: remembered here, applied once indexing completes (the
   // time→distance mapping needs the finished index). Reset on every open so a
@@ -1209,6 +1232,10 @@ void SidescanViewerWindow::openBag(
   // `this`, so remember the superseded future for the destructor to wait out
   // (setFuture alone stops watching but neither cancels nor waits), pruning
   // any that already finished.
+  if (scan_cancel_) {
+    scan_cancel_->store(true);   // stop the abandoned scan's bag streaming
+  }
+  scan_cancel_ = std::make_shared<std::atomic<bool>>(false);
   if (index_watcher_.isRunning()) {
     superseded_index_futures_.push_back(index_watcher_.future());
   }
@@ -1219,7 +1246,7 @@ void SidescanViewerWindow::openBag(
     superseded_index_futures_.end());
   ++index_epoch_;
   const quint64 epoch = index_epoch_;
-  session_ = session;
+  session_.reset();   // no session until the worker's open lands (sessionOpened)
   current_bag_uri_ = bag_uri;   // a same-bag timeline cue can skip the re-open
   ++session_epoch_;   // any render in flight for the previous bag is now stale
 
@@ -1238,16 +1265,33 @@ void SidescanViewerWindow::openBag(
   scrub_->blockSignals(false);
   progress_->setVisible(true);
   loading_ = true;
-  status_->setText(QString("Indexing %1 …").arg(QString::fromStdString(bag_uri)));
+  status_->setText(QString("Opening %1 …").arg(QString::fromStdString(bag_uri)));
 
-  // Index off the UI thread; the progress callback emits a queued signal so the UI
-  // grows the range + track as the bag resolves. The session is captured (shared_ptr)
-  // so it outlives the task; index_watcher_ is waited on in the destructor.
-  // Bag-index cache (#24): a valid cache replaces the whole-bag metadata scan
-  // with a file read; a miss scans as before and saves for next time.
+  // Open + index off the UI thread; the progress callback emits a queued signal
+  // so the UI grows the range + track as the bag resolves. The session lives in
+  // the task until sessionOpened hands it over; index_watcher_ is waited on in
+  // the destructor. Bag-index cache (#24): a valid cache replaces the whole-bag
+  // metadata scan with a file read; a miss scans as before and saves for next
+  // time — unless the scan was cancelled, whose partial index must never be
+  // cached.
   const std::string cache_path =
     cache_dir_.empty() ? std::string() : cachePathFor(cache_dir_, bag_uri);
-  index_watcher_.setFuture(QtConcurrent::run([this, session, epoch, bag_uri, cache_path]() {
+  const auto cancel = scan_cancel_;
+  index_watcher_.setFuture(
+    QtConcurrent::run([this, epoch, bag_uri, cache_path, cancel]() {
+      std::shared_ptr<SidescanBagSession> session;
+      try {
+        session = std::make_shared<SidescanBagSession>(bag_uri);
+      } catch (const std::exception & e) {
+        Q_EMIT openFailed(epoch, QString::fromStdString(e.what()));
+        return;
+      }
+      {
+        QMutexLocker lock(&pending_open_mutex_);
+        pending_open_session_ = session;
+        pending_open_epoch_ = epoch;
+      }
+      Q_EMIT sessionOpened(epoch);
       // A non-QException from a QtConcurrent task std::terminates in Qt5 —
       // never let a corrupt cache or a failing scan out of the worker
       // (review round-2 finding); a failure just ends progress where it is.
@@ -1260,21 +1304,57 @@ void SidescanViewerWindow::openBag(
             Q_EMIT indexProgress(epoch, total, true);
             return;
           }
-          session->buildIndex([this, epoch](double resolved_m, bool done) {
-            Q_EMIT indexProgress(epoch, resolved_m, done);
-        });
+          session->buildIndex(
+            [this, epoch](double resolved_m, bool done) {
+              Q_EMIT indexProgress(epoch, resolved_m, done);
+            }, cancel);
+          if (cancel->load(std::memory_order_relaxed)) {
+            return;   // superseded: a partial index must not poison the cache
+          }
           if (const auto snap = session->snapshot()) {
             saveSessionIndex(cache_path, identity, *snap);   // best-effort
           }
           return;
         }
-        session->buildIndex([this, epoch](double resolved_m, bool done) {
-          Q_EMIT indexProgress(epoch, resolved_m, done);
-      });
+        session->buildIndex(
+          [this, epoch](double resolved_m, bool done) {
+            Q_EMIT indexProgress(epoch, resolved_m, done);
+          }, cancel);
       } catch (const std::exception &) {
         Q_EMIT indexProgress(epoch, 0.0, true);   // surface as an empty done
       }
-      }));
+    }));
+}
+
+void SidescanViewerWindow::onSessionOpened(quint64 epoch)
+{
+  std::shared_ptr<SidescanBagSession> session;
+  {
+    QMutexLocker lock(&pending_open_mutex_);
+    if (pending_open_epoch_ != epoch) {
+      return;   // a newer open already parked its session; wait for its signal
+    }
+    session = std::move(pending_open_session_);
+    pending_open_session_.reset();
+  }
+  if (epoch != index_epoch_ || !session) {
+    return;   // superseded while opening: discard (its scan is cancelled)
+  }
+  session_ = std::move(session);
+  status_->setText(
+    QString("Indexing %1 …").arg(QString::fromStdString(current_bag_uri_)));
+}
+
+void SidescanViewerWindow::onOpenFailed(quint64 epoch, const QString & message)
+{
+  if (epoch != index_epoch_) {
+    return;   // a stale open's failure is moot
+  }
+  loading_ = false;
+  progress_->setVisible(false);
+  current_bag_uri_.clear();
+  status_->setText("Open a bag to begin (File → Open Bag).");
+  QMessageBox::critical(this, "Open bag failed", message);
 }
 
 void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, bool done)
@@ -2160,23 +2240,50 @@ void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)
       return;
     }
   }
-  // Otherwise: the selection pass covering that time (skipping the open bag,
-  // which just answered "nothing there").
+  // While the current bag is still opening/indexing, a commit inside it
+  // becomes the pending cue (applied when the index completes) instead of a
+  // dead-end "No data" — fine-tuning during a load stays meaningful.
+  const auto cue_into_loading_bag = [this, t0, t1, t_ns]() {
+      pending_cue_start_ns_ = t0;
+      pending_cue_end_ns_ = t1;
+      status_->setText(QString("Will cue to %1 once %2 finishes indexing.")
+        .arg(time_bar_->formatTime(static_cast<std::int64_t>(t_ns)))
+        .arg(QFileInfo(QString::fromStdString(current_bag_uri_)).fileName()));
+    };
+  // Otherwise: the selection pass covering that time. The open bag is skipped
+  // when idle (it just answered "nothing there"), but while loading it takes
+  // the commit as the pending cue.
   for (const auto & p : selection_passes_) {
-    if (t_ns >= p.t_start_ns && t_ns <= p.t_end_ns && p.bag_path != current_bag_uri_) {
-      openBag(p.bag_path, t0, t1);
+    if (t_ns >= p.t_start_ns && t_ns <= p.t_end_ns) {
+      if (p.bag_path == current_bag_uri_) {
+        if (loading_) {
+          cue_into_loading_bag();
+          return;
+        }
+        continue;
+      }
+      scheduleOpen(p.bag_path, t0, t1);
       return;
     }
   }
   // Otherwise: any campaign bag whose nav track covers that time — release
   // on the campaign-wide bar means "go there" (the bag-index cache makes the
-  // open cheap after the first visit).
+  // open cheap after the first visit). Debounced: rapid fine-tune commits
+  // collapse into one open.
   if (const auto fix = fixAtTime(nav_track_points_, static_cast<int64_t>(t_ns))) {
     for (const auto & [bag_id, path] : bag_paths_) {
-      if (bag_id == fix->bag_id && !path.empty() && path != current_bag_uri_) {
-        openBag(path, t0, t1);
-        return;
+      if (bag_id != fix->bag_id || path.empty()) {
+        continue;
       }
+      if (path == current_bag_uri_) {
+        if (loading_) {
+          cue_into_loading_bag();
+          return;
+        }
+        continue;
+      }
+      scheduleOpen(path, t0, t1);
+      return;
     }
   }
   status_->setText(

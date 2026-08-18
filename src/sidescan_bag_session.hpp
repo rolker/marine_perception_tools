@@ -16,6 +16,7 @@
 #define SIDESCAN_BAG_SESSION_HPP_
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -207,7 +208,13 @@ public:
   // call concurrently from other threads while this runs — they read a lock-free
   // immutable snapshot.
   using ProgressFn = std::function<void(double resolved_distance_m, bool complete)>;
-  void buildIndex(const ProgressFn & progress = {});
+  // `cancel` (optional) is polled while streaming: once set, the scan stops
+  // promptly and returns WITHOUT publishing a final snapshot or firing the
+  // done tick — the abandoned session just stops consuming I/O. The caller
+  // that superseded it decides what happens next.
+  void buildIndex(
+    const ProgressFn & progress = {},
+    const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
   // Install a complete pre-built index (the bag-index cache, #24): published
   // as the snapshot so every reader works immediately; buildIndex is skipped.

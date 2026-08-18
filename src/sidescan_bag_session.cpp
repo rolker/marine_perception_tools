@@ -254,7 +254,9 @@ SidescanBagSession::SidescanBagSession(
   tf_buffer_ = std::make_unique<tf2::BufferCore>(tf2::durationFromSec(opts_.tf_cache_s));
 }
 
-void SidescanBagSession::buildIndex(const ProgressFn & progress)
+void SidescanBagSession::buildIndex(
+  const ProgressFn & progress,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
 {
   // Optional load profiling: set SIDESCAN_PROFILE=1 to print per-phase timings to
   // stderr. Quiet by default.
@@ -351,6 +353,9 @@ void SidescanBagSession::buildIndex(const ProgressFn & progress)
 
   // ---- Single pass: stream the bag in order. ----
   while (reader.has_next()) {
+    if (cancel && cancel->load(std::memory_order_relaxed)) {
+      return;   // superseded: stop streaming, publish nothing more
+    }
     auto bag_msg = reader.read_next();
     maybe_flush();   // grow the published snapshot as the bag streams in
     // One unreadable message (corrupt/truncated) is skipped + counted, not fatal.
