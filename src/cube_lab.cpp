@@ -30,9 +30,24 @@
 namespace marine_perception_tools
 {
 
+CubeTuning default_cube_tuning()
+{
+  const cube::Parameters params(cube::CellSizes(1.0f));
+  CubeTuning t;
+  t.capture_distance_scale = params.capture_distance_scale;
+  t.median_length = params.median_length;
+  t.quotient_limit = params.quotient_limit;
+  t.discount = params.discount;
+  t.estimate_offset = params.estimate_offset;
+  t.bayes_factor_threshold = params.bayes_factor_threshold;
+  t.runlength_threshold = params.runlength_threshold;
+  t.extractor = static_cast<int>(params.extractor);
+  return t;
+}
+
 CubeSurface run_cube(
   const std::vector<MbesSounding> & soundings, double cell_m,
-  const std::string & iho_order)
+  const std::string & iho_order, const CubeTuning & tuning)
 {
   CubeSurface out;
   out.cell_m = cell_m;
@@ -75,6 +90,17 @@ CubeSurface run_cube(
 
   const cube::CellSizes sizes(static_cast<float>(cell_m));   // square cells
   cube::Parameters params(sizes, iho_order);
+  // Operator tuning (#27): the exposed subset only — the derived scales
+  // (distance_scale etc.) stay as the ctor computed them from the cell size.
+  params.capture_distance_scale = tuning.capture_distance_scale;
+  params.median_length = std::max<std::uint32_t>(1, tuning.median_length);
+  params.quotient_limit = tuning.quotient_limit;
+  params.discount = tuning.discount;
+  params.estimate_offset = tuning.estimate_offset;
+  params.bayes_factor_threshold = tuning.bayes_factor_threshold;
+  params.runlength_threshold = tuning.runlength_threshold;
+  params.extractor = static_cast<cube::CubeExtractor>(
+    std::clamp(tuning.extractor, 0, static_cast<int>(cube::CUBE_POSTERIOR)));
 
   // Drive cube::Node directly instead of cube::Grid: Grid::values() is the
   // depth-only legacy extraction, while Node::extractNodeRecord carries the

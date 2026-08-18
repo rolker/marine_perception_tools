@@ -23,9 +23,12 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QDoubleSpinBox>
 #include <QEvent>
+#include <QFormLayout>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -586,6 +589,11 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_run_btn_->setToolTip(
     "Gather every MBES sounding in the shift-drag map box and CUBE it "
     "at the chosen cell size");
+  cube_tuning_ = default_cube_tuning();
+  cube_params_btn_ = new QPushButton("params…", this);
+  cube_params_btn_->setToolTip(
+    "CUBE algorithm parameters (capture scale, median filter, intervention "
+    "thresholds, extractor) — applied on the next Run CUBE");
   cube_points_check_ = new QCheckBox("points", this);
   cube_points_check_->setChecked(true);
   cube_points_check_->setToolTip("Show/hide the point cloud");
@@ -607,6 +615,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(new QLabel("CUBE:", this));
   row->addWidget(cube_cell_spin_);
   row->addWidget(cube_order_combo_);
+  row->addWidget(cube_params_btn_);
   row->addWidget(cube_run_btn_);
   row->addStretch(1);
   row->addWidget(cube_points_check_);
@@ -619,6 +628,97 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   }
 
   connect(cube_run_btn_, &QPushButton::clicked, this, [this]() {runCubeLab();});
+  connect(cube_params_btn_, &QPushButton::clicked, this, [this]() {
+      // Modal CUBE-parameter editor, seeded from the current tuning; the
+      // Defaults button restores the library's own values. Nothing re-runs
+      // automatically — the next Run CUBE picks the tuning up.
+      QDialog dialog(this);
+      dialog.setWindowTitle("CUBE parameters");
+      auto * form = new QFormLayout(&dialog);
+      const auto make_dspin = [&dialog](
+        double min, double max, double step, int decimals, double value) {
+        auto * s = new QDoubleSpinBox(&dialog);
+        s->setRange(min, max);
+        s->setSingleStep(step);
+        s->setDecimals(decimals);
+        s->setValue(value);
+        return s;
+      };
+      const auto make_ispin = [&dialog](int min, int max, int value) {
+        auto * s = new QSpinBox(&dialog);
+        s->setRange(min, max);
+        s->setValue(value);
+        return s;
+      };
+      auto * capture = make_dspin(
+        0.001, 2.0, 0.01, 3, cube_tuning_.capture_distance_scale);
+      capture->setToolTip(
+        "Scale on depth for how far out a sounding is accepted "
+        "(hydrography ~0.05; larger for sparse/flat areas)");
+      auto * median = make_ispin(
+        1, 101, static_cast<int>(cube_tuning_.median_length));
+      median->setToolTip("Median pre-filter sort queue length");
+      auto * quotient = make_dspin(1.0, 255.0, 1.0, 1, cube_tuning_.quotient_limit);
+      quotient->setToolTip("Outlier quotient upper allowable limit");
+      auto * discount = make_dspin(0.5, 1.0, 0.01, 2, cube_tuning_.discount);
+      discount->setToolTip("Discount factor for evolution noise variance");
+      auto * offset = make_dspin(0.1, 20.0, 0.5, 1, cube_tuning_.estimate_offset);
+      offset->setToolTip(
+        "Offset from the current estimate (in std devs) that warrants a "
+        "new-hypothesis intervention");
+      auto * bayes = make_dspin(
+        0.001, 10.0, 0.01, 3, cube_tuning_.bayes_factor_threshold);
+      bayes->setToolTip("Bayes factor threshold for an intervention");
+      auto * runlen = make_ispin(
+        1, 100, static_cast<int>(cube_tuning_.runlength_threshold));
+      runlen->setToolTip("Run-length threshold for a drift intervention");
+      auto * extractor = new QComboBox(&dialog);
+      extractor->addItems({"prior (sample count)", "lhood (spatial context)",
+        "posterior (combined)"});
+      extractor->setCurrentIndex(std::clamp(cube_tuning_.extractor, 0, 2));
+      extractor->setToolTip("Multi-hypothesis disambiguation method");
+      form->addRow("Capture distance scale", capture);
+      form->addRow("Median filter length", median);
+      form->addRow("Outlier quotient limit", quotient);
+      form->addRow("Evolution discount", discount);
+      form->addRow("Intervention offset (σ)", offset);
+      form->addRow("Bayes factor threshold", bayes);
+      form->addRow("Run-length threshold", runlen);
+      form->addRow("Extractor", extractor);
+      auto * buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel |
+        QDialogButtonBox::RestoreDefaults, &dialog);
+      form->addRow(buttons);
+      connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+      connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+      connect(
+        buttons->button(QDialogButtonBox::RestoreDefaults),
+        &QPushButton::clicked, &dialog, [&]() {
+          const CubeTuning d = default_cube_tuning();
+          capture->setValue(d.capture_distance_scale);
+          median->setValue(static_cast<int>(d.median_length));
+          quotient->setValue(d.quotient_limit);
+          discount->setValue(d.discount);
+          offset->setValue(d.estimate_offset);
+          bayes->setValue(d.bayes_factor_threshold);
+          runlen->setValue(static_cast<int>(d.runlength_threshold));
+          extractor->setCurrentIndex(std::clamp(d.extractor, 0, 2));
+        });
+      if (dialog.exec() != QDialog::Accepted) {
+        return;
+      }
+      cube_tuning_.capture_distance_scale =
+      static_cast<float>(capture->value());
+      cube_tuning_.median_length = static_cast<std::uint32_t>(median->value());
+      cube_tuning_.quotient_limit = static_cast<float>(quotient->value());
+      cube_tuning_.discount = static_cast<float>(discount->value());
+      cube_tuning_.estimate_offset = static_cast<float>(offset->value());
+      cube_tuning_.bayes_factor_threshold = static_cast<float>(bayes->value());
+      cube_tuning_.runlength_threshold =
+      static_cast<std::uint32_t>(runlen->value());
+      cube_tuning_.extractor = extractor->currentIndex();
+      status_->setText("CUBE parameters updated — press Run CUBE to apply.");
+    });
   connect(cube_points_check_, &QCheckBox::toggled,
     this, [this](bool on) {cloud_->setPointsVisible(on);});
   connect(cube_surf_check_, &QCheckBox::toggled,
@@ -723,13 +823,14 @@ void SidescanViewerWindow::runCubeLab()
 
   const double cell_m = cube_cell_spin_->value();
   const std::string order = cube_order_combo_->currentText().toStdString();
+  const CubeTuning tuning = cube_tuning_;
   ++cube_gen_;
   const auto gen = cube_gen_;
   cube_run_btn_->setEnabled(false);
   status_->setText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
     .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
   cube_watcher_.setFuture(
-    QtConcurrent::run([passes, clip, cell_m, order, gen]() {
+    QtConcurrent::run([passes, clip, cell_m, order, tuning, gen]() {
       CubeLabTicket ticket;
       ticket.generation = gen;
       QElapsedTimer timer;
@@ -745,7 +846,7 @@ void SidescanViewerWindow::runCubeLab()
         for (auto & pc : outcome.pass_clouds) {
           ticket.soundings.insert(ticket.soundings.end(), pc.begin(), pc.end());
         }
-        ticket.surface = run_cube(ticket.soundings, cell_m, order);
+        ticket.surface = run_cube(ticket.soundings, cell_m, order, tuning);
       } catch (const std::exception & e) {
         ticket.surface = CubeSurface{};
         ticket.surface.note = e.what();

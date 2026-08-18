@@ -56,11 +56,33 @@ struct CubeSurface
 // box at 0.1 m.
 constexpr std::size_t kMaxCubeNodes = 4000000;
 
+// The operator-tunable subset of cube::Parameters (#27, the cube#98 tuning
+// harness intent): concrete values, seeded from the library's real defaults
+// by default_cube_tuning() so they can never silently drift from upstream.
+// distance_exponent and the derived scales stay library-managed (they are
+// recomputed from the cell size and interlock with each other).
+struct CubeTuning
+{
+  // Scale on depth for how far out a sounding is accepted (unitless;
+  // hydrography ~0.05, larger for sparse/flat geological mapping).
+  float capture_distance_scale = 0.05f;
+  std::uint32_t median_length = 11;      // median pre-filter queue length
+  float quotient_limit = 30.0f;          // outlier quotient upper limit
+  float discount = 1.0f;                 // evolution noise discount factor
+  float estimate_offset = 4.0f;          // intervention offset threshold
+  float bayes_factor_threshold = 0.135f;   // intervention Bayes factor
+  std::uint32_t runlength_threshold = 5;   // intervention run length
+  int extractor = 1;   // cube::CubeExtractor: 0 prior, 1 lhood, 2 posterior
+};
+
+// The library's own defaults, read from a real cube::Parameters instance.
+CubeTuning default_cube_tuning();
+
 // Run CUBE over `soundings` (already gathered and box-clipped, all in one
 // world frame; z up, seabed negative — the cube depth convention) on a grid
 // of `cell_m` cells under the given IHO order ("order1a" etc., the
-// cube::Parameters vocabulary). The grid covers the soundings' bounding box
-// plus one cell of margin.
+// cube::Parameters vocabulary) and tuning overrides. The grid covers the
+// soundings' bounding box plus one cell of margin.
 //
 // Per-sounding errors: the full cube_bathymetry ErrorModel needs the raw
 // detections + vessel/device config, which the explorer's cloud path does
@@ -70,7 +92,8 @@ constexpr std::size_t kMaxCubeNodes = 4000000;
 // carried through (follow-up on #27).
 CubeSurface run_cube(
   const std::vector<MbesSounding> & soundings, double cell_m,
-  const std::string & iho_order = "order1a");
+  const std::string & iho_order = "order1a",
+  const CubeTuning & tuning = CubeTuning{});
 
 // A renderable triangulation of a CubeSurface: positions in the surface's
 // world frame (xyz triples), per-vertex colours (rgb triples in [0,1]),
