@@ -22,6 +22,7 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QPoint>
+#include <QTimer>
 #include <QVector3D>
 
 #include <cmath>
@@ -155,6 +156,9 @@ private:
   void rebuild_colors();   // recompute the per-point colour buffer for the mode
   void upload();           // (re)upload position + colour buffers (GL-current)
   void upload_surface();   // (re)upload the CUBE surface mesh (GL-current)
+  // Nearest point (recentred coords) within a pixel radius of `px`, closest
+  // to the camera on a tie — the middle-click examine pick.
+  bool pick_point(const QPoint & px, QVector3D & out) const;
   void build_arrow();      // (re)build the boat-arrow vertices (GL-current)
   // Draw the 2D overlay (scale bar + E/N/Up orientation axes + linked cursor).
   void draw_overlay(const QMatrix4x4 & view, float metres_per_pixel);
@@ -191,6 +195,16 @@ private:
   bool surface_visible_ = true;
   float surface_alpha_ = 1.0f;
   bool points_visible_ = true;
+
+  // GeoZui4D-style examine pivot (#27 follow-up): middle-click animates the
+  // picked point to the view centre and the orbit rotates about it. Stored
+  // UNSCALED in recentred coordinates; z-exaggeration applies at view time
+  // so a later Zx change keeps the pivot on the point.
+  QVector3D pivot_{0.0f, 0.0f, 0.0f};
+  QTimer pivot_timer_;
+  QVector3D pivot_from_;
+  QVector3D pivot_to_;
+  float pivot_progress_ = 1.0f;
 
   // Recentred geometry + the per-point scalars used for colouring.
   std::vector<QVector3D> pts_;     // world soundings minus centroid

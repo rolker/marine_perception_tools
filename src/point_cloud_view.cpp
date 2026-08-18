@@ -84,6 +84,20 @@ PointCloudView::PointCloudView(QWidget * parent)
   fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
   fmt.setDepthBufferSize(24);
   setFormat(fmt);
+
+  // Examine-pivot animation (GeoZui4D's middle-click translate, 0.25 s —
+  // the same feel as the time bar's jump).
+  pivot_timer_.setInterval(16);
+  connect(&pivot_timer_, &QTimer::timeout, this, [this]() {
+      pivot_progress_ += 16.0f / 250.0f;
+      if (pivot_progress_ >= 1.0f) {
+        pivot_timer_.stop();
+        pivot_ = pivot_to_;
+      } else {
+        pivot_ = pivot_from_ + pivot_progress_ * (pivot_to_ - pivot_from_);
+      }
+      update();
+    });
 }
 
 PointCloudView::~PointCloudView()
@@ -185,6 +199,8 @@ void PointCloudView::set_points_impl(
   rebuild_colors();
   buffers_dirty_ = true;
   surface_dirty_ = true;   // the centroid moved; re-recentre the surface
+  pivot_timer_.stop();
+  pivot_ = QVector3D(0.0f, 0.0f, 0.0f);   // pivot was in the old frame
   update();
 }
 
@@ -218,6 +234,8 @@ void PointCloudView::resetView()
   azimuth_deg_ = 0.0f;
   elevation_deg_ = 35.0f;
   framed_ = false;
+  pivot_timer_.stop();
+  pivot_ = QVector3D(0.0f, 0.0f, 0.0f);   // examine pivot back to the centroid
   if (radius_ > 0.0f) {distance_ = radius_ * 2.5f;}
   update();
 }
@@ -522,12 +540,15 @@ void PointCloudView::paintGL()
 
   const float az = qDegreesToRadians(azimuth_deg_);
   const float el = qDegreesToRadians(elevation_deg_);
-  const QVector3D eye(
+  // Orbit about the examine pivot (scaled here so z-exaggeration changes
+  // keep the pivot on its point — pivot_ is stored unscaled).
+  const QVector3D pivot(pivot_.x(), pivot_.y(), pivot_.z() * zexag_);
+  const QVector3D eye = pivot + QVector3D(
     distance_ * std::cos(el) * std::cos(az),
     distance_ * std::cos(el) * std::sin(az),
     distance_ * std::sin(el));
   QMatrix4x4 view;
-  view.lookAt(eye, QVector3D(0, 0, 0), QVector3D(0, 0, 1));
+  view.lookAt(eye, pivot, QVector3D(0, 0, 1));
 
   QMatrix4x4 model;
   model.scale(1.0f, 1.0f, zexag_);   // stretch depth about the centroid
@@ -682,12 +703,59 @@ bool PointCloudView::unproject_ground(
   return true;
 }
 
+bool PointCloudView::pick_point(const QPoint & px, QVector3D & out) const
+{
+  // Project every point through the last painted MVP and take the one within
+  // a pixel radius of the click nearest the camera. A linear pass is a few
+  // ms on a million points — fine for a click, never run per frame.
+  if (pts_.empty() || width() <= 0 || height() <= 0) {return false;}
+  constexpr float kRadiusPx = 15.0f;
+  const float w2 = 0.5f * static_cast<float>(width());
+  const float h2 = 0.5f * static_cast<float>(height());
+  float best_depth = std::numeric_limits<float>::max();
+  bool found = false;
+  for (const auto & p : pts_) {
+    const QVector4D clip = mvp_ * QVector4D(p, 1.0f);
+    if (clip.w() <= 0.0f) {continue;}   // behind the camera
+    const float sx = (clip.x() / clip.w()) * w2 + w2;
+    const float sy = h2 - (clip.y() / clip.w()) * h2;
+    const float dx = sx - static_cast<float>(px.x());
+    const float dy = sy - static_cast<float>(px.y());
+    if (dx * dx + dy * dy > kRadiusPx * kRadiusPx) {continue;}
+    if (clip.w() < best_depth) {   // clip w ≈ view distance: nearest wins
+      best_depth = clip.w();
+      out = p;
+      found = true;
+    }
+  }
+  return found;
+}
+
 void PointCloudView::mousePressEvent(QMouseEvent * event)
 {
   if (event->button() == Qt::MiddleButton) {
-    double wx = 0.0;
-    double wy = 0.0;
-    if (unproject_ground(event->pos(), wx, wy)) {Q_EMIT seekWorld(wx, wy);}
+    // GeoZui4D examine: animate the clicked point to the view centre and
+    // orbit about it (a miss falls back to the ground-plane hit). The cloud's
+    // old middle-click seek moved to the map canvas alone.
+    QVector3D picked;
+    bool have = pick_point(event->pos(), picked);
+    if (!have) {
+      double wx = 0.0;
+      double wy = 0.0;
+      if (unproject_ground(event->pos(), wx, wy)) {
+        picked = QVector3D(
+          static_cast<float>(wx - center_x_),
+          static_cast<float>(wy - center_y_), 0.0f);
+        have = true;
+      }
+    }
+    if (have) {
+      // pick_point returns unscaled recentred coords; the view scales z.
+      pivot_from_ = pivot_;
+      pivot_to_ = picked;
+      pivot_progress_ = 0.0f;
+      pivot_timer_.start();
+    }
     return;
   }
   last_mouse_ = event->pos();
