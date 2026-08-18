@@ -408,7 +408,7 @@ private:
   QPushButton * cube_run_btn_ = nullptr;
   QCheckBox * cube_points_check_ = nullptr;
   QCheckBox * cube_surf_check_ = nullptr;
-  QCheckBox * cube_flat_check_ = nullptr;   // true-resolution flat cells
+  QComboBox * cube_mesh_combo_ = nullptr;   // crisp+smooth / stepped / blended
   QComboBox * cube_palette_ = nullptr;      // surface palette, independent of the cloud's
 
   // Sidescan drape (#29): pass picker + the draped amplitudes for the

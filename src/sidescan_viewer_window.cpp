@@ -624,12 +624,13 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "outrank (best resolution, favours nadir); mid-range wins = the score "
     "peaks mid-swath, penalising nadir distortion AND the far edge (the "
     "classic mosaicking preference)");
-  cube_flat_check_ = new QCheckBox("flat", this);
-  cube_flat_check_->setChecked(true);   // true resolution by default
-  cube_flat_check_->setToolTip(
-    "Flat cells: each CUBE node renders as one crisp cell at its own depth "
-    "and colour — the estimate's true resolution, no blending. Uncheck for "
-    "the smooth-shaded relief.");
+  cube_mesh_combo_ = new QComboBox(this);
+  cube_mesh_combo_->addItems({"crisp cells", "stepped cells", "blended"});
+  cube_mesh_combo_->setToolTip(
+    "Surface rendering: crisp cells = one unblended texel per CUBE node on "
+    "a smooth watertight relief (the default); stepped cells = the fully "
+    "literal view, each node a flat plateau at its own depth; blended = "
+    "conventional Gouraud-interpolated colours.");
   cube_srange_.auto_check = new QCheckBox("auto", this);
   cube_srange_.auto_check->setChecked(true);
   cube_srange_.lo = new QDoubleSpinBox(this);
@@ -677,7 +678,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(cube_palette_);
   row->addWidget(cube_drape_combo_);
   row->addWidget(cube_range_score_combo_);
-  row->addWidget(cube_flat_check_);
+  row->addWidget(cube_mesh_combo_);
   // make_pane builds a QVBoxLayout(header, view); the lab row slots between.
   if (auto * v = qobject_cast<QVBoxLayout *>(cloud_pane->layout())) {
     v->insertLayout(1, row);
@@ -796,8 +797,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     this, [this](double a) {cloud_->setSurfaceAlpha(static_cast<float>(a));});
   connect(cube_shade_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {refreshCubeSurface();});
-  connect(cube_flat_check_, &QCheckBox::toggled,
-    this, [this](bool) {refreshCubeSurface();});
+  connect(cube_mesh_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {refreshCubeSurface();});
   connect(cube_srange_.auto_check, &QCheckBox::toggled, this, [this](bool on) {
       cube_srange_.lo->setEnabled(!on);
       cube_srange_.hi->setEnabled(!on);
@@ -1022,7 +1023,10 @@ void SidescanViewerWindow::refreshCubeSurface()
     return;
   }
   const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
-  const bool flat = cube_flat_check_ && cube_flat_check_->isChecked();
+  const int style_i = cube_mesh_combo_ ? cube_mesh_combo_->currentIndex() : 0;
+  const CubeMeshStyle style =
+    (style_i == 1) ? CubeMeshStyle::CrispStepped :
+    (style_i == 2) ? CubeMeshStyle::Blended : CubeMeshStyle::CrispSmooth;
 
   // Sidescan shade (#29): colour each node from the drape — painted cells
   // through the SIDESCAN pane's palette + range (so drape and waterfall read
@@ -1098,7 +1102,7 @@ void SidescanViewerWindow::refreshCubeSurface()
         render.depth[i] = std::nanf("");   // no data, no invented relief
       }
     }
-    auto mesh = build_cube_mesh_colored(render, node_rgb, flat);
+    auto mesh = build_cube_mesh_colored(render, node_rgb, style);
     cloud_->setSurface(
       std::move(mesh.positions), std::move(mesh.colors),
       std::move(mesh.indices));
@@ -1129,7 +1133,7 @@ void SidescanViewerWindow::refreshCubeSurface()
       static_cast<float>(cube_srange_.lo->value()),
       static_cast<float>(cube_srange_.hi->value()));
   }
-  auto mesh = build_cube_mesh(cube_surface_, shade, lut, flat, range);
+  auto mesh = build_cube_mesh(cube_surface_, shade, lut, style, range);
   if (cube_srange_.auto_check && cube_srange_.auto_check->isChecked()) {
     cube_srange_.lo->blockSignals(true);
     cube_srange_.hi->blockSignals(true);

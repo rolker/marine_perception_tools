@@ -122,7 +122,9 @@ TEST(BuildCubeMesh, FlatCellsRenderEachNodeAsOneQuad)
   ASSERT_TRUE(surface.ok());
   const auto lut = marine_colormap::bake_lut(
     marine_colormap::palette(0), marine_colormap::TransferParams{}, 256);
-  const auto mesh = build_cube_mesh(surface, CubeShade::Depth, lut, true);
+  const auto mesh = build_cube_mesh(
+    surface, CubeShade::Depth, lut,
+    marine_perception_tools::CubeMeshStyle::CrispStepped);
   ASSERT_FALSE(mesh.positions.empty());
   // 4 vertices + 2 triangles per estimated node, all four sharing the
   // node's depth and colour (no cross-node blending).
@@ -142,6 +144,53 @@ TEST(BuildCubeMesh, FlatCellsRenderEachNodeAsOneQuad)
   }
 }
 
+TEST(BuildCubeMesh, CrispSmoothIsWatertightWithConstantQuadColour)
+{
+  // The default style: one constant-colour quad per node whose corners take
+  // the neighbours' mean height. On a sloped synthetic surface, adjacent
+  // quads must share corner heights exactly (watertight membrane) while each
+  // quad's four vertices carry ONE colour (no texel blending).
+  CubeSurface surface;
+  surface.origin_x = 0.0;
+  surface.origin_y = 0.0;
+  surface.cell_m = 0.5;
+  surface.nx = 4;
+  surface.ny = 4;
+  for (int y = 0; y < 4; ++y) {
+    for (int x = 0; x < 4; ++x) {
+      surface.depth.push_back(-10.0f - 0.5f * x);   // sloping in x
+      surface.uncertainty.push_back(0.1f);
+      surface.intensity.push_back(std::nanf(""));
+    }
+  }
+  const auto lut = marine_colormap::bake_lut(
+    marine_colormap::palette(0), marine_colormap::TransferParams{}, 256);
+  const auto mesh = build_cube_mesh(
+    surface, CubeShade::Depth, lut,
+    marine_perception_tools::CubeMeshStyle::CrispSmooth);
+  const std::size_t n_verts = mesh.positions.size() / 3;
+  ASSERT_EQ(n_verts, 4u * 16u);   // 4 verts per node
+  // Constant colour per quad.
+  for (std::size_t q = 0; q + 3 < n_verts; q += 4) {
+    for (int k = 1; k < 4; ++k) {
+      EXPECT_EQ(mesh.colors[(q + k) * 3], mesh.colors[q * 3]);
+      EXPECT_EQ(mesh.colors[(q + k) * 3 + 1], mesh.colors[q * 3 + 1]);
+    }
+  }
+  // Watertight: vertices at the same (x, y) position share the same z.
+  for (std::size_t a = 0; a < n_verts; ++a) {
+    for (std::size_t b = a + 1; b < n_verts; ++b) {
+      if (mesh.positions[a * 3] == mesh.positions[b * 3] &&
+        mesh.positions[a * 3 + 1] == mesh.positions[b * 3 + 1])
+      {
+        EXPECT_EQ(mesh.positions[a * 3 + 2], mesh.positions[b * 3 + 2]);
+      }
+    }
+  }
+  // The slope survives: a quad's east corners sit deeper than its west.
+  EXPECT_LT(mesh.positions[1 * 3 + 2], mesh.positions[0 * 3 + 2]);
+}
+
 TEST(BuildCubeMesh, ManualRangeOverridesTheAutoRamp)
 {
   const auto surface = run_cube(flatPatch(), 0.5);
@@ -149,7 +198,8 @@ TEST(BuildCubeMesh, ManualRangeOverridesTheAutoRamp)
   const auto lut = marine_colormap::bake_lut(
     marine_colormap::palette(0), marine_colormap::TransferParams{}, 256);
   const auto mesh = build_cube_mesh(
-    surface, CubeShade::Depth, lut, false,
+    surface, CubeShade::Depth, lut,
+    marine_perception_tools::CubeMeshStyle::Blended,
     std::pair<float, float>(-20.0f, -5.0f));
   ASSERT_FALSE(mesh.positions.empty());
   EXPECT_EQ(mesh.scalar_lo, -20.0f);

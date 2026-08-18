@@ -181,7 +181,7 @@ CubeSurface run_cube(
 
 CubeSurfaceMesh build_cube_mesh_colored(
   const CubeSurface & surface, const std::vector<float> & node_rgb,
-  bool flat_cells)
+  CubeMeshStyle style)
 {
   CubeSurfaceMesh mesh;
   const std::size_t n_nodes =
@@ -190,11 +190,89 @@ CubeSurfaceMesh build_cube_mesh_colored(
     return mesh;
   }
 
-  // Flat cells (true resolution): each estimated node is one flat quad at
-  // its own depth and colour — a CUBE cell reads as a single crisp "pixel",
-  // no interpolation with its neighbours. Adjacent quads touch exactly
-  // (node spacing == cell size); unestimated nodes stay holes.
-  if (flat_cells) {
+  // Crisp smooth (the default): every node is one constant-colour quad —
+  // no texture blending, each CUBE cell a single crisp texel — but the
+  // quad's corners take the MEAN height of the (up to four) adjacent
+  // estimated nodes, so neighbouring quads share corner heights exactly
+  // and the relief is a watertight smooth membrane.
+  if (style == CubeMeshStyle::CrispSmooth) {
+    const float half = static_cast<float>(0.5 * surface.cell_m);
+    // Corner lattice (nx+1) x (ny+1): corner (cx, cy) touches nodes
+    // (cx-1..cx, cy-1..cy); its height is their finite-depth mean.
+    const int cnx = surface.nx + 1;
+    const int cny = surface.ny + 1;
+    std::vector<float> corner_z(
+      static_cast<std::size_t>(cnx) * static_cast<std::size_t>(cny),
+      std::nanf(""));
+    for (int cy = 0; cy < cny; ++cy) {
+      for (int cx = 0; cx < cnx; ++cx) {
+        float sum = 0.0f;
+        int cnt = 0;
+        for (int dy = -1; dy <= 0; ++dy) {
+          for (int dx = -1; dx <= 0; ++dx) {
+            const int nx_i = cx + dx;
+            const int ny_i = cy + dy;
+            if (nx_i < 0 || ny_i < 0 || nx_i >= surface.nx || ny_i >= surface.ny) {
+              continue;
+            }
+            const float d =
+              surface.depth[static_cast<std::size_t>(ny_i) * surface.nx + nx_i];
+            if (std::isfinite(d)) {
+              sum += d;
+              ++cnt;
+            }
+          }
+        }
+        if (cnt > 0) {
+          corner_z[static_cast<std::size_t>(cy) * cnx + cx] =
+            sum / static_cast<float>(cnt);
+        }
+      }
+    }
+    for (int y = 0; y < surface.ny; ++y) {
+      for (int x = 0; x < surface.nx; ++x) {
+        const std::size_t i = static_cast<std::size_t>(y) * surface.nx + x;
+        if (!std::isfinite(surface.depth[i])) {
+          continue;
+        }
+        const float cx0 = static_cast<float>(
+          surface.origin_x + x * surface.cell_m);
+        const float cy0 = static_cast<float>(
+          surface.origin_y + y * surface.cell_m);
+        // Quad corners on the corner lattice: (x, y), (x+1, y), (x+1, y+1),
+        // (x, y+1) — an estimated node guarantees all four have heights.
+        const float zs[4] = {
+          corner_z[static_cast<std::size_t>(y) * cnx + x],
+          corner_z[static_cast<std::size_t>(y) * cnx + x + 1],
+          corner_z[static_cast<std::size_t>(y + 1) * cnx + x + 1],
+          corner_z[static_cast<std::size_t>(y + 1) * cnx + x]};
+        const float xs[4] = {cx0 - half, cx0 + half, cx0 + half, cx0 - half};
+        const float ys[4] = {cy0 - half, cy0 - half, cy0 + half, cy0 + half};
+        const auto base =
+          static_cast<std::uint32_t>(mesh.positions.size() / 3);
+        for (int k = 0; k < 4; ++k) {
+          mesh.positions.push_back(xs[k]);
+          mesh.positions.push_back(ys[k]);
+          mesh.positions.push_back(zs[k]);
+          mesh.colors.push_back(node_rgb[i * 3]);
+          mesh.colors.push_back(node_rgb[i * 3 + 1]);
+          mesh.colors.push_back(node_rgb[i * 3 + 2]);
+        }
+        mesh.indices.push_back(base);
+        mesh.indices.push_back(base + 1);
+        mesh.indices.push_back(base + 2);
+        mesh.indices.push_back(base);
+        mesh.indices.push_back(base + 2);
+        mesh.indices.push_back(base + 3);
+      }
+    }
+    return mesh;
+  }
+
+  // Stepped cells: each estimated node is one flat quad at its own depth
+  // and colour — a CUBE cell reads as a single crisp "pixel", stepped
+  // plateaus between neighbours. Unestimated nodes stay holes.
+  if (style == CubeMeshStyle::CrispStepped) {
     const float half = static_cast<float>(0.5 * surface.cell_m);
     for (int y = 0; y < surface.ny; ++y) {
       for (int x = 0; x < surface.nx; ++x) {
@@ -272,7 +350,7 @@ CubeSurfaceMesh build_cube_mesh_colored(
 
 CubeSurfaceMesh build_cube_mesh(
   const CubeSurface & surface, CubeShade shade,
-  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells,
+  const std::vector<marine_colormap::Rgba8> & lut, CubeMeshStyle style,
   const std::optional<std::pair<float, float>> & range)
 {
   if (!surface.ok() || lut.empty()) {
@@ -318,7 +396,7 @@ CubeSurfaceMesh build_cube_mesh(
     node_rgb[i * 3 + 1] = c.g / 255.0f;
     node_rgb[i * 3 + 2] = c.b / 255.0f;
   }
-  auto mesh = build_cube_mesh_colored(surface, node_rgb, flat_cells);
+  auto mesh = build_cube_mesh_colored(surface, node_rgb, style);
   mesh.scalar_lo = lo;
   mesh.scalar_hi = hi;
   return mesh;

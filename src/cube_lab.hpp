@@ -114,18 +114,25 @@ struct CubeSurfaceMesh
 
 enum class CubeShade { Depth, Uncertainty, Intensity };
 
+// How the surface triangulates and takes its colour (#27/#29):
+//  - CrispSmooth (the lab default): every node is one CONSTANT-colour quad
+//    (no texture blending — each CUBE cell one crisp texel) whose corners
+//    take the mean height of the adjacent nodes, so the relief is a
+//    watertight smooth membrane. Crisp texture, smooth geometry.
+//  - CrispStepped: constant-colour quads at each node's own depth — the
+//    fully literal view (stepped plateaus, one step per cell).
+//  - Blended: one vertex per node, colours Gouraud-interpolate across
+//    triangles — the conventional smooth-shaded relief.
+enum class CubeMeshStyle { CrispSmooth, CrispStepped, Blended };
+
 // Triangulate + colour a surface with the given palette LUT. The colour
 // ramp auto-scales to the finite range of the chosen scalar.
-// `flat_cells` (the true-resolution view, default in the lab): every
-// estimated node renders as a flat cell_m quad at its own depth and colour —
-// no cross-node blending, each CUBE cell visible as one "pixel". Costs 4
-// vertices per node instead of 1. false = the smooth-shaded relief (vertex
-// colours interpolate across triangles).
 // `range` (optional) fixes the colour ramp to [lo, hi] instead of the
 // scalar's finite extent — the CUBE row's manual range control (#27).
 CubeSurfaceMesh build_cube_mesh(
   const CubeSurface & surface, CubeShade shade,
-  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells = false,
+  const std::vector<marine_colormap::Rgba8> & lut,
+  CubeMeshStyle style = CubeMeshStyle::CrispSmooth,
   const std::optional<std::pair<float, float>> & range = std::nullopt);
 
 // Mesh from explicit per-node colours (`node_rgb`: rgb triples in [0,1],
@@ -134,7 +141,7 @@ CubeSurfaceMesh build_cube_mesh(
 // Unestimated nodes are holes regardless of their colour entries.
 CubeSurfaceMesh build_cube_mesh_colored(
   const CubeSurface & surface, const std::vector<float> & node_rgb,
-  bool flat_cells);
+  CubeMeshStyle style);
 
 }  // namespace marine_perception_tools
 
