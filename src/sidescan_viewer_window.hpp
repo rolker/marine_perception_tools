@@ -415,6 +415,7 @@ private:
     std::int64_t t1_ns = 0;
   };
   QComboBox * cube_drape_combo_ = nullptr;
+  QComboBox * cube_range_score_combo_ = nullptr;   // near-wins vs mid-range-wins
   std::vector<DrapePassEntry> drape_passes_;
   SidescanDrape cube_drape_;
   CubeSurface cube_drape_terrain_;   // the extended terrain the drape rode

@@ -77,7 +77,7 @@ inline bool surfaceZNear(
 // score is ping_score x range-closeness, higher wins.
 void drapePing(
   const CubeSurface & surface, const WindowPing & ping, double half_width_m,
-  double ping_score, SidescanDrape & out)
+  double ping_score, RangeScoreMode range_mode, SidescanDrape & out)
 {
   const PingGeometry & g = ping.geometry;
   if (g.metres_per_sample <= 0.0 || g.lateral_sign == 0 ||
@@ -177,8 +177,10 @@ void drapePing(
     // straightness x range-closeness, so a straight-running near sample
     // beats a mid-turn or far-edge one (the composite's "better pixels
     // through" rule; single-pass conflicts reduce to nearer-wins).
-    const double range_score =
-      std::max(0.05, 1.0 - slant / std::max(1e-6, max_slant));
+    const double u = slant / std::max(1e-6, max_slant);
+    const double range_score = std::max(
+      0.05, range_mode == RangeScoreMode::MidRange ?
+      4.0 * u * (1.0 - u) : 1.0 - u);
     const float score = static_cast<float>(ping_score * range_score);
     for (const double o : offsets) {
       const auto cell = cellAt(surface, px + head_x * o, py + head_y * o);
@@ -357,7 +359,8 @@ CubeSurface extend_surface_for_drape(
 }
 
 SidescanDrape drape_pass(
-  const CubeSurface & surface, const std::vector<WindowPing> & pings)
+  const CubeSurface & surface, const std::vector<WindowPing> & pings,
+  RangeScoreMode range_mode)
 {
   SidescanDrape out;
   if (!surface.ok()) {
@@ -412,7 +415,7 @@ SidescanDrape drape_pass(
     const double ping_score =
       1.0 / (1.0 + (rate / kRateHalf) * (rate / kRateHalf));
 
-    drapePing(surface, pings[i], half_width, ping_score, out);
+    drapePing(surface, pings[i], half_width, ping_score, range_mode, out);
   }
   return out;
 }

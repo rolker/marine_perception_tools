@@ -214,6 +214,34 @@ TEST(SidescanDrape, StraightPassBeatsTurningPassInComposite)
   EXPECT_NE(a, 999.0f);   // the turning pass lost the cell
 }
 
+TEST(SidescanDrape, RangeScoreModeFlipsConflicts)
+{
+  // Two pings covering the same cell: for the NEAR ping the cell sits at
+  // ~24% of its swath, for the FAR ping at ~71%. Nearest mode keeps the
+  // near ping's pixel; mid-range mode prefers the far ping's mid-swath one.
+  const auto surface = flatSurface(40, 80, -10.0f);
+  auto near_ping = makePing(10.0, 18.0);
+  auto far_ping = makePing(10.0, 33.0);
+  for (auto & a : far_ping.amplitudes) {
+    a = 999.0f;
+  }
+  const int cx = 20;
+  const int cy = static_cast<int>(std::lround(12.0 / 0.5));
+  const std::size_t ci = static_cast<std::size_t>(cy) * 40 + cx;
+
+  const auto nearest = drape_pass(
+    surface, {near_ping, far_ping},
+    marine_perception_tools::RangeScoreMode::Nearest);
+  ASSERT_TRUE(std::isfinite(nearest.amplitude[ci]));
+  EXPECT_NE(nearest.amplitude[ci], 999.0f);
+
+  const auto mid = drape_pass(
+    surface, {near_ping, far_ping},
+    marine_perception_tools::RangeScoreMode::MidRange);
+  ASSERT_TRUE(std::isfinite(mid.amplitude[ci]));
+  EXPECT_EQ(mid.amplitude[ci], 999.0f);
+}
+
 TEST(SidescanDrape, UnusablePingsAreCountedSkipped)
 {
   const auto surface = flatSurface(20, 20, -10.0f);

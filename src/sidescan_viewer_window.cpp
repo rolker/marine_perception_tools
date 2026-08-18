@@ -617,6 +617,13 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "Sidescan pass to drape onto the surface (passes crossing the box; "
     "port + starboard of the same interval drape together). Single pass by "
     "design — blending kills shadows.");
+  cube_range_score_combo_ = new QComboBox(this);
+  cube_range_score_combo_->addItems({"near wins", "mid-range wins"});
+  cube_range_score_combo_->setToolTip(
+    "Range half of the drape quality score: near wins = closest samples "
+    "outrank (best resolution, favours nadir); mid-range wins = the score "
+    "peaks mid-swath, penalising nadir distortion AND the far edge (the "
+    "classic mosaicking preference)");
   cube_flat_check_ = new QCheckBox("flat", this);
   cube_flat_check_->setChecked(true);   // true resolution by default
   cube_flat_check_->setToolTip(
@@ -648,6 +655,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(cube_shade_combo_);
   row->addWidget(cube_palette_);
   row->addWidget(cube_drape_combo_);
+  row->addWidget(cube_range_score_combo_);
   row->addWidget(cube_flat_check_);
   // make_pane builds a QVBoxLayout(header, view); the lab row slots between.
   if (auto * v = qobject_cast<QVBoxLayout *>(cloud_pane->layout())) {
@@ -771,6 +779,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     this, [this](bool) {refreshCubeSurface();});
   connect(cube_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {refreshCubeSurface();});
+  connect(
+    cube_range_score_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {requestDrape();});   // re-march with the new score
   connect(cube_drape_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int idx) {
       if (idx <= 0) {
@@ -1147,6 +1158,9 @@ void SidescanViewerWindow::requestDrape()
   const bool ref_has_geo = cube_ref_has_geo_;
   const geometry_msgs::msg::TransformStamped ref_anchor = cube_ref_anchor_;
   const std::uint64_t max_nodes = cube_tuning_.max_nodes;
+  const RangeScoreMode range_mode =
+    (cube_range_score_combo_ && cube_range_score_combo_->currentIndex() == 1) ?
+    RangeScoreMode::MidRange : RangeScoreMode::Nearest;
   ++drape_gen_;
   const auto gen = drape_gen_;
   status_->setText(targets.size() == 1 ?
@@ -1155,7 +1169,7 @@ void SidescanViewerWindow::requestDrape()
     QString("Draping composite of %1 passes …").arg(targets.size()));
   drape_watcher_.setFuture(QtConcurrent::run(
       [targets, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor,
-      max_nodes, gen]() {
+      max_nodes, range_mode, gen]() {
         DrapeTicket ticket;
         ticket.generation = gen;
         QElapsedTimer timer;
@@ -1182,7 +1196,7 @@ void SidescanViewerWindow::requestDrape()
           if (!grow_note.empty()) {
             ticket.notes << QString::fromStdString(grow_note);
           }
-          ticket.drape = drape_pass(ticket.terrain, pings);
+          ticket.drape = drape_pass(ticket.terrain, pings, range_mode);
           if (ticket.drape.pings_skipped > 0) {
             ticket.notes << QString("%1 pings unusable (no altitude/side or "
               "off the surface)").arg(ticket.drape.pings_skipped);

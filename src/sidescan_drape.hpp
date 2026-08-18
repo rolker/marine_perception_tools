@@ -68,8 +68,18 @@ struct SidescanDrape
 // Straightness is derived from each ping's yaw rate against its neighbours
 // in the vector; a pass boundary's position jump makes the rate negligible,
 // so concatenated passes need no explicit boundaries.
+// The range half of the pixel-quality score:
+//  - Nearest: closer samples strictly outrank far ones (best across-track
+//    resolution, but composites favour near-nadir imagery with its
+//    distortion);
+//  - MidRange: the score peaks mid-swath (4u(1-u), u = slant/max_slant),
+//    penalising BOTH the nadir region and the far edge — the classic
+//    mosaicking preference.
+enum class RangeScoreMode { Nearest, MidRange };
+
 SidescanDrape drape_pass(
-  const CubeSurface & surface, const std::vector<WindowPing> & pings);
+  const CubeSurface & surface, const std::vector<WindowPing> & pings,
+  RangeScoreMode range_mode = RangeScoreMode::Nearest);
 
 // Drape terrain (#29 follow-up): the sidescan reaches past the MBES, so the
 // surface is extended to the pass's swath before marching — the grid grows
