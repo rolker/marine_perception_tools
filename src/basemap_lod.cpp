@@ -227,6 +227,7 @@ void BasemapLod::open(
   job.dir = dir;
   job.palette_idx = palette_idx;
   job.zero_is_nodata = zero_is_nodata;
+  job.range_override = range_override_;
   const auto cancel = cancel_;
   // The worker is a pure function of its arguments (camp ADR-0013's
   // snapshotted filter): safe to abandon via gen and to outlive `this`
@@ -282,7 +283,7 @@ void BasemapLod::open(
         }
       }
       std::vector<double> samples;
-      {
+      if (!job.range_override) {
         const auto & tiles = res.discovery[sample_level];
         constexpr int kEdge = marine_tiled_raster_store::TiledRasterTile<double>::edge;
         const std::size_t n_tiles = std::min(tiles.size(), kMaxRangeSampleTiles);
@@ -309,11 +310,12 @@ void BasemapLod::open(
           }
         }
       }
-      if (samples.empty()) {
+      if (samples.empty() && !job.range_override) {
         res.note = " (store tiles hold no valid values)";
         return res;
       }
-      const auto [lo, hi] = robust_range(samples);
+      const auto [lo, hi] = job.range_override ?
+      *job.range_override : robust_range(samples);
       res.range_lo = lo;
       res.range_hi = hi;
       res.lut = marine_colormap::bake_lut(
@@ -353,6 +355,15 @@ void BasemapLod::open(
       .arg(lo, 0, 'f', 1).arg(hi, 0, 'f', 1);
       return res;
     }));
+}
+
+void BasemapLod::setRangeOverride(
+  const std::optional<std::pair<double, double>> & range)
+{
+  range_override_ = range;
+  if (!dir_.empty()) {
+    open(dir_, palette_idx_, zero_is_nodata_);   // recolormap every level
+  }
 }
 
 void BasemapLod::viewChanged(

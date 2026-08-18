@@ -201,6 +201,9 @@ private:
   std::string passLabel(std::int64_t t_start_ns, const std::string & bag_path) const;
   // Debounced scrub-driven open: the last commit before the hand settles wins.
   void scheduleOpen(const std::string & bag_uri, int64_t t0_ns, int64_t t1_ns);
+  // Build + wire the per-pane colour-range controls (#26); ctor helper, must
+  // run before the pane headers consume the widgets.
+  void setupRangeControls();
   // Re-render the legend's baked pass labels after a display-zone change.
   void refreshPassLabels();
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
@@ -321,6 +324,21 @@ private:
   QCheckBox * show_track_check_ = nullptr;
   QCheckBox * show_grid_check_ = nullptr;
   QCheckBox * utc_check_ = nullptr;
+
+  // Per-pane colour-range controls (#26): auto (default) or a manual lo/hi
+  // in the pane's native units. The sidescan range also drives the map's
+  // coverage-overlay render (same data, same scale).
+  struct RangeControls
+  {
+    QCheckBox * auto_check = nullptr;
+    QDoubleSpinBox * lo = nullptr;
+    QDoubleSpinBox * hi = nullptr;
+  };
+  RangeControls ss_range_;      // sidescan waterfall + map coverage, 0..1
+  RangeControls bs_range_;      // MBES backscatter waterfall, 0..1
+  RangeControls wc_range_;      // water column: black/white points, 0..1
+  RangeControls cloud_range_;   // 3D cloud scalar (depth m / intensity)
+  RangeControls map_range_;     // basemap contrast, layer units
   // Clip the selection cloud to the selected contact + margin (#24 desk
   // finding: several passes over a tile is millions of soundings).
   QCheckBox * clip_contact_check_ = nullptr;

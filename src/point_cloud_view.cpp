@@ -230,6 +230,15 @@ void PointCloudView::setZExaggeration(float z)
   update();
 }
 
+void PointCloudView::setScalarRange(
+  const std::optional<std::pair<float, float>> & range)
+{
+  scalar_range_ = range;
+  rebuild_colors();
+  buffers_dirty_ = true;
+  update();
+}
+
 void PointCloudView::setColorMap(int palette_index)
 {
   palette_index_ = palette_index;
@@ -323,11 +332,17 @@ void PointCloudView::rebuild_colors()
   }
   const std::vector<float> & scalar = (mode_ == ColorMode::Depth) ? depth_ : intensity_;
 
+  // Manual range (#26) wins; otherwise auto-scale to the data extent.
   float lo = std::numeric_limits<float>::max();
   float hi = std::numeric_limits<float>::lowest();
-  for (const float v : scalar) {
-    lo = std::min(lo, v);
-    hi = std::max(hi, v);
+  if (scalar_range_) {
+    lo = scalar_range_->first;
+    hi = scalar_range_->second;
+  } else {
+    for (const float v : scalar) {
+      lo = std::min(lo, v);
+      hi = std::max(hi, v);
+    }
   }
   const float span = (hi > lo) ? (hi - lo) : 1.0f;
 

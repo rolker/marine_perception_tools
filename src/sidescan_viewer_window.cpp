@@ -61,6 +61,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -326,7 +327,8 @@ marine_sonar_widgets::WaterfallRow build_mbes_backscatter_row(const MbesWindowPi
 // thread; the caller applies the result on the UI thread.
 SidescanRenderResult render_window(
   std::shared_ptr<SidescanBagSession> session, double head, double total,
-  double win_lo, double win_hi, int max_pings, double res, int palette_index)
+  double win_lo, double win_hi, int max_pings, double res, int palette_index,
+  std::optional<std::pair<float, float>> manual_range = std::nullopt)
 {
   SidescanRenderResult out;
   out.res_m = res;
@@ -341,8 +343,10 @@ SidescanRenderResult render_window(
   if (paint.empty()) {return out;}  // ok, but a null image -> canvas clears
 
   // Shared colormap (marine_colormap, same as the rqt/rviz/CAMP apps) with an
-  // auto contrast scale from this window's backscatter distribution.
-  const auto [lo, hi] = auto_range(paint, 0.02, 0.98);
+  // auto contrast scale from this window's backscatter distribution — or the
+  // operator's manual range (#26), shared with the sidescan waterfall so the
+  // map overlay and waterfall read identically.
+  const auto [lo, hi] = manual_range ? *manual_range : auto_range(paint, 0.02, 0.98);
   const std::size_t n_pal = marine_colormap::palette_count();
   const std::size_t idx = (n_pal > 0) ?
     static_cast<std::size_t>(std::clamp(palette_index, 0, static_cast<int>(n_pal - 1))) :
@@ -452,6 +456,111 @@ SidescanRenderResult render_window(
 }
 
 }  // namespace
+
+void SidescanViewerWindow::setupRangeControls()
+{
+  // Per-pane colour-range controls (#26): "auto" (default) or manual lo/hi
+  // spin boxes in the pane's native units; the spins enable when auto is off.
+  const auto make_range = [this](
+    RangeControls & rc, double min, double max, double step, int decimals,
+    double init_lo, double init_hi, const QString & tip) {
+      rc.auto_check = new QCheckBox("auto", this);
+      rc.auto_check->setChecked(true);
+      rc.auto_check->setToolTip(tip);
+      rc.lo = new QDoubleSpinBox(this);
+      rc.hi = new QDoubleSpinBox(this);
+      for (auto * s : {rc.lo, rc.hi}) {
+        s->setRange(min, max);
+        s->setDecimals(decimals);
+        s->setSingleStep(step);
+        s->setEnabled(false);
+        s->setToolTip(tip);
+        s->setKeyboardTracking(false);   // apply on commit, not per keystroke
+      }
+      rc.lo->setValue(init_lo);
+      rc.hi->setValue(init_hi);
+    };
+  make_range(
+    ss_range_, 0.0, 1.0, 0.02, 3, 0.0, 1.0,
+    "Sidescan colour range (normalized amplitude); also scales the map's "
+    "coverage overlay");
+  make_range(
+    bs_range_, 0.0, 1.0, 0.02, 3, 0.0, 1.0,
+    "MBES backscatter colour range (normalized amplitude)");
+  make_range(
+    wc_range_, 0.0, 1.0, 0.02, 3, 0.0, 1.0,
+    "Water-column black/white points within the buffered data extent");
+  make_range(
+    cloud_range_, -12000.0, 12000.0, 1.0, 1, -50.0, 0.0,
+    "3D cloud colour range in the active scalar's units (depth m / intensity)");
+  make_range(
+    map_range_, -12000.0, 12000.0, 1.0, 1, -50.0, 0.0,
+    "Basemap contrast range in layer units (auto = robust percentile scale)");
+
+  // Range-control wiring (#26): one applier per pane, fired by the auto
+  // toggle (which also gates the spins) and by either spin commit.
+  const auto wire_range = [this](RangeControls & rc, std::function<void()> apply) {
+      RangeControls * p = &rc;   // the member outlives every connection
+      connect(p->auto_check, &QCheckBox::toggled, this, [p, apply](bool on) {
+          p->lo->setEnabled(!on);
+          p->hi->setEnabled(!on);
+          apply();
+        });
+      connect(p->lo, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this, [p, apply](double) {if (!p->auto_check->isChecked()) {apply();}});
+      connect(p->hi, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this, [p, apply](double) {if (!p->auto_check->isChecked()) {apply();}});
+    };
+  wire_range(ss_range_, [this]() {
+      if (ss_range_.auto_check->isChecked()) {
+        waterfall_->set_auto_range(true);
+      } else {
+        waterfall_->set_auto_range(false);
+        waterfall_->set_manual_range(
+          static_cast<float>(ss_range_.lo->value()),
+          static_cast<float>(ss_range_.hi->value()));
+      }
+      requestRender();   // the map coverage overlay follows the same range
+    });
+  wire_range(bs_range_, [this]() {
+      if (bs_range_.auto_check->isChecked()) {
+        mbes_waterfall_->set_auto_range(true);
+      } else {
+        mbes_waterfall_->set_auto_range(false);
+        mbes_waterfall_->set_manual_range(
+          static_cast<float>(bs_range_.lo->value()),
+          static_cast<float>(bs_range_.hi->value()));
+      }
+    });
+  wire_range(wc_range_, [this]() {
+      const bool a = wc_range_.auto_check->isChecked();
+      echogram_->setAutoRange(a);
+      if (!a) {
+        echogram_->setBlackPoint(static_cast<float>(wc_range_.lo->value()));
+        echogram_->setWhitePoint(static_cast<float>(wc_range_.hi->value()));
+      }
+    });
+  wire_range(cloud_range_, [this]() {
+      if (cloud_range_.auto_check->isChecked()) {
+        cloud_->setScalarRange(std::nullopt);
+      } else {
+        cloud_->setScalarRange(std::pair<float, float>(
+            static_cast<float>(cloud_range_.lo->value()),
+            static_cast<float>(cloud_range_.hi->value())));
+      }
+    });
+  wire_range(map_range_, [this]() {
+      if (!basemap_lod_) {
+        return;
+      }
+      if (map_range_.auto_check->isChecked()) {
+        basemap_lod_->setRangeOverride(std::nullopt);
+      } else {
+        basemap_lod_->setRangeOverride(std::pair<double, double>(
+            map_range_.lo->value(), map_range_.hi->value()));
+      }
+    });
+}
 
 SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 : QMainWindow(parent)
@@ -614,6 +723,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     cloud_->setColorMap(static_cast<int>(*vi));
   }
 
+  setupRangeControls();
+
   // Wrap a view in a titled panel with a small header row (title + per-pane controls).
   auto make_pane = [this](
     const QString & title, QWidget * view, const std::vector<QWidget *> & header) {
@@ -632,9 +743,15 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       return panel;
     };
 
-  auto * ss_pane = make_pane("Sidescan", waterfall_, {sidescan_cmap_});
-  auto * bs_pane = make_pane("MBES Backscatter", mbes_waterfall_, {mbes_cmap_});
-  auto * wc_pane = make_pane("Water Column", echogram_, {echo_cmap_});
+  auto * ss_pane = make_pane(
+    "Sidescan", waterfall_,
+    {ss_range_.auto_check, ss_range_.lo, ss_range_.hi, sidescan_cmap_});
+  auto * bs_pane = make_pane(
+    "MBES Backscatter", mbes_waterfall_,
+    {bs_range_.auto_check, bs_range_.lo, bs_range_.hi, mbes_cmap_});
+  auto * wc_pane = make_pane(
+    "Water Column", echogram_,
+    {wc_range_.auto_check, wc_range_.lo, wc_range_.hi, echo_cmap_});
   // The cloud pane carries a pass legend beside the 3D view (#24): hidden in
   // scrub mode, shown when a tile selection drives the cloud (per-pass colours).
   cloud_legend_ = new QTreeWidget(this);
@@ -658,8 +775,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   clip_margin_spin_->setToolTip("Margin around the selected contact");
   auto * cloud_pane = make_pane(
     "MBES 3D", cloud_split_,
-    {clip_contact_check_, clip_margin_spin_,
-      cloud_color_combo_, zexag_spin_, point_size_spin_, cloud_palette_});
+    {clip_contact_check_, clip_margin_spin_, cloud_color_combo_,
+      cloud_range_.auto_check, cloud_range_.lo, cloud_range_.hi,
+      zexag_spin_, point_size_spin_, cloud_palette_});
 
   // 2x2 grid of the four sonar views, each pane independently resizable:
   //   sidescan waterfall (UL) | MBES backscatter (UR)
@@ -682,7 +800,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // header carries the basemap layer/colormap combos (survey mode only).
   auto * map_pane = make_pane(
     "Map", canvas_,
-    {basemap_layer_, basemap_cmap_, show_track_check_, show_grid_check_});
+    {basemap_layer_, basemap_cmap_,
+      map_range_.auto_check, map_range_.lo, map_range_.hi,
+      show_track_check_, show_grid_check_});
   outer_split_ = new QSplitter(Qt::Horizontal, this);
   outer_split_->addWidget(contacts_pane);
   outer_split_->addWidget(map_pane);
@@ -789,6 +909,16 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
           canvas_->fitGeo(ext->south, ext->west, ext->north, ext->east);
         }
       }
+      // Show the sampled auto range in the (disabled) spins, so switching to
+      // manual starts from the live scale instead of a stale default.
+      if (map_range_.auto_check->isChecked()) {
+        map_range_.lo->blockSignals(true);
+        map_range_.hi->blockSignals(true);
+        map_range_.lo->setValue(basemap_lod_->rangeLo());
+        map_range_.hi->setValue(basemap_lod_->rangeHi());
+        map_range_.lo->blockSignals(false);
+        map_range_.hi->blockSignals(false);
+      }
       pushBasemapView();
     });
   connect(basemap_lod_, &BasemapLod::tilesChanged, this, [this]() {
@@ -817,6 +947,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       time_bar_->setDisplayUtc(on);
       refreshPassLabels();
     });
+
   // Clip changes re-run the selection load (cheap: the query is local, the
   // read is the same windowed machinery).
   const auto reload_selection = [this]() {
@@ -1529,12 +1660,20 @@ void SidescanViewerWindow::requestRender()
   const double res = window_len_m_ / static_cast<double>(std::max(1, max_window_pings_));
   const int palette = palette_combo_ ? palette_combo_->currentIndex() : 0;
   const uint64_t epoch = session_epoch_;
+  // Manual amplitude range from the sidescan pane's controls (#26): the map
+  // coverage overlay renders the same data, so it follows the same range.
+  std::optional<std::pair<float, float>> manual_range;
+  if (ss_range_.auto_check && !ss_range_.auto_check->isChecked()) {
+    manual_range = {static_cast<float>(ss_range_.lo->value()),
+      static_cast<float>(ss_range_.hi->value())};
+  }
   render_watcher_.setFuture(QtConcurrent::run(
-      [session, head, total, win, max_pings, res, palette, epoch]() {
+      [session, head, total, win, max_pings, res, palette, epoch, manual_range]() {
         SidescanRenderResult r;
         try {
           r = render_window(
-            session, head, total, win.lo, win.hi, max_pings, res, palette);
+            session, head, total, win.lo, win.hi, max_pings, res, palette,
+            manual_range);
         } catch (const std::exception &) {
           r.ok = false;   // e.g. the bag became unreadable mid-session
         }

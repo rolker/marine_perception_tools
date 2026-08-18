@@ -101,6 +101,14 @@ public:
   QString note() const {return note_;}
   bool isOpen() const {return discovered_;}
 
+  // The contrast range in layer units: the sampled robust range, or the
+  // operator's override. Valid once opened() fires.
+  double rangeLo() const {return range_lo_;}
+  double rangeHi() const {return range_hi_;}
+  // Manual contrast range (#26): nullopt returns to the sampled auto range.
+  // Re-runs open() when a layer is loaded — every level recolormaps.
+  void setRangeOverride(const std::optional<std::pair<double, double>> & range);
+
 signals:
   // Discovery finished: dataExtent()/note() are valid (pixels may still be
   // loading; tilesChanged() follows per landed batch).
@@ -125,6 +133,7 @@ private:
     std::string dir;
     std::size_t palette_idx = 0;
     bool zero_is_nodata = false;
+    std::optional<std::pair<double, double>> range_override;
     std::vector<std::pair<TileKey, TileRef>> tiles;   // refs to load
   };
 
@@ -156,6 +165,7 @@ private:
   bool zero_is_nodata_ = false;
   double range_lo_ = 0.0;
   double range_hi_ = 0.0;
+  std::optional<std::pair<double, double>> range_override_;
   std::vector<marine_colormap::Rgba8> lut_;
   QString note_;
 

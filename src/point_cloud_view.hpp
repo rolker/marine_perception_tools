@@ -25,6 +25,8 @@
 #include <QVector3D>
 
 #include <cmath>
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include "mbes_geometry.hpp"
@@ -101,6 +103,9 @@ public:
   int decimationStride() const {return decimation_stride_;}
   void setZExaggeration(float z);          // >= 1; stretches depth
   void setColorMap(int palette_index);     // marine_colormap palette index
+  // Manual colour range for the scalar modes (Depth/Backscatter), in the
+  // active scalar's units; nullopt (default) auto-scales to the data extent.
+  void setScalarRange(const std::optional<std::pair<float, float>> & range);
   void setPointSize(float px);             // GL point size in pixels (>= 1)
 
   // Place a forward-pointing boat arrow (~2.4 m x 1 m) at a world position for
@@ -183,6 +188,7 @@ private:
   float cursor_x_ = 0.0f;
   float cursor_y_ = 0.0f;
   ColorMode mode_ = ColorMode::Depth;
+  std::optional<std::pair<float, float>> scalar_range_;   // manual colour range
   int decimation_stride_ = 1;
   int palette_index_ = 0;
   QPoint last_mouse_;
