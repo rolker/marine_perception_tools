@@ -25,6 +25,7 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QDoubleSpinBox>
 #include <QEvent>
@@ -594,6 +595,13 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "Gather every MBES sounding in the shift-drag map box and CUBE it "
     "at the chosen cell size");
   cube_tuning_ = default_cube_tuning();
+  {
+    // The ARA curve path survives sessions (a per-sonar file, not a knob
+    // you want to re-browse every start).
+    const QSettings settings("UNH-CCOM", "survey_explorer");
+    cube_tuning_.ara_curve_path =
+      settings.value("ara_curve_path").toString().toStdString();
+  }
   cube_params_btn_ = new QPushButton("params…", this);
   cube_params_btn_->setToolTip(
     "CUBE algorithm parameters (capture scale, median filter, intervention "
@@ -737,6 +745,28 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         "posterior (combined)"});
       extractor->setCurrentIndex(std::clamp(cube_tuning_.extractor, 0, 2));
       extractor->setToolTip("Multi-hypothesis disambiguation method");
+      auto * ara_path = new QLineEdit(
+        QString::fromStdString(cube_tuning_.ara_curve_path), &dialog);
+      ara_path->setPlaceholderText("(none — raw intensities)");
+      ara_path->setToolTip(
+        "Per-sonar angular-response curve CSV (cube#81); corrects the "
+        "CUBE-settled backscatter for beam angle (removes the bright-nadir "
+        "bias). Tier-2 TL terms come from the CSV header.");
+      ara_path->setMinimumWidth(280);
+      auto * ara_browse = new QPushButton("…", &dialog);
+      connect(ara_browse, &QPushButton::clicked, &dialog, [&dialog, ara_path]() {
+        const QString start = ara_path->text().isEmpty() ?
+        QDir::homePath() + "/data/logs/analysis" :
+        QFileInfo(ara_path->text()).absolutePath();
+        const QString f = QFileDialog::getOpenFileName(
+            &dialog, "Angular-response curve", start, "CSV (*.csv);;All (*)");
+        if (!f.isEmpty()) {ara_path->setText(f);}
+        });
+      auto * ara_row = new QWidget(&dialog);
+      auto * ara_lay = new QHBoxLayout(ara_row);
+      ara_lay->setContentsMargins(0, 0, 0, 0);
+      ara_lay->addWidget(ara_path, 1);
+      ara_lay->addWidget(ara_browse);
       auto * max_nodes = make_dspin(
         0.1, 1000000.0, 10.0, 1,
         static_cast<double>(cube_tuning_.max_nodes) / 1e6);
@@ -753,6 +783,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       form->addRow("Bayes factor threshold", bayes);
       form->addRow("Run-length threshold", runlen);
       form->addRow("Extractor", extractor);
+      form->addRow("ARA curve CSV", ara_row);
       form->addRow("Max grid nodes", max_nodes);
       auto * buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel |
@@ -773,6 +804,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
           runlen->setValue(static_cast<int>(d.runlength_threshold));
           extractor->setCurrentIndex(std::clamp(d.extractor, 0, 2));
           max_nodes->setValue(static_cast<double>(d.max_nodes) / 1e6);
+          ara_path->clear();
         });
       if (dialog.exec() != QDialog::Accepted) {
         return;
@@ -789,6 +821,12 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_tuning_.extractor = extractor->currentIndex();
       cube_tuning_.max_nodes =
       static_cast<std::uint64_t>(max_nodes->value() * 1e6);
+      cube_tuning_.ara_curve_path = ara_path->text().toStdString();
+      {
+        QSettings settings("UNH-CCOM", "survey_explorer");
+        settings.setValue(
+          "ara_curve_path", QString::fromStdString(cube_tuning_.ara_curve_path));
+      }
       status_->setText("CUBE parameters updated — press Run CUBE to apply.");
     });
   connect(cube_points_check_, &QCheckBox::toggled,

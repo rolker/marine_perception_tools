@@ -15,6 +15,10 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 #include <vector>
 
 #include "cube_lab.hpp"
@@ -80,6 +84,52 @@ TEST(RunCube, EmptyAndDegenerateInputsFailLoud)
   EXPECT_FALSE(run_cube({}, 0.1).ok());
   EXPECT_FALSE(run_cube(flatPatch(), 0.0).ok());
   EXPECT_FALSE(run_cube(flatPatch(), -1.0).ok());
+}
+
+TEST(RunCube, AraCurveCorrectsSettledBackscatter)
+{
+  // All soundings at rx 30 deg; the curve says 30 deg sits -6 dB relative
+  // to nadir, so the corrected (settled) intensity is raw + 6 dB.
+  auto soundings = flatPatch(-10.0f, -27.5f);
+  for (auto & s : soundings) {
+    s.beam_angle = static_cast<float>(30.0 * M_PI / 180.0);
+  }
+  const char * dir = std::getenv("TMPDIR");
+  const std::string csv =
+    std::string(dir ? dir : "/tmp") + "/test_ara_curve.csv";
+  {
+    // The derive tool's format: >= 4 columns, angle in column 0 and
+    // db_relative_to_nadir in column 3.
+    std::ofstream out(csv);
+    out << "# tl_removed: false\n";
+    out << "abs_angle_deg_center,n,mean_db,db_relative_to_nadir\n";
+    out << "0,1,0,0\n15,1,0,-3\n30,1,0,-6\n45,1,0,-9\n";
+  }
+  marine_perception_tools::CubeTuning tuning;
+  tuning.ara_curve_path = csv;
+  const auto surface = run_cube(flatPatch(-10.0f, -27.5f), 0.5, "order1a",
+      tuning);
+  // (Baseline patch has NaN beam angles -> correction identity.)
+  const auto corrected = run_cube(soundings, 0.5, "order1a", tuning);
+  std::remove(csv.c_str());
+  ASSERT_TRUE(corrected.ok()) << corrected.note;
+  EXPECT_NE(corrected.note.find("ARA corrected"), std::string::npos);
+  bool saw = false;
+  for (std::size_t i = 0; i < corrected.depth.size(); ++i) {
+    if (std::isfinite(corrected.depth[i]) &&
+      std::isfinite(corrected.intensity[i]))
+    {
+      saw = true;
+      EXPECT_NEAR(corrected.intensity[i], -27.5f + 6.0f, 1.0f);
+    }
+  }
+  EXPECT_TRUE(saw);
+  // The NaN-angle baseline stays uncorrected (identity through the curve).
+  for (std::size_t i = 0; i < surface.depth.size(); ++i) {
+    if (std::isfinite(surface.depth[i]) && std::isfinite(surface.intensity[i])) {
+      EXPECT_NEAR(surface.intensity[i], -27.5f, 1.0f);
+    }
+  }
 }
 
 TEST(RunCube, MaxNodesIsOperatorOwnedNotHidden)

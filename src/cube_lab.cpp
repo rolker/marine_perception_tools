@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "basemap_contrast.hpp"
+#include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/node.h"
 #include "cube_bathymetry/parameters.h"
 #include "cube_bathymetry/sizes.h"
@@ -108,6 +109,33 @@ CubeSurface run_cube(
   params.extractor = static_cast<cube::CubeExtractor>(
     std::clamp(tuning.extractor, 0, static_cast<int>(cube::CUBE_POSTERIOR)));
 
+  // ARA correction (cube#81): the per-sonar curve makes the CUBE-settled
+  // backscatter angle-independent (removes the bright-nadir bias). Applied
+  // at record time inside the library (recordBeam -> correctBeamIntensity)
+  // using each sounding's rx angle; the tier-2 TL terms come from the CSV
+  // header (cube#87). A load failure is reported, not fatal.
+  std::string ara_note;
+  if (!tuning.ara_curve_path.empty()) {
+    try {
+      const auto curve =
+        cube::loadAngularResponseCurveWithHeader(tuning.ara_curve_path);
+      if (curve.points.empty()) {
+        ara_note = "; ARA curve empty/unreadable — correction off";
+      } else {
+        params.angular_response_curve = curve.points;
+        params.backscatter_angle_correction =
+          cube::BackscatterAngleCorrection::Empirical;
+        params.backscatter_tl_removed = curve.tl_removed;
+        params.backscatter_absorption_db_per_m = curve.absorption_db_per_m;
+        ara_note = "; ARA corrected (" +
+          std::to_string(curve.points.size()) + " bins" +
+          (curve.tl_removed ? ", tier-2 TL" : "") + ")";
+      }
+    } catch (const std::exception & e) {
+      ara_note = std::string("; ARA curve load failed: ") + e.what();
+    }
+  }
+
   // Drive cube::Node directly instead of cube::Grid: Grid::values() is the
   // depth-only legacy extraction, while Node::extractNodeRecord carries the
   // CUBE-settled backscatter (ADR-0007) this lab drapes with. The sounding
@@ -125,8 +153,11 @@ CubeSurface run_cube(
     cs.vertical_error = static_cast<float>(v_std * v_std);
     cs.horizontal_error = static_cast<float>(h_std * h_std);
     // CUBE-settled backscatter (ADR-0007): the intensity rides the
-    // hypothesis queue bound to its depth and comes back per node.
+    // hypothesis queue bound to its depth and comes back per node, with
+    // its beam angle + slant range so the ARA/TL corrections can act.
     cs.intensity = s.intensity;
+    cs.beam_angle = s.beam_angle;
+    cs.slant_range = s.slant_range;
 
     const double radius = params.influenceRadius(cs);
     int min_x = static_cast<int>(std::floor(((s.x - radius) - out.origin_x) / cell_m));
@@ -176,7 +207,7 @@ CubeSurface run_cube(
     }
   }
   out.note = std::to_string(estimated) + " of " +
-    std::to_string(n_nodes) + " nodes estimated";
+    std::to_string(n_nodes) + " nodes estimated" + ara_note;
   return out;
 }
 

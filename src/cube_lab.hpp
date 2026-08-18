@@ -71,6 +71,11 @@ struct CubeTuning
   float bayes_factor_threshold = 0.135f;   // intervention Bayes factor
   std::uint32_t runlength_threshold = 5;   // intervention run length
   int extractor = 1;   // cube::CubeExtractor: 0 prior, 1 lhood, 2 posterior
+  // Angular-response correction (cube#81 ARA): path to a per-sonar curve
+  // CSV ({abs_angle_deg, db_relative_to_nadir} + optional tier-2 TL header,
+  // e.g. ~/data/logs/analysis/m3_angular_response_curve.csv). Empty = off
+  // (raw intensities). Loaded per run; a bad file surfaces in the note.
+  std::string ara_curve_path;
   // Grid-size guard, operator-owned (not a hidden policy): the largest node
   // count a run may allocate. Baseline cost is ~20 B/node (node-pointer +
   // output arrays) before per-populated-node CUBE state, so the 100M default
