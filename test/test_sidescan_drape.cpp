@@ -125,6 +125,22 @@ TEST(SidescanDrape, NearerSlantWinsCellConflicts)
   EXPECT_NEAR(drape.amplitude[ci], std::sqrt(36.0 + 16.0) / 0.1, 1.5);
 }
 
+TEST(SidescanDrape, PingStripsTileTheAlongTrackGaps)
+{
+  // Two pings 1 m apart along-track: each paints a strip half the spacing
+  // wide on both sides, so the cells BETWEEN the rays are covered too —
+  // no grey stripes between pings.
+  const auto surface = flatSurface(40, 40, -10.0f);
+  const auto drape =
+    drape_pass(surface, {makePing(9.0, 18.0), makePing(10.0, 18.0)});
+  ASSERT_TRUE(drape.ok());
+  // A mid-gap cell (x = 9.5) well inside the swath (6 m across-track).
+  const int cx = static_cast<int>(std::lround(9.5 / 0.5));
+  const int cy = static_cast<int>(std::lround(12.0 / 0.5));
+  EXPECT_TRUE(
+    std::isfinite(drape.amplitude[static_cast<std::size_t>(cy) * 40 + cx]));
+}
+
 TEST(SidescanDrape, UnusablePingsAreCountedSkipped)
 {
   const auto surface = flatSurface(20, 20, -10.0f);

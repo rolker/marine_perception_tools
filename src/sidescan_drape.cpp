@@ -69,8 +69,12 @@ inline bool surfaceZNear(
   return false;
 }
 
+// `half_width_m`: half the along-track strip this ping paints — the ping's
+// share of the pass footprint (half the ping-to-ping spacing), so
+// consecutive pings tile the grid without grey gaps between their rays.
 void drapePing(
-  const CubeSurface & surface, const WindowPing & ping, SidescanDrape & out)
+  const CubeSurface & surface, const WindowPing & ping, double half_width_m,
+  SidescanDrape & out)
 {
   const PingGeometry & g = ping.geometry;
   if (g.metres_per_sample <= 0.0 || g.lateral_sign == 0 ||
@@ -100,21 +104,34 @@ void drapePing(
     return;
   }
 
+  // Along-track paint offsets: the strip of cells this ping owns. The
+  // heading direction is perpendicular to the across-track march.
+  const double head_x = std::cos(g.yaw);
+  const double head_y = std::sin(g.yaw);
+  std::vector<double> offsets{0.0};
+  const double o_step = 0.5 * surface.cell_m;
+  for (double o = o_step; o <= half_width_m; o += o_step) {
+    offsets.push_back(o);
+    offsets.push_back(-o);
+  }
+
   // First-return march: outward from nadir in half-cell steps, tracking the
-  // highest line-of-sight angle seen so far. A cell whose ray falls below
-  // that line is in acoustic shadow. Terrain gaps (unestimated cells) keep
-  // the previous z so the occlusion state stays sane, but are never painted.
+  // highest line-of-sight angle seen so far along the CENTRAL ray. A cell
+  // whose ray falls below that line is in acoustic shadow. Terrain gaps
+  // (unestimated cells) keep the previous z so the occlusion state stays
+  // sane, but are never painted. Each step paints its along-track strip
+  // with the same sample (the ping's footprint share).
   const double step = 0.5 * surface.cell_m;
   double phi_max = -std::numeric_limits<double>::infinity();
   double last_z = nadir_z;
   for (double t = step; t <= max_slant; t += step) {
     const double px = g.sensor_x + dir_x * t;
     const double py = g.sensor_y + dir_y * t;
-    const auto cell = cellAt(surface, px, py);
-    const bool estimated = cell >= 0 &&
-      std::isfinite(surface.depth[static_cast<std::size_t>(cell)]);
-    const double z = estimated ?
-      static_cast<double>(surface.depth[static_cast<std::size_t>(cell)]) : last_z;
+    const auto centre = cellAt(surface, px, py);
+    const bool centre_estimated = centre >= 0 &&
+      std::isfinite(surface.depth[static_cast<std::size_t>(centre)]);
+    const double z = centre_estimated ?
+      static_cast<double>(surface.depth[static_cast<std::size_t>(centre)]) : last_z;
     last_z = z;
 
     const double dz = sensor_z - z;   // vertical drop to the cell (>0 below)
@@ -125,15 +142,21 @@ void drapePing(
     const double phi = std::atan2(z - sensor_z, t);   // elevation (negative down)
     const bool visible = phi >= phi_max;
     phi_max = std::max(phi_max, phi);
-    if (!estimated) {
-      continue;
-    }
-    const auto ci = static_cast<std::size_t>(cell);
 
     if (!visible) {
-      // Acoustic shadow: mark unless a nearer ping already painted it.
-      if (!std::isfinite(out.amplitude[ci])) {
-        out.shadow[ci] = 1;
+      // Acoustic shadow: mark the strip unless a nearer ping painted it.
+      for (const double o : offsets) {
+        const auto cell = cellAt(
+          surface, px + head_x * o, py + head_y * o);
+        if (cell < 0 ||
+          !std::isfinite(surface.depth[static_cast<std::size_t>(cell)]))
+        {
+          continue;
+        }
+        const auto ci = static_cast<std::size_t>(cell);
+        if (!std::isfinite(out.amplitude[ci])) {
+          out.shadow[ci] = 1;
+        }
       }
       continue;
     }
@@ -146,15 +169,22 @@ void drapePing(
     {
       continue;   // beyond the recording (or inside the pre-gate)
     }
+    const float amplitude = ping.amplitudes[static_cast<std::size_t>(sample_i)];
     // Nearest sample, no averaging; the smaller slant range wins a conflict
     // (better across-track resolution near nadir).
-    if (!std::isfinite(out.amplitude[ci]) ||
-      slant < out.painted_slant[ci])
-    {
-      out.amplitude[ci] =
-        ping.amplitudes[static_cast<std::size_t>(sample_i)];
-      out.painted_slant[ci] = static_cast<float>(slant);
-      out.shadow[ci] = 0;
+    for (const double o : offsets) {
+      const auto cell = cellAt(surface, px + head_x * o, py + head_y * o);
+      if (cell < 0 ||
+        !std::isfinite(surface.depth[static_cast<std::size_t>(cell)]))
+      {
+        continue;
+      }
+      const auto ci = static_cast<std::size_t>(cell);
+      if (!std::isfinite(out.amplitude[ci]) || slant < out.painted_slant[ci]) {
+        out.amplitude[ci] = amplitude;
+        out.painted_slant[ci] = static_cast<float>(slant);
+        out.shadow[ci] = 0;
+      }
     }
   }
   ++out.pings_used;
@@ -176,8 +206,28 @@ SidescanDrape drape_pass(
   out.amplitude.assign(n, std::nanf(""));
   out.shadow.assign(n, 0);
   out.painted_slant.assign(n, std::numeric_limits<float>::max());
-  for (const auto & ping : pings) {
-    drapePing(surface, ping, out);
+
+  // Per-ping along-track strip width: half the larger neighbour spacing (a
+  // ping owns the ground up to halfway to its neighbours), floored at one
+  // cell so a dense ping rate still tiles, capped so a recording gap or a
+  // turn cannot smear one ping across metres of seabed.
+  const double kMaxHalfWidth = 2.0;
+  for (std::size_t i = 0; i < pings.size(); ++i) {
+    double spacing = 0.0;
+    const auto & g = pings[i].geometry;
+    if (i > 0) {
+      const auto & p = pings[i - 1].geometry;
+      spacing = std::hypot(g.sensor_x - p.sensor_x, g.sensor_y - p.sensor_y);
+    }
+    if (i + 1 < pings.size()) {
+      const auto & nxt = pings[i + 1].geometry;
+      spacing = std::max(
+        spacing,
+        std::hypot(nxt.sensor_x - g.sensor_x, nxt.sensor_y - g.sensor_y));
+    }
+    const double half_width = std::min(
+      kMaxHalfWidth, std::max(0.5 * spacing, surface.cell_m));
+    drapePing(surface, pings[i], half_width, out);
   }
   return out;
 }
