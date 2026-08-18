@@ -57,6 +57,7 @@ namespace marine_perception_tools
 class SidescanCanvas;
 class PointCloudView;
 class TimeBarWidget;
+class BasemapLod;
 }  // namespace marine_perception_tools
 
 namespace marine_sonar_widgets {class WaterfallWidget; class EchogramWidget;}
@@ -107,14 +108,6 @@ struct CloudLoadTicket
   CloudLoadOutcome outcome;
 };
 
-// A basemap (store-tile) load in flight: layer/palette changes supersede via
-// the generation, same pattern as the cloud load.
-struct BasemapLoadTicket
-{
-  std::uint64_t generation = 0;
-  std::vector<OverviewTile> tiles;
-  QString note;
-};
 
 // Offline sidescan viewer main window: File->Open a bag, then scrub along
 // distance travelled. A rolling ~window of pings is painted (quality-wins) into a
@@ -180,7 +173,6 @@ private slots:
   void onExportGeoJson();
   void onTileSelectionChanged();
   void onCloudPassesLoaded();
-  void onBasemapLoaded();
   void onTimelinePassActivated(const QString & bag_path, qlonglong t_start_ns, qlonglong t_end_ns);
   void onTimeSelected(qlonglong t_ns);   // time-bar centre committed: cue there
   void onCenterTimeChanged(qlonglong t_ns);   // live: move the map's position arrow
@@ -198,9 +190,11 @@ private:
   // Populate the basemap layer combo from the store layers under `root`
   // (subdirectories holding GGGS *.tif tiles), selecting `initial_dir`.
   void discoverBasemapLayers(const std::string & root, const std::string & initial_dir);
-  // (Re)load the selected basemap layer with the selected colormap on a
-  // worker thread; a newer request supersedes via basemap_gen_.
+  // (Re)open the selected basemap layer with the selected colormap in the
+  // LOD loader (#26); a newer request supersedes in the loader.
   void requestBasemapLoad();
+  // Push the canvas's settled view into the LOD loader (level + demand load).
+  void pushBasemapView();
   // Leave selection-cloud mode: restore the scrub-window cloud + colour mode.
   void exitSelectionCloud();
   // Cloud-legend label for a pass, in the time bar's display zone (#26).
@@ -332,8 +326,7 @@ private:
   QCheckBox * clip_contact_check_ = nullptr;
   QDoubleSpinBox * clip_margin_spin_ = nullptr;
   std::vector<std::pair<QString, std::string>> basemap_layers_;   // {label, dir}
-  QFutureWatcher<BasemapLoadTicket> basemap_watcher_;
-  std::uint64_t basemap_gen_ = 0;
+  BasemapLod * basemap_lod_ = nullptr;   // LOD basemap loader (#26), child
 };
 
 }  // namespace marine_perception_tools

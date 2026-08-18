@@ -271,6 +271,21 @@ void SidescanCanvas::applyPendingFit()
   px_per_m_ = std::clamp((fit > 0.0 ? fit : 4.0) * 0.95, 1e-4, 500.0);
   // Stay pending: refit on every resize until the user takes the view over,
   // so the first laid-out paint (not the pre-layout ctor size) wins.
+  emit viewChanged();
+}
+
+std::optional<GeoRect> SidescanCanvas::visibleGeoRegion() const
+{
+  if (!geo_mode_ || width() <= 0 || height() <= 0) {
+    return std::nullopt;
+  }
+  const QPointF tl = screenToMap(0.0, 0.0);
+  const QPointF br = screenToMap(width(), height());
+  const auto [n_lat, w_lon] = canvasToGeo(tl.x(), tl.y());
+  const auto [s_lat, e_lon] = canvasToGeo(br.x(), br.y());
+  return GeoRect{
+    std::min(s_lat, n_lat), std::min(w_lon, e_lon),
+    std::max(s_lat, n_lat), std::max(w_lon, e_lon)};
 }
 
 // --- per-bag layers ---------------------------------------------------------
@@ -731,6 +746,7 @@ void SidescanCanvas::resizeEvent(QResizeEvent * event)
   if (fit_pending_ && !user_adjusted_) {
     update();
   }
+  emit viewChanged();
 }
 
 void SidescanCanvas::wheelEvent(QWheelEvent * event)
@@ -747,6 +763,7 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
   user_adjusted_ = true;
   fit_pending_ = false;
   update();
+  emit viewChanged();
 }
 
 void SidescanCanvas::mousePressEvent(QMouseEvent * event)
@@ -818,6 +835,7 @@ void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
   if (panning_) {
     panning_ = false;
     update();   // rebuild the layer cache at the settled view
+    emit viewChanged();
   }
   if (band_selecting_) {
     band_selecting_ = false;

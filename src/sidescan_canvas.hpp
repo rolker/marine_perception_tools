@@ -106,6 +106,11 @@ public:
   // Store-tile basemap (geo bounds per tile).
   void setStoreTiles(std::vector<OverviewTile> tiles);
 
+  // The current view for the LOD basemap (#26): visible region in degrees
+  // (nullopt before a geo origin exists) and true ground metres per pixel.
+  std::optional<GeoRect> visibleGeoRegion() const;
+  double groundMetresPerPixel() const {return 1.0 / px_per_m_;}
+
   // Decimated nav track, pre-segmented per bag, as (lat, lon) polylines.
   void setNavTrack(std::vector<std::vector<std::pair<double, double>>> segments);
 
@@ -193,6 +198,10 @@ signals:
 
   // The set of selected index tiles changed (ctrl-click / rubber band).
   void tileSelectionChanged();
+
+  // The settled view changed (zoom step, pan release, fit, resize) — the
+  // LOD basemap re-evaluates its level + visible-tile demand load (#26).
+  void viewChanged();
 
 protected:
   void paintEvent(QPaintEvent * event) override;

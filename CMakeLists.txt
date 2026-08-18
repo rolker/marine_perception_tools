@@ -138,6 +138,7 @@ add_executable(survey_explorer
   src/point_cloud_view.cpp
   src/mbes_pass_loader.cpp
   src/time_bar_widget.cpp
+  src/basemap_lod.cpp
 )
 target_link_libraries(survey_explorer
   sidescan_core
@@ -262,6 +263,19 @@ if(BUILD_TESTING)
   target_include_directories(test_mbes_pass_loader PRIVATE src)
   target_link_libraries(test_mbes_pass_loader sidescan_core Qt${QT_VERSION_MAJOR}::Core)
 
+  # LOD level selection (#26): behavioural invariants of the camp ADR-0013
+  # selector against the gggs ladder.
+  ament_add_gtest(test_basemap_lod
+    test/test_basemap_lod.cpp
+    src/basemap_lod.cpp)
+  target_include_directories(test_basemap_lod PRIVATE src)
+  ament_target_dependencies(test_basemap_lod
+    marine_autonomy marine_colormap marine_tiled_raster_store)
+  target_link_libraries(test_basemap_lod
+    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Concurrent
+    Qt${QT_VERSION_MAJOR}::Gui)
+
   # Survey-explorer window smoke (#24; offscreen GL, self-skips headless):
   # --index path constructs against a fixture DB, loads tiles + track, and
   # survives a programmatic tile selection driving the cloud loader.
@@ -271,7 +285,8 @@ if(BUILD_TESTING)
     src/sidescan_canvas.cpp
     src/point_cloud_view.cpp
     src/mbes_pass_loader.cpp
-    src/time_bar_widget.cpp)
+    src/time_bar_widget.cpp
+    src/basemap_lod.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
   ament_target_dependencies(test_survey_explorer_window
     marine_autonomy marine_colormap marine_sonar_widgets marine_tiled_raster_store)
