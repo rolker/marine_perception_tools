@@ -179,35 +179,16 @@ CubeSurface run_cube(
   return out;
 }
 
-CubeSurfaceMesh build_cube_mesh(
-  const CubeSurface & surface, CubeShade shade,
-  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells)
+CubeSurfaceMesh build_cube_mesh_colored(
+  const CubeSurface & surface, const std::vector<float> & node_rgb,
+  bool flat_cells)
 {
   CubeSurfaceMesh mesh;
-  if (!surface.ok() || lut.empty()) {
+  const std::size_t n_nodes =
+    static_cast<std::size_t>(surface.nx) * static_cast<std::size_t>(surface.ny);
+  if (!surface.ok() || node_rgb.size() < n_nodes * 3) {
     return mesh;
   }
-  const auto & scalar =
-    (shade == CubeShade::Depth) ? surface.depth :
-    (shade == CubeShade::Uncertainty) ? surface.uncertainty : surface.intensity;
-
-  // Colour-ramp range from the chosen scalar's finite values (nodes lacking
-  // that scalar — e.g. no intensity reported — draw at the ramp's bottom).
-  float lo = std::numeric_limits<float>::max();
-  float hi = std::numeric_limits<float>::lowest();
-  for (std::size_t i = 0; i < scalar.size(); ++i) {
-    if (std::isfinite(surface.depth[i]) && std::isfinite(scalar[i])) {
-      lo = std::min(lo, scalar[i]);
-      hi = std::max(hi, scalar[i]);
-    }
-  }
-  if (!(hi >= lo)) {
-    lo = 0.0f;
-    hi = 1.0f;
-  }
-  mesh.scalar_lo = lo;
-  mesh.scalar_hi = hi;
-  const float span = (hi > lo) ? (hi - lo) : 1.0f;
 
   // Flat cells (true resolution): each estimated node is one flat quad at
   // its own depth and colour — a CUBE cell reads as a single crisp "pixel",
@@ -224,10 +205,6 @@ CubeSurfaceMesh build_cube_mesh(
         const float cx = static_cast<float>(surface.origin_x + x * surface.cell_m);
         const float cy = static_cast<float>(surface.origin_y + y * surface.cell_m);
         const float cz = surface.depth[i];
-        const float v = std::isfinite(scalar[i]) ? scalar[i] : lo;
-        const float t = std::clamp((v - lo) / span, 0.0f, 1.0f);
-        const auto & c = lut[static_cast<std::size_t>(
-              t * static_cast<float>(lut.size() - 1) + 0.5f)];
         const auto base =
           static_cast<std::uint32_t>(mesh.positions.size() / 3);
         const float xs[4] = {cx - half, cx + half, cx + half, cx - half};
@@ -236,9 +213,9 @@ CubeSurfaceMesh build_cube_mesh(
           mesh.positions.push_back(xs[k]);
           mesh.positions.push_back(ys[k]);
           mesh.positions.push_back(cz);
-          mesh.colors.push_back(c.r / 255.0f);
-          mesh.colors.push_back(c.g / 255.0f);
-          mesh.colors.push_back(c.b / 255.0f);
+          mesh.colors.push_back(node_rgb[i * 3]);
+          mesh.colors.push_back(node_rgb[i * 3 + 1]);
+          mesh.colors.push_back(node_rgb[i * 3 + 2]);
         }
         mesh.indices.push_back(base);
         mesh.indices.push_back(base + 1);
@@ -251,9 +228,8 @@ CubeSurfaceMesh build_cube_mesh(
     return mesh;
   }
 
-  // Vertices: one per estimated node; grid index -> compact vertex index.
-  const std::size_t n_nodes =
-    static_cast<std::size_t>(surface.nx) * static_cast<std::size_t>(surface.ny);
+  // Smooth relief: one vertex per estimated node; grid index -> compact
+  // vertex index; two triangles per fully-estimated cell quad.
   std::vector<std::int32_t> vertex_of(n_nodes, -1);
   for (int y = 0; y < surface.ny; ++y) {
     for (int x = 0; x < surface.nx; ++x) {
@@ -267,17 +243,11 @@ CubeSurfaceMesh build_cube_mesh(
       mesh.positions.push_back(
         static_cast<float>(surface.origin_y + y * surface.cell_m));
       mesh.positions.push_back(surface.depth[i]);
-      const float v = std::isfinite(scalar[i]) ? scalar[i] : lo;
-      const float t = std::clamp((v - lo) / span, 0.0f, 1.0f);
-      const auto & c = lut[static_cast<std::size_t>(
-            t * static_cast<float>(lut.size() - 1) + 0.5f)];
-      mesh.colors.push_back(c.r / 255.0f);
-      mesh.colors.push_back(c.g / 255.0f);
-      mesh.colors.push_back(c.b / 255.0f);
+      mesh.colors.push_back(node_rgb[i * 3]);
+      mesh.colors.push_back(node_rgb[i * 3 + 1]);
+      mesh.colors.push_back(node_rgb[i * 3 + 2]);
     }
   }
-
-  // Two triangles per fully-estimated cell quad.
   for (int y = 0; y + 1 < surface.ny; ++y) {
     for (int x = 0; x + 1 < surface.nx; ++x) {
       const std::size_t i00 = static_cast<std::size_t>(y) * surface.nx + x;
@@ -297,6 +267,54 @@ CubeSurfaceMesh build_cube_mesh(
       mesh.indices.push_back(static_cast<std::uint32_t>(vertex_of[i01]));
     }
   }
+  return mesh;
+}
+
+CubeSurfaceMesh build_cube_mesh(
+  const CubeSurface & surface, CubeShade shade,
+  const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells)
+{
+  if (!surface.ok() || lut.empty()) {
+    return CubeSurfaceMesh{};
+  }
+  const auto & scalar =
+    (shade == CubeShade::Depth) ? surface.depth :
+    (shade == CubeShade::Uncertainty) ? surface.uncertainty : surface.intensity;
+
+  // Colour-ramp range from the chosen scalar's finite values (nodes lacking
+  // that scalar — e.g. no intensity reported — draw at the ramp's bottom).
+  float lo = std::numeric_limits<float>::max();
+  float hi = std::numeric_limits<float>::lowest();
+  for (std::size_t i = 0; i < scalar.size(); ++i) {
+    if (std::isfinite(surface.depth[i]) && std::isfinite(scalar[i])) {
+      lo = std::min(lo, scalar[i]);
+      hi = std::max(hi, scalar[i]);
+    }
+  }
+  if (!(hi >= lo)) {
+    lo = 0.0f;
+    hi = 1.0f;
+  }
+  const float span = (hi > lo) ? (hi - lo) : 1.0f;
+
+  const std::size_t n_nodes =
+    static_cast<std::size_t>(surface.nx) * static_cast<std::size_t>(surface.ny);
+  std::vector<float> node_rgb(n_nodes * 3, 0.0f);
+  for (std::size_t i = 0; i < n_nodes; ++i) {
+    if (!std::isfinite(surface.depth[i])) {
+      continue;
+    }
+    const float v = std::isfinite(scalar[i]) ? scalar[i] : lo;
+    const float t = std::clamp((v - lo) / span, 0.0f, 1.0f);
+    const auto & c = lut[static_cast<std::size_t>(
+          t * static_cast<float>(lut.size() - 1) + 0.5f)];
+    node_rgb[i * 3] = c.r / 255.0f;
+    node_rgb[i * 3 + 1] = c.g / 255.0f;
+    node_rgb[i * 3 + 2] = c.b / 255.0f;
+  }
+  auto mesh = build_cube_mesh_colored(surface, node_rgb, flat_cells);
+  mesh.scalar_lo = lo;
+  mesh.scalar_hi = hi;
   return mesh;
 }
 

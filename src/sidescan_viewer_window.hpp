@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "cube_lab.hpp"
+#include "sidescan_drape.hpp"
 #include "marine_contacts/contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
 #include "mbes_pass_loader.hpp"
@@ -117,6 +118,20 @@ struct CubeLabTicket
   std::uint64_t generation = 0;
   std::vector<MbesSounding> soundings;
   CubeSurface surface;
+  QStringList notes;
+  qint64 elapsed_ms = 0;
+  // Reference frame identity from the cloud load (#29): the sidescan drape
+  // reprojects its pings into this frame.
+  std::string ref_bag;
+  bool ref_has_geo = false;
+  geometry_msgs::msg::TransformStamped ref_earth_from_world;
+};
+
+// A sidescan drape load+march in flight (#29), superseded via generation.
+struct DrapeTicket
+{
+  std::uint64_t generation = 0;
+  SidescanDrape drape;
   QStringList notes;
   qint64 elapsed_ms = 0;
 };
@@ -232,6 +247,11 @@ private:
   // Re-triangulate + recolour the stored surface for the shade combo (cheap;
   // no CUBE re-run) and hand it to the cloud pane.
   void refreshCubeSurface();
+  // Fill the drape pass combo with the sidescan passes crossing the box
+  // (port + starboard of the same bag interval merged into one entry).
+  void populateDrapePasses();
+  // Load + march the selected pass onto the current surface on a worker.
+  void requestDrape();
   // Re-render the legend's baked pass labels after a display-zone change.
   void refreshPassLabels();
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
@@ -380,6 +400,24 @@ private:
   QCheckBox * cube_surf_check_ = nullptr;
   QCheckBox * cube_flat_check_ = nullptr;   // true-resolution flat cells
   QComboBox * cube_palette_ = nullptr;      // surface palette, independent of the cloud's
+
+  // Sidescan drape (#29): pass picker + the draped amplitudes for the
+  // "Sidescan" surface shade. The reference identity comes from the CUBE
+  // load; entries merge port+starboard of the same bag interval.
+  struct DrapePassEntry
+  {
+    std::string bag_path;
+    std::int64_t t0_ns = 0;
+    std::int64_t t1_ns = 0;
+  };
+  QComboBox * cube_drape_combo_ = nullptr;
+  std::vector<DrapePassEntry> drape_passes_;
+  SidescanDrape cube_drape_;
+  QFutureWatcher<DrapeTicket> drape_watcher_;
+  std::uint64_t drape_gen_ = 0;
+  std::string cube_ref_bag_;
+  bool cube_ref_has_geo_ = false;
+  geometry_msgs::msg::TransformStamped cube_ref_anchor_;
   QPushButton * cube_params_btn_ = nullptr;
   CubeTuning cube_tuning_;   // seeded from the library defaults in setupCubeLab
   // File-menu quick reload: shows the remembered index (QSettings) and

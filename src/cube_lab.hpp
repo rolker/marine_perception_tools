@@ -123,6 +123,14 @@ CubeSurfaceMesh build_cube_mesh(
   const CubeSurface & surface, CubeShade shade,
   const std::vector<marine_colormap::Rgba8> & lut, bool flat_cells = false);
 
+// Mesh from explicit per-node colours (`node_rgb`: rgb triples in [0,1],
+// ny*nx*3, row-major like the surface arrays) — the sidescan drape's path
+// (#29): the caller owns each node's colour, this only triangulates.
+// Unestimated nodes are holes regardless of their colour entries.
+CubeSurfaceMesh build_cube_mesh_colored(
+  const CubeSurface & surface, const std::vector<float> & node_rgb,
+  bool flat_cells);
+
 }  // namespace marine_perception_tools
 
 #endif  // CUBE_LAB_HPP_

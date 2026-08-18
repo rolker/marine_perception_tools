@@ -75,6 +75,7 @@
 #include <vector>
 
 #include "basemap_lod.hpp"
+#include "sidescan_drape_loader.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_contacts/contact_store.hpp"
 #include "coverage_raster.hpp"
@@ -606,9 +607,16 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_alpha_spin_->setValue(1.0);
   cube_alpha_spin_->setToolTip("Surface opacity");
   cube_shade_combo_ = new QComboBox(this);
-  cube_shade_combo_->addItems({"Depth", "Uncertainty", "Backscatter"});
+  cube_shade_combo_->addItems({"Depth", "Uncertainty", "Backscatter", "Sidescan"});
   cube_shade_combo_->setToolTip(
-    "Surface colouring: depth, CUBE uncertainty, or CUBE-settled backscatter");
+    "Surface colouring: depth, CUBE uncertainty, CUBE-settled backscatter, "
+    "or the draped sidescan pass (pick one in the drape combo)");
+  cube_drape_combo_ = new QComboBox(this);
+  cube_drape_combo_->addItem("drape: none");
+  cube_drape_combo_->setToolTip(
+    "Sidescan pass to drape onto the surface (passes crossing the box; "
+    "port + starboard of the same interval drape together). Single pass by "
+    "design — blending kills shadows.");
   cube_flat_check_ = new QCheckBox("flat", this);
   cube_flat_check_->setChecked(true);   // true resolution by default
   cube_flat_check_->setToolTip(
@@ -639,6 +647,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   row->addWidget(cube_alpha_spin_);
   row->addWidget(cube_shade_combo_);
   row->addWidget(cube_palette_);
+  row->addWidget(cube_drape_combo_);
   row->addWidget(cube_flat_check_);
   // make_pane builds a QVBoxLayout(header, view); the lab row slots between.
   if (auto * v = qobject_cast<QVBoxLayout *>(cloud_pane->layout())) {
@@ -762,6 +771,34 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     this, [this](bool) {refreshCubeSurface();});
   connect(cube_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {refreshCubeSurface();});
+  connect(cube_drape_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int idx) {
+      if (idx <= 0) {
+        cube_drape_ = SidescanDrape{};
+        refreshCubeSurface();
+        return;
+      }
+      requestDrape();
+    });
+  connect(&drape_watcher_, &QFutureWatcher<DrapeTicket>::finished, this, [this]() {
+      DrapeTicket ticket = drape_watcher_.result();
+      if (ticket.generation != drape_gen_) {
+        return;   // a newer drape (or a new CUBE run) superseded this one
+      }
+      cube_drape_ = std::move(ticket.drape);
+      refreshCubeSurface();
+      std::size_t painted = 0;
+      for (const auto & a : cube_drape_.amplitude) {
+        if (std::isfinite(a)) {
+          ++painted;
+        }
+      }
+      status_->setText(QString("Drape: %1 pings, %2 cells painted, in %3 s%4")
+      .arg(cube_drape_.pings_used)
+      .arg(painted)
+      .arg(ticket.elapsed_ms / 1000.0, 0, 'f', 1)
+      .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
+    });
   connect(&cube_watcher_, &QFutureWatcher<CubeLabTicket>::finished, this, [this]() {
       CubeLabTicket ticket = cube_watcher_.result();
       if (ticket.generation != cube_gen_) {
@@ -787,6 +824,14 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         cloud_color_combo_->currentIndex() == 1 ?
         PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
       cloud_->setPoints(ticket.soundings);
+      // The drape frame follows the CUBE load: remember the reference and
+      // re-offer the box's sidescan passes; any previous drape is stale.
+      cube_ref_bag_ = ticket.ref_bag;
+      cube_ref_has_geo_ = ticket.ref_has_geo;
+      cube_ref_anchor_ = ticket.ref_earth_from_world;
+      ++drape_gen_;
+      cube_drape_ = SidescanDrape{};
+      populateDrapePasses();
       refreshCubeSurface();
       status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5")
       .arg(cube_surface_.cell_m)
@@ -901,6 +946,9 @@ void SidescanViewerWindow::runCubeLab()
       try {
         auto outcome = load_cloud_passes(passes, clip);
         ticket.notes = std::move(outcome.notes);
+        ticket.ref_bag = outcome.ref_bag;
+        ticket.ref_has_geo = outcome.ref_has_geo;
+        ticket.ref_earth_from_world = outcome.ref_earth_from_world;
         std::size_t total = 0;
         for (const auto & pc : outcome.pass_clouds) {
           total += pc.size();
@@ -926,6 +974,73 @@ void SidescanViewerWindow::refreshCubeSurface()
     return;
   }
   const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const bool flat = cube_flat_check_ && cube_flat_check_->isChecked();
+
+  // Sidescan shade (#29): colour each node from the drape — painted cells
+  // through the SIDESCAN pane's palette + range (so drape and waterfall read
+  // identically), acoustic shadows near-black, ensonified-but-unseen nodes
+  // dim grey (the relief stays legible).
+  if (shade_i == 3) {
+    const std::size_t n_nodes =
+      static_cast<std::size_t>(cube_surface_.nx) *
+      static_cast<std::size_t>(cube_surface_.ny);
+    if (!cube_drape_.ok() ||
+      cube_drape_.amplitude.size() != n_nodes)
+    {
+      status_->setText(
+        "Sidescan shade: pick a pass in the drape combo (and re-run after a "
+        "new CUBE).");
+      cloud_->clearSurface();
+      return;
+    }
+    const auto ss_lut = marine_colormap::bake_lut(
+      marine_colormap::palette(static_cast<std::size_t>(
+        std::max(0, sidescan_cmap_->currentIndex()))),
+      marine_colormap::TransferParams{}, 256);
+    float lo = 0.0f;
+    float hi = 1.0f;
+    if (ss_range_.auto_check && !ss_range_.auto_check->isChecked()) {
+      lo = static_cast<float>(ss_range_.lo->value());
+      hi = static_cast<float>(ss_range_.hi->value());
+    } else {
+      // Auto: the painted amplitudes' own extent.
+      lo = std::numeric_limits<float>::max();
+      hi = std::numeric_limits<float>::lowest();
+      for (const auto a : cube_drape_.amplitude) {
+        if (std::isfinite(a)) {
+          lo = std::min(lo, a);
+          hi = std::max(hi, a);
+        }
+      }
+      if (!(hi > lo)) {
+        lo = 0.0f;
+        hi = 1.0f;
+      }
+    }
+    const float span = (hi > lo) ? (hi - lo) : 1.0f;
+    std::vector<float> node_rgb(n_nodes * 3, 0.25f);   // unseen = dim grey
+    for (std::size_t i = 0; i < n_nodes; ++i) {
+      const float a = cube_drape_.amplitude[i];
+      if (std::isfinite(a)) {
+        const float t = std::clamp((a - lo) / span, 0.0f, 1.0f);
+        const auto & c = ss_lut[static_cast<std::size_t>(
+              t * static_cast<float>(ss_lut.size() - 1) + 0.5f)];
+        node_rgb[i * 3] = c.r / 255.0f;
+        node_rgb[i * 3 + 1] = c.g / 255.0f;
+        node_rgb[i * 3 + 2] = c.b / 255.0f;
+      } else if (cube_drape_.shadow[i]) {
+        node_rgb[i * 3] = 0.05f;   // acoustic shadow: near-black
+        node_rgb[i * 3 + 1] = 0.05f;
+        node_rgb[i * 3 + 2] = 0.05f;
+      }
+    }
+    auto mesh = build_cube_mesh_colored(cube_surface_, node_rgb, flat);
+    cloud_->setSurface(
+      std::move(mesh.positions), std::move(mesh.colors),
+      std::move(mesh.indices));
+    return;
+  }
+
   const CubeShade shade =
     (shade_i == 1) ? CubeShade::Uncertainty :
     (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
@@ -936,11 +1051,99 @@ void SidescanViewerWindow::refreshCubeSurface()
       static_cast<int>(n_pal - 1))) : 0;
   const auto lut = marine_colormap::bake_lut(
     marine_colormap::palette(pal_i), marine_colormap::TransferParams{}, 256);
-  auto mesh = build_cube_mesh(
-    cube_surface_, shade, lut,
-    cube_flat_check_ && cube_flat_check_->isChecked());
+  auto mesh = build_cube_mesh(cube_surface_, shade, lut, flat);
   cloud_->setSurface(
     std::move(mesh.positions), std::move(mesh.colors), std::move(mesh.indices));
+}
+
+void SidescanViewerWindow::populateDrapePasses()
+{
+  if (!cube_drape_combo_) {
+    return;
+  }
+  cube_drape_combo_->blockSignals(true);
+  cube_drape_combo_->clear();
+  cube_drape_combo_->addItem("drape: none");
+  drape_passes_.clear();
+  if (bridge_ && cube_box_) {
+    std::vector<marine_survey_index::PassRow> rows;
+    try {
+      rows = bridge_->queryBox(
+        cube_box_->south, cube_box_->west, cube_box_->north, cube_box_->east,
+        "sidescan");
+    } catch (const std::exception &) {
+      rows.clear();
+    }
+    // Merge port + starboard of the same bag into one interval entry when
+    // they overlap (within the pass-coalescing gap): they drape together —
+    // no spatial overlap, shadows survive (design decision on #29).
+    constexpr std::int64_t kMergeGapNs = 5000000000LL;
+    for (const auto & p : coalescePasses(rows)) {
+      bool merged = false;
+      for (auto & e : drape_passes_) {
+        if (e.bag_path == p.bag_path &&
+          p.t_start_ns <= e.t1_ns + kMergeGapNs &&
+          e.t0_ns <= p.t_end_ns + kMergeGapNs)
+        {
+          e.t0_ns = std::min(e.t0_ns, p.t_start_ns);
+          e.t1_ns = std::max(e.t1_ns, p.t_end_ns);
+          merged = true;
+          break;
+        }
+      }
+      if (!merged) {
+        drape_passes_.push_back({p.bag_path, p.t_start_ns, p.t_end_ns});
+      }
+    }
+    for (const auto & e : drape_passes_) {
+      cube_drape_combo_->addItem(
+        QString::fromStdString(passLabel(e.t0_ns, e.bag_path)));
+    }
+  }
+  cube_drape_combo_->setEnabled(cube_drape_combo_->count() > 1);
+  cube_drape_combo_->blockSignals(false);
+}
+
+void SidescanViewerWindow::requestDrape()
+{
+  const int idx = cube_drape_combo_ ? cube_drape_combo_->currentIndex() : 0;
+  if (idx <= 0 || static_cast<std::size_t>(idx) > drape_passes_.size() ||
+    !cube_surface_.ok())
+  {
+    return;
+  }
+  const DrapePassEntry entry = drape_passes_[static_cast<std::size_t>(idx - 1)];
+  const CubeSurface surface = cube_surface_;   // worker's own copy
+  const std::string cache_dir = cache_dir_;
+  const std::string ref_bag = cube_ref_bag_;
+  const bool ref_has_geo = cube_ref_has_geo_;
+  const geometry_msgs::msg::TransformStamped ref_anchor = cube_ref_anchor_;
+  ++drape_gen_;
+  const auto gen = drape_gen_;
+  status_->setText(QString("Draping %1 …")
+    .arg(QFileInfo(QString::fromStdString(entry.bag_path)).fileName()));
+  drape_watcher_.setFuture(QtConcurrent::run(
+      [entry, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor, gen]() {
+        DrapeTicket ticket;
+        ticket.generation = gen;
+        QElapsedTimer timer;
+        timer.start();
+        const auto loaded = load_drape_pings(
+          entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
+          ref_bag, ref_has_geo, ref_anchor);
+        for (const auto & n : loaded.notes) {
+          ticket.notes << QString::fromStdString(n);
+        }
+        if (loaded.ok) {
+          ticket.drape = drape_pass(surface, loaded.pings);
+          if (ticket.drape.pings_skipped > 0) {
+            ticket.notes << QString("%1 pings unusable (no altitude/side or "
+              "off the surface)").arg(ticket.drape.pings_skipped);
+          }
+        }
+        ticket.elapsed_ms = timer.elapsed();
+        return ticket;
+      }));
 }
 
 SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
@@ -1506,6 +1709,7 @@ SidescanViewerWindow::~SidescanViewerWindow()
   if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
   if (cloud_watcher_.isRunning()) {cloud_watcher_.waitForFinished();}
   if (cube_watcher_.isRunning()) {cube_watcher_.waitForFinished();}
+  if (drape_watcher_.isRunning()) {drape_watcher_.waitForFinished();}
   // basemap_lod_ is a child QObject: its destructor (which cancels + waits
   // its own worker) runs during QObject teardown after this body.
 }
@@ -2485,6 +2689,8 @@ void SidescanViewerWindow::onTileSelectionChanged()
   // A CUBE surface from a previous load is in a different reference frame —
   // drop it rather than draw it misplaced (#27).
   cube_surface_ = CubeSurface{};
+  cube_drape_ = SidescanDrape{};
+  ++drape_gen_;
   cloud_->clearSurface();
   selection_cloud_ = true;
   cloud_->setColorMode(PointCloudView::ColorMode::Pass);
@@ -2567,6 +2773,8 @@ void SidescanViewerWindow::exitSelectionCloud()
 {
   selection_passes_.clear();
   cube_surface_ = CubeSurface{};   // the scrub cloud is a different frame (#27)
+  cube_drape_ = SidescanDrape{};
+  ++drape_gen_;
   cloud_->clearSurface();
   if (time_bar_) {
     time_bar_->clearPasses();

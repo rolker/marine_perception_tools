@@ -113,6 +113,12 @@ CloudLoadOutcome load_cloud_passes(
       ref_frame = res.world_frame;
       ref_has_geo = res.has_geo;
       ref_earth_from_world = res.earth_from_world;
+      // Surface the reference identity (#29): the sidescan drape reprojects
+      // its pings into this same frame later.
+      out.ref_bag = ref_bag;
+      out.ref_frame = ref_frame;
+      out.ref_has_geo = ref_has_geo;
+      out.ref_earth_from_world = ref_earth_from_world;
     }
 
     FrameReprojection reproject;   // identity by default

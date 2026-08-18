@@ -147,6 +147,8 @@ add_executable(survey_explorer
   src/time_bar_widget.cpp
   src/basemap_lod.cpp
   src/cube_lab.cpp
+  src/sidescan_drape.cpp
+  src/sidescan_drape_loader.cpp
 )
 target_link_libraries(survey_explorer
   sidescan_core
@@ -319,7 +321,9 @@ if(BUILD_TESTING)
     src/mbes_pass_loader.cpp
     src/time_bar_widget.cpp
     src/basemap_lod.cpp
-    src/cube_lab.cpp)
+    src/cube_lab.cpp
+    src/sidescan_drape.cpp
+    src/sidescan_drape_loader.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
   ament_target_dependencies(test_survey_explorer_window
     cube_bathymetry marine_autonomy marine_colormap marine_sonar_widgets
