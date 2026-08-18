@@ -80,9 +80,14 @@ CubeSurface run_cube(
   out.ny = static_cast<int>(std::ceil(span_y / cell_m)) + 1;
   const std::size_t n_nodes =
     static_cast<std::size_t>(out.nx) * static_cast<std::size_t>(out.ny);
-  if (n_nodes > kMaxCubeNodes) {
+  // The operator-owned grid guard (tuning.max_nodes, editable in the params
+  // dialog — no hidden policy). The UI's run confirmation offers a one-shot
+  // override before ever reaching this.
+  if (n_nodes > tuning.max_nodes) {
     out.note = "grid would be " + std::to_string(out.nx) + "x" +
-      std::to_string(out.ny) + " nodes — shrink the box or coarsen the cells";
+      std::to_string(out.ny) + " = " + std::to_string(n_nodes) +
+      " nodes, over the max-nodes limit (" + std::to_string(tuning.max_nodes) +
+      ", editable in params…)";
     out.nx = 0;
     out.ny = 0;
     return out;

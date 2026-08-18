@@ -677,6 +677,14 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         "posterior (combined)"});
       extractor->setCurrentIndex(std::clamp(cube_tuning_.extractor, 0, 2));
       extractor->setToolTip("Multi-hypothesis disambiguation method");
+      auto * max_nodes = make_dspin(
+        0.1, 1000000.0, 10.0, 1,
+        static_cast<double>(cube_tuning_.max_nodes) / 1e6);
+      max_nodes->setSuffix(" M nodes");
+      max_nodes->setToolTip(
+        "Largest grid a run may allocate before asking (baseline ~20 B/node "
+        "+ per-populated-node CUBE state; 100 M ≈ 2 GB). The run "
+        "confirmation can override this per run.");
       form->addRow("Capture distance scale", capture);
       form->addRow("Median filter length", median);
       form->addRow("Outlier quotient limit", quotient);
@@ -685,6 +693,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       form->addRow("Bayes factor threshold", bayes);
       form->addRow("Run-length threshold", runlen);
       form->addRow("Extractor", extractor);
+      form->addRow("Max grid nodes", max_nodes);
       auto * buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel |
         QDialogButtonBox::RestoreDefaults, &dialog);
@@ -703,6 +712,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
           bayes->setValue(d.bayes_factor_threshold);
           runlen->setValue(static_cast<int>(d.runlength_threshold));
           extractor->setCurrentIndex(std::clamp(d.extractor, 0, 2));
+          max_nodes->setValue(static_cast<double>(d.max_nodes) / 1e6);
         });
       if (dialog.exec() != QDialog::Accepted) {
         return;
@@ -717,6 +727,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_tuning_.runlength_threshold =
       static_cast<std::uint32_t>(runlen->value());
       cube_tuning_.extractor = extractor->currentIndex();
+      cube_tuning_.max_nodes =
+      static_cast<std::uint64_t>(max_nodes->value() * 1e6);
       status_->setText("CUBE parameters updated — press Run CUBE to apply.");
     });
   connect(cube_points_check_, &QCheckBox::toggled,
@@ -823,7 +835,36 @@ void SidescanViewerWindow::runCubeLab()
 
   const double cell_m = cube_cell_spin_->value();
   const std::string order = cube_order_combo_->currentText().toStdString();
-  const CubeTuning tuning = cube_tuning_;
+  CubeTuning tuning = cube_tuning_;
+  // Pre-flight grid estimate from the box itself (known before any loading):
+  // over the operator's max-nodes limit, ask — with the real numbers — and
+  // let them run anyway (one-shot override; the limit itself is editable in
+  // params…). Never a silent refusal.
+  {
+    const double est_nx = 2.0 * clip.half_east_m / cell_m + 3.0;
+    const double est_ny = 2.0 * clip.half_north_m / cell_m + 3.0;
+    const double est_nodes = est_nx * est_ny;
+    if (est_nodes > static_cast<double>(tuning.max_nodes)) {
+      const double base_gb = est_nodes * 20.0 / 1e9;
+      const auto answer = QMessageBox::question(
+        this, "Large CUBE grid",
+        QString("This box at %1 m cells needs a ~%2 x %3 node grid "
+        "(~%4 nodes, roughly %5 GB baseline before per-node CUBE state) — "
+        "over the max-nodes limit of %6 set in params….\n\nRun anyway?")
+        .arg(cell_m)
+        .arg(static_cast<qulonglong>(est_nx))
+        .arg(static_cast<qulonglong>(est_ny))
+        .arg(static_cast<qulonglong>(est_nodes))
+        .arg(base_gb, 0, 'f', 1)
+        .arg(static_cast<qulonglong>(tuning.max_nodes)),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+      if (answer != QMessageBox::Yes) {
+        status_->setText("CUBE run cancelled (grid over the max-nodes limit).");
+        return;
+      }
+      tuning.max_nodes = static_cast<std::uint64_t>(est_nodes * 2.0) + 1;
+    }
+  }
   ++cube_gen_;
   const auto gen = cube_gen_;
   cube_run_btn_->setEnabled(false);

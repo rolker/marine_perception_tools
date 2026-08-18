@@ -82,19 +82,16 @@ TEST(RunCube, EmptyAndDegenerateInputsFailLoud)
   EXPECT_FALSE(run_cube(flatPatch(), -1.0).ok());
 }
 
-TEST(RunCube, OversizedGridFailsLoudNotSilent)
+TEST(RunCube, MaxNodesIsOperatorOwnedNotHidden)
 {
-  // Two soundings 10 km apart at 0.02 m cells would need billions of nodes.
-  std::vector<MbesSounding> far_apart(2);
-  far_apart[0].x = 0.0;
-  far_apart[0].y = 0.0;
-  far_apart[0].z = -5.0;
-  far_apart[1].x = 10000.0;
-  far_apart[1].y = 10000.0;
-  far_apart[1].z = -5.0;
-  const auto surface = run_cube(far_apart, 0.02);
-  EXPECT_FALSE(surface.ok());
-  EXPECT_NE(surface.note.find("shrink the box"), std::string::npos);
+  // The grid guard is the tuning's max_nodes — tightening it fails loud
+  // with the limit named, and raising it lets the same input run.
+  marine_perception_tools::CubeTuning tight;
+  tight.max_nodes = 10;
+  const auto refused = run_cube(flatPatch(), 0.5, "order1a", tight);
+  EXPECT_FALSE(refused.ok());
+  EXPECT_NE(refused.note.find("max-nodes limit"), std::string::npos);
+  EXPECT_TRUE(run_cube(flatPatch(), 0.5).ok());   // default limit admits it
 }
 
 TEST(BuildCubeMesh, TriangulatesEstimatedCellsOnly)

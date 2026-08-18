@@ -51,10 +51,6 @@ struct CubeSurface
   bool ok() const {return nx > 0 && ny > 0 && !depth.empty();}
 };
 
-// Nodes are bounded so a huge box at 0.1 m cells fails loud ("shrink the box
-// or coarsen the cells") instead of exhausting memory: 4M nodes ≈ a 200x200 m
-// box at 0.1 m.
-constexpr std::size_t kMaxCubeNodes = 4000000;
 
 // The operator-tunable subset of cube::Parameters (#27, the cube#98 tuning
 // harness intent): concrete values, seeded from the library's real defaults
@@ -73,6 +69,12 @@ struct CubeTuning
   float bayes_factor_threshold = 0.135f;   // intervention Bayes factor
   std::uint32_t runlength_threshold = 5;   // intervention run length
   int extractor = 1;   // cube::CubeExtractor: 0 prior, 1 lhood, 2 posterior
+  // Grid-size guard, operator-owned (not a hidden policy): the largest node
+  // count a run may allocate. Baseline cost is ~20 B/node (node-pointer +
+  // output arrays) before per-populated-node CUBE state, so the 100M default
+  // is ~2 GB. Editable in the params dialog; the run confirmation offers a
+  // one-shot override when a box would exceed it.
+  std::uint64_t max_nodes = 100000000;
 };
 
 // The library's own defaults, read from a real cube::Parameters instance.
