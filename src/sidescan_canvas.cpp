@@ -47,6 +47,14 @@ SidescanCanvas::SidescanCanvas(QWidget * parent)
   setMinimumSize(480, 360);
   setMouseTracking(true);   // hover reporting (hoverWorld) needs moves without a button
   setAutoFillBackground(true);
+  // Zoom settle: while the wheel is turning, repaints blit the stale layer
+  // cache scaled; once it stops for a beat, one full-quality rebuild runs.
+  cache_settle_.setSingleShot(true);
+  cache_settle_.setInterval(160);
+  connect(&cache_settle_, &QTimer::timeout, this, [this]() {
+      cache_rebuild_due_ = true;
+      update();
+    });
 }
 
 // --- geographic frame -------------------------------------------------------
@@ -550,9 +558,16 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
   }
   const bool view_matches = layer_cache_valid_ && cache_size_ == size() &&
     cache_px_per_m_ == px_per_m_ && cache_center_ == center_map_;
-  const bool pan_blit = panning_ && layer_cache_valid_ &&
-    cache_size_ == size() && cache_px_per_m_ == px_per_m_;
+  const bool stale_ok = layer_cache_valid_ && cache_size_ == size() &&
+    !cache_rebuild_due_;
+  const bool pan_blit = panning_ && stale_ok && cache_px_per_m_ == px_per_m_;
+  // A zoom step (wheel) blits the stale cache scaled about the widget centre
+  // — same slippy-map idea as the pan blit — and queues one full-quality
+  // rebuild for when the wheel settles (#26 snappiness).
+  const bool zoom_blit = stale_ok && cache_px_per_m_ > 0.0 &&
+    cache_px_per_m_ != px_per_m_;
   if (view_matches) {
+    cache_rebuild_due_ = false;   // the view came back; the cache is exact
     painter.drawPixmap(0, 0, layer_cache_);
   } else if (pan_blit) {
     painter.fillRect(rect(), QColor(20, 24, 28));
@@ -560,8 +575,26 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
       (cache_center_.x() - center_map_.x()) * px_per_m_,
       (center_map_.y() - cache_center_.y()) * px_per_m_);
     painter.drawPixmap(off, layer_cache_);
+  } else if (zoom_blit) {
+    painter.fillRect(rect(), QColor(20, 24, 28));
+    // Cache pixel p was rendered at the old view; under the new one the same
+    // map point lands at C + s*(p - C) + (cache_center - center)*px_per_m
+    // (y flipped) with s the zoom ratio — a pure transform blit.
+    const double s = px_per_m_ / cache_px_per_m_;
+    const QPointF c(width() * 0.5, height() * 0.5);
+    QTransform t;
+    t.translate(
+      c.x() + (cache_center_.x() - center_map_.x()) * px_per_m_,
+      c.y() + (center_map_.y() - cache_center_.y()) * px_per_m_);
+    t.scale(s, s);
+    t.translate(-c.x(), -c.y());
+    painter.setTransform(t);
+    painter.drawPixmap(0, 0, layer_cache_);
+    painter.resetTransform();
+    cache_settle_.start();   // one real rebuild once the wheel stops
   } else {
     rebuildLayerCache();
+    cache_rebuild_due_ = false;
     painter.drawPixmap(0, 0, layer_cache_);
   }
 

@@ -23,6 +23,7 @@
 #include <QPolygonF>
 #include <QRectF>
 #include <QString>
+#include <QTimer>
 #include <QVector>
 #include <QWidget>
 
@@ -217,6 +218,10 @@ private:
   QPointF cache_center_;
   QSize cache_size_;
   bool panning_ = false;
+  // Zoom snappiness (#26): a zoom step blits the stale cache scaled (like the
+  // pan blit) and the expensive rebuild waits for the wheel to settle.
+  QTimer cache_settle_;
+  bool cache_rebuild_due_ = false;
 
   // canvas metres <-> screen pixels (view transform).
   QPointF mapToScreen(double mx, double my) const;
