@@ -1907,6 +1907,16 @@ void SidescanViewerWindow::onOpenIndex()
   openIndexWithDefaults(path.toStdString());
 }
 
+void SidescanViewerWindow::reopenLastIndexIfAny()
+{
+  const QSettings settings("UNH-CCOM", "survey_explorer");
+  const QString last = settings.value("last_index").toString();
+  if (last.isEmpty() || !QFileInfo::exists(last)) {
+    return;   // nothing remembered (or it moved) — start empty, no dialog
+  }
+  openIndexWithDefaults(last.toStdString());
+}
+
 void SidescanViewerWindow::onReopenLastIndex()
 {
   const QSettings settings("UNH-CCOM", "survey_explorer");

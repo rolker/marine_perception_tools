@@ -170,6 +170,12 @@ public:
   // index pass, not a whole-bag sample read.
   void openBag(const std::string & bag_uri, int64_t cue_start_ns = 0, int64_t cue_end_ns = 0);
 
+  // Startup convenience: open the remembered last index (QSettings) if one
+  // exists on disk. Called by main when the app launches with neither
+  // --index nor a bag argument, so a plain start comes back where the
+  // operator left off instead of empty.
+  void reopenLastIndexIfAny();
+
 protected:
   // Persist window geometry + splitter sizes on close (QSettings).
   void closeEvent(QCloseEvent * event) override;
