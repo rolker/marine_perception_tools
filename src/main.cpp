@@ -1,4 +1,4 @@
-// Copyright 2026 Roland Arsenault
+﻿// Copyright 2026 Roland Arsenault
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,7 +29,16 @@ namespace
 double arg_double(int argc, char ** argv, const std::string & flag, double def)
 {
   for (int i = 1; i + 1 < argc; ++i) {
-    if (flag == argv[i]) {return std::atof(argv[i + 1]);}
+    if (flag != argv[i]) {continue;}
+    const char * text = argv[i + 1];
+    char * end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || end == nullptr || *end != '\0') {
+      std::fprintf(stderr, "error: invalid value for %s: '%s' (expected a number)\n",
+        flag.c_str(), text);
+      std::exit(2);
+    }
+    return value;
   }
   return def;
 }
@@ -40,7 +49,7 @@ int main(int argc, char ** argv)
 {
   QApplication app(argc, argv);
 
-  // A leading flag (or no args) means "open with no bag" — use File -> Open Bag…
+  // A leading flag (or no args) means "open with no bag" â€” use File -> Open Bagâ€¦
   // A positional first arg is treated as a bag URI and opened on startup.
   const bool has_bag = (argc >= 2 && argv[1][0] != '-');
   if (!has_bag && argc >= 2 && std::string(argv[1]) == "--help") {
@@ -50,8 +59,8 @@ int main(int argc, char ** argv)
       "          [--integration-halflives 1] [--margin-s 10] [--retention-s 120]\n"
       "          [--probe]\n"
       "Replays all four OAK cameras' segmentation and tunes the segmentation->\n"
-      "costmap marking interactively. With no bag_uri the window opens empty — use\n"
-      "File -> Open Bag…. File->Open buffers a window around the scrub point rather\n"
+      "costmap marking interactively. With no bag_uri the window opens empty â€” use\n"
+      "File -> Open Bagâ€¦. File->Open buffers a window around the scrub point rather\n"
       "than the whole bag: integration-halflives x decay_half_life_s of warm-up,\n"
       "+/- margin-s of reload-free scrub slack, keeping retention-s of extra\n"
       "already-read frames. --start-s/--end-s optionally clamp the session to a\n"
@@ -93,7 +102,7 @@ int main(int argc, char ** argv)
     return 1;
   }
 
-  // Headless probe: load the bag, report counts, exit — for verifying the loader
+  // Headless probe: load the bag, report counts, exit â€” for verifying the loader
   // (incl. H.265 decode) against a real bag without a display. Run with
   // QT_QPA_PLATFORM=offscreen so QApplication needs no X server.
   if (probe) {
