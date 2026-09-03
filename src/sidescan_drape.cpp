@@ -146,6 +146,23 @@ void drapePing(
     const bool visible = phi >= phi_max;
     phi_max = std::max(phi_max, phi);
 
+    // `t` is GROUND distance; the recording is indexed by SLANT range. The
+    // march bound `t <= max_slant` is therefore loose: the true ground reach
+    // of the last sample is sqrt(max_slant^2 - dz^2), so the march overshoots
+    // the swath by an amount that grows with altitude. Establish whether this
+    // cell is inside the recording BEFORE branching, so that neither an
+    // amplitude nor a SHADOW is written past the swath edge — unmeasured
+    // seabed must stay unmeasured, never render as "no return".
+    const double slant = std::sqrt(t * t + dz * dz);
+    const double sample_f =
+      slant / g.metres_per_sample - static_cast<double>(g.sample0);
+    const auto sample_i = static_cast<std::ptrdiff_t>(std::llround(sample_f));
+    const bool in_swath = sample_i >= 0 &&
+      sample_i < static_cast<std::ptrdiff_t>(ping.amplitudes.size());
+    if (!in_swath) {
+      continue;   // beyond the recording (or inside the pre-gate)
+    }
+
     if (!visible) {
       // Acoustic shadow: mark the strip unless a nearer ping painted it.
       for (const double o : offsets) {
@@ -162,15 +179,6 @@ void drapePing(
         }
       }
       continue;
-    }
-    const double slant = std::sqrt(t * t + dz * dz);
-    const double sample_f =
-      slant / g.metres_per_sample - static_cast<double>(g.sample0);
-    const auto sample_i = static_cast<std::ptrdiff_t>(std::llround(sample_f));
-    if (sample_i < 0 ||
-      sample_i >= static_cast<std::ptrdiff_t>(ping.amplitudes.size()))
-    {
-      continue;   // beyond the recording (or inside the pre-gate)
     }
     const float amplitude = ping.amplitudes[static_cast<std::size_t>(sample_i)];
     // Nearest sample, no averaging; the QUALITY score decides conflicts:
@@ -233,8 +241,14 @@ CubeSurface extend_surface_for_drape(
     {
       continue;
     }
-    const double reach = slant_range_at(
+    // slant_range_at() returns a SLANT range; it is applied below as an x/y
+    // offset in the world plane, so convert it to ground range first.
+    // Overstating the reach inflates the grid and brings the max_nodes
+    // clipping on sooner than the data warrants.
+    const double slant_reach = slant_range_at(
       p.amplitudes.size() - 1, g.sample0, g.metres_per_sample);
+    const double reach = std::sqrt(
+      std::max(0.0, slant_reach * slant_reach - g.altitude * g.altitude));
     const double ex = g.sensor_x + g.lateral_sign * -std::sin(g.yaw) * reach;
     const double ey = g.sensor_y + g.lateral_sign * std::cos(g.yaw) * reach;
     min_x = std::min({min_x, g.sensor_x - margin, ex - margin});

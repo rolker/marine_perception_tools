@@ -109,6 +109,60 @@ TEST(SidescanDrape, RidgeCastsAnAcousticShadow)
     std::isfinite(drape.amplitude[static_cast<std::size_t>(cy_behind) * 40 + cx]));
 }
 
+TEST(SidescanDrape, ShadowStopsAtTheGroundRangeEdgeNotTheSlantRange)
+{
+  // A high ping over a short recording: 120 samples x 0.1 m = 12 m SLANT,
+  // 10 m altitude, so the last sample lands 6.63 m out on the GROUND
+  // (sqrt(12^2 - 10^2)). A ridge blocks the view early, so everything
+  // behind it is shadow-eligible — but only out to 6.63 m. Marching the
+  // ground offset to 12 m would paint 5.4 m (10+ cells) of never-recorded
+  // seabed as acoustic shadow, i.e. absence rendered as "no return".
+  auto surface = flatSurface(40, 40, -20.0f);
+  for (int x = 0; x < 40; ++x) {
+    for (int y = 30; y <= 31; ++y) {   // world y = 15.0, 15.5: a tall ridge
+      surface.depth[static_cast<std::size_t>(y) * 40 + x] = -12.0f;
+    }
+  }
+  auto ping = makePing(10.0, 18.0, 10.0);
+  ping.amplitudes.resize(120);
+  const auto drape = drape_pass(surface, {ping});
+  ASSERT_TRUE(drape.ok());
+  const double ground_reach = std::sqrt(12.0 * 12.0 - 10.0 * 10.0);
+  const int cx = 20;
+  bool any_shadow = false;
+  for (int y = 0; y < 40; ++y) {
+    const double wy = y * 0.5;
+    const double across = 18.0 - wy;         // starboard march is -y
+    const std::size_t ci = static_cast<std::size_t>(y) * 40 + cx;
+    if (drape.shadow[ci]) {any_shadow = true;}
+    if (across > ground_reach + 0.5) {       // beyond the recording + a cell
+      EXPECT_EQ(drape.shadow[ci], 0)
+        << "shadow marked " << across << " m out, past the " << ground_reach
+        << " m ground reach";
+      EXPECT_FALSE(std::isfinite(drape.amplitude[ci]));
+    }
+  }
+  EXPECT_TRUE(any_shadow) << "the ridge must still cast a shadow inside the swath";
+}
+
+TEST(SidescanDrape, ExtensionReachIsGroundRangeNotSlantRange)
+{
+  // The terrain extension must grow by the ground reach. With a 12 m slant
+  // recording at 10 m altitude the swath ends 6.63 m out, not 12 m.
+  const auto surface = flatSurface(20, 20, -20.0f);
+  auto ping = makePing(5.0, 9.0, 10.0);
+  ping.amplitudes.resize(120);
+  std::string note;
+  const auto ext = marine_perception_tools::extend_surface_for_drape(
+    surface, {ping}, 100000000ULL, note);
+  ASSERT_TRUE(ext.ok());
+  const double ground_reach = std::sqrt(12.0 * 12.0 - 10.0 * 10.0);
+  // Starboard from y = 9 reaches y = 9 - 6.63 = 2.37; with the 2 m margin the
+  // origin should sit near 0.37, NOT the -5 m a slant reach would demand.
+  EXPECT_GT(ext.origin_y, 9.0 - ground_reach - 2.0 - 0.5);
+  EXPECT_LT(ext.origin_y, 9.0 - ground_reach - 2.0 + 0.6);
+}
+
 TEST(SidescanDrape, NearerSlantWinsCellConflicts)
 {
   // Two pings of the pass over the same cells: the nearer sensor's smaller
