@@ -123,9 +123,9 @@ lives (with the store, beside its provenance sidecar), not convenience.
 - **Not a realtime tool.** Monitoring, mission planning and live coverage stay in
   `camp`. `camp` does not grow exploration features and the explorer does not
   grow a live view. Neither half is diluted by pretending to be the other.
-- **Not a general GIS.** It inherits `uma-ADR-0010` D12's scope: WGS84 /
-  ellipsoidal only, no arbitrary CRS, no styling system, no ambition to replace
-  GDAL or QGIS for analysis.
+- **Not a general GIS.** It inherits the scope `uma-ADR-0010` D12 sets for the
+  world model. What that excludes is D12's to state and is deliberately not
+  enumerated here — for the reason the next bullet gives.
 - **Not a second source of truth about the stores.** The store contract, the
   world-model taxonomy and the LOD model live in `unh_marine_autonomy`'s ADRs.
   This document references them; it must never restate them, or it becomes a
