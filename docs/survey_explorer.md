@@ -133,8 +133,9 @@ lives (with the store, beside its provenance sidecar), not convenience.
 
 ### Not a store-editing tool
 
-Ingest (umbrella #36, direction 4) puts a UI on `import_bag`, an existing
-process that already writes to the stores. It gives the operator a way to invoke
+Ingest (umbrella #36, direction 4) puts a UI on `import_bag` — a
+`cube_bathymetry` tool, not part of this repo — which already writes to the
+stores. It gives the operator a way to invoke
 it — discovery, confirmation, progress — rather than asking an agent to run it.
 The explorer does not otherwise modify store contents: the CUBE lab's surfaces
 are in-memory and export to a file the user names, and nothing edits tiles in
@@ -174,8 +175,8 @@ state, and a promotion path from a tuned box to a batch run.
 *Open question: what a recipe is, and whether it is also what an ingest run
 carries.*
 
-**Ingest and dataset grouping.** A UI over the existing `import_bag` path:
-discovery of new bags, confirmation, background fold. Prerequisite: the import
+**Ingest and dataset grouping.** A UI over `cube_bathymetry`'s existing
+`import_bag`: discovery of new bags, confirmation, background fold. Prerequisite: the import
 ledger. The same ledger carries the campaign per
 import record, which retires the store-level `survey` scalar that was overwritten
 on 2026-08-25 (`massabesic-jun2026` → `shoals-aug2026`, with both campaigns'
