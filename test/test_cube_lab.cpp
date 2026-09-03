@@ -79,6 +79,35 @@ TEST(RunCube, IntensityRidesTheHypothesis)
   EXPECT_TRUE(saw_intensity);
 }
 
+TEST(CubeSurfaceOk, RejectsSurfacesThatWouldBreakItsConsumers)
+{
+  // ok() is the guard every consumer checks before dividing by cell_m and
+  // indexing all three arrays at y * nx + x; it must encode that invariant.
+  CubeSurface s;
+  s.nx = 2;
+  s.ny = 2;
+  s.cell_m = 0.5;
+  s.depth.assign(4, 0.0f);
+  s.uncertainty.assign(4, 0.0f);
+  s.intensity.assign(4, 0.0f);
+  EXPECT_TRUE(s.ok());
+
+  CubeSurface no_cell = s;
+  no_cell.cell_m = 0.0;
+  EXPECT_FALSE(no_cell.ok());   // consumers divide by this
+
+  CubeSurface short_unc = s;
+  short_unc.uncertainty.pop_back();
+  EXPECT_FALSE(short_unc.ok());   // indexed in lockstep with depth
+
+  CubeSurface short_int = s;
+  short_int.intensity.clear();
+  EXPECT_FALSE(short_int.ok());
+
+  CubeSurface empty;
+  EXPECT_FALSE(empty.ok());
+}
+
 TEST(RunCube, EmptyAndDegenerateInputsFailLoud)
 {
   EXPECT_FALSE(run_cube({}, 0.1).ok());

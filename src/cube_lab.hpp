@@ -50,7 +50,20 @@ struct CubeSurface
   std::vector<float> intensity;
   std::size_t soundings_in = 0;
   std::string note;           // human-readable failure reason when !ok()
-  bool ok() const {return nx > 0 && ny > 0 && !depth.empty();}
+  // Encodes the invariant every consumer relies on, not just non-emptiness:
+  // mesh building, drape and extend all divide by `cell_m` and index all three
+  // arrays at `y * nx + x`. A surface that passed the old check with a zero
+  // cell size or a short array would have reached them.
+  bool ok() const
+  {
+    if (nx <= 0 || ny <= 0 || !(cell_m > 0.0)) {
+      return false;
+    }
+    const std::size_t n =
+      static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny);
+    return depth.size() == n && uncertainty.size() == n &&
+           intensity.size() == n;
+  }
 };
 
 
