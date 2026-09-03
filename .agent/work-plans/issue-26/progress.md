@@ -25,3 +25,16 @@ issue: 26
 
 ### Note (not a finding on this PR)
 - The R2 false positive was caused by a genuinely misleading name upstream: `cube_bathymetry`'s `NodeRecord::depth_var` holds a standard deviation, not a variance. A reviewer reading the field name rather than its doc comment will reach the wrong conclusion — as Copilot did. Worth raising against cube_bathymetry (adjacent to, but distinct from, cube#99's node/BAG terminology scope). Not actionable here.
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-03 10:22 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+All three findings from the Integrated Review above are fixed. 522 tests, 0 failures (was 521 — the new regression test).
+
+- [x] (medium) `extend_surface_for_drape()` altitude gate — `5b3e4ad`. Mirrors `drapePing()`'s ping-level gate so an un-drapable ping cannot consume `max_nodes` budget that the proportional shrink would otherwise take from drapable pings. Regression test `AltitudelessPingDoesNotGrowTheTerrain` asserts the grid size and origin are untouched, paired with the same ping carrying an altitude so the test proves the guard acted rather than the geometry never reaching.
+- [x] (low) `sidescan_drape.cpp` conflict-score comment — `5b3e4ad` (rode with the code it annotates).
+- [x] (low) `sidescan_drape.hpp` RangeScoreMode comment — `f854fba`. Also records the 0.05 clamp on the range factor.
+
+The false positive recorded above (`depth_var` as a variance) was NOT acted on — acting on it would have introduced the error it warned of. The misleading upstream name it stemmed from is now filed as [cube_bathymetry#142](https://github.com/rolker/cube_bathymetry/issues/142).
