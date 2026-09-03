@@ -146,3 +146,72 @@ The plan is well-researched, correctly scoped against the issue and its review, 
 - [ ] Correct the Documentation & Instruction Impact wording (Finding 3) — README.md needs a new section, not a correction of existing text.
 - [ ] Open question 1 (triangular vs. Gaussian) is downstream of Finding 1 — resolve the mechanism first; the kernel-shape choice may need to be re-derived once the accumulation dimension is fixed.
 - [ ] Open question 2 (drape-cell default) — no objection to either option; operator call.
+
+## Plan Authored
+**Status**: complete
+
+**Plan**: `.agent/work-plans/issue-39/plan.md` at `a388281`
+**Branch**: feature/issue-39 at `a388281`
+**Phases**: single
+
+### Revision summary
+Rewrote the plan around texture mapping per operator direction, replacing
+the rejected per-cell weighted-accumulation kernel (Plan Review Finding 1:
+mathematically inert). New shape:
+- **A. Single pass**: per-pass, per-channel `SidescanTexture` in native
+  (ping x sample) geometry; mesh stays at CUBE/bathy resolution; vertices
+  carry UVs from the slant-range projection so GPU bilinear filtering
+  blends across ping rows (the real cross-ping blend the review required).
+  Subsumes the issue's deferred view-resolution-rasterization step.
+  `PointCloudView::setSurface()`'s per-vertex-colour ceiling is addressed
+  with a new additive `setSurfaceTexture()` entrypoint; issue #34
+  (setSurface lacks buffer/index validation) is noted as adjacent, not
+  fixed, and not worsened.
+- **B. Composite**: per-pass offscreen ground-space FBO rendering with
+  score written to depth (`GL_GREATER`) and amplitude to colour — highest-
+  scoring pass's texel wins per texel, reproducing today's
+  `ping_score * range_score` (both `RangeScoreMode` variants) and the
+  "amplitude always beats shadow" rule via a low-but-nonzero shadow score.
+- **C. Testability**: pure-CPU tests for the extracted `texel_score()` and
+  box-average column builder; the two existing CPU composite tests
+  (`StraightPassBeatsTurningPassInComposite`, `RangeScoreModeFlipsConflicts`)
+  ported to GPU readback tests (precedent: `test_point_cloud_view.cpp`'s
+  `grabFramebuffer()`/`MultiPassColour` pattern), not dropped; new tests for
+  non-degenerate cross-ping blending, column-sharp shadow boundaries, and
+  texture tiling past `GL_MAX_TEXTURE_SIZE`.
+- Beamwidth convention/fallback (`tx_beamwidth_rad`,
+  `resolve_reported_beamwidth()`) carried over from the prior plan, plus a
+  **new plausibility-range guard** (reject `<=0` or `>1.2` rad) added
+  mid-task per operator instruction: a third failure mode of
+  `PingInfo`'s beamwidth field was found (degrees-vs-radians, in
+  `cube_bathymetry/src/error_model.cpp:236-238`, dodged by the M3 driver
+  leaving the field empty) alongside the two the issue already named
+  (full-vs-half-extent, empty-vs-all-zeros). The driver comment's citation
+  of "cube_bathymetry#30" as tracking this is corrected in the plan: that
+  issue is closed and about a different subject (validating the error
+  model against Calder's original) — the units bug is untracked.
+- Plan Review Finding 3 (README wording) corrected in the new plan's
+  Documentation & Instruction Impact section: a new subsection, not a
+  correction of existing text.
+- Open questions carried/updated: texture column pitch default, composite
+  ground-texel default, non-uniform sample-count-per-pass handling
+  (unverified against a real bag), shader-architecture micro-choice. The
+  prior plan's triangular-vs-Gaussian kernel question is now moot — there
+  is no hand-rolled along-track kernel in this design.
+
+### Judged infeasible / descoped
+- The prior plan's step 5 (decouple the drape grid cell from the CUBE
+  surface cell via `extend_surface_for_drape()` resampling) is dropped
+  entirely, not merely revised — texture resolution replaces it as the
+  mechanism for imagery detail, and resampling the terrain itself is
+  explicitly what the operator's redirection says not to do.
+
+### Open question for the operator
+- Whether Approach A (single-pass texture path) and Approach B (GPU
+  composite) should split into two PRs once A's shader/texture plumbing
+  exists as a concrete diff — left as an implementation-time judgment
+  call in the plan (Estimated Scope) rather than decided now, since A.2's
+  texture builder and A.5's shared ping-gate helper are load-bearing for
+  both and a clean split isn't obvious until A is drafted.
+
+**By**: Claude Code Agent (Claude Sonnet)
