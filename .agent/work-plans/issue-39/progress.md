@@ -278,3 +278,56 @@ The revision genuinely fixes the fatal round-1 problem — the texture-mapped, c
 - [ ] Address Finding 4 — specify the composite readback tests' assertion style (dominance/threshold, matching `MultiPassColour`'s precedent) rather than implying exact colour match.
 - [ ] Resolve Finding 5 — decide move-vs-copy for A.2's `ping_score` extraction and settle the one-PR-vs-two question consistently between the Scope paragraph and Estimated Scope; recommend two PRs (A, then B) given the size and the independence of A's correctness risk from B's.
 - [ ] Minor: correct `plan.md:92-94`'s "only test target" claim (`test_survey_explorer_window` also carries the offscreen-GL environment property).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-09-03 14:30 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-39/plan.md` at `aaa0ffd`
+**Branch**: feature/issue-39 at `aaa0ffd`
+**Phases**: single
+
+Round-3 revision of the texture-mapped sidescan drape plan, addressing the
+round-2 `## Plan Review` (`a388281`) must-fix findings:
+
+- Beamwidth plausibility guard: `resolve_reported_beamwidth()` now takes the
+  plausible range as a parameter; `kAlongTrackMaxBeamwidthRad = 0.1` rad and
+  `kAcrossTrackMaxBeamwidthRad = 1.2` rad replace the single global bound
+  that let a degrees-mislabeled along-track value (0.44) pass through
+  untouched. The along-track bound now rejects that exact confusion value
+  with a 4.4x margin.
+- Shadow sentinel: `ping_score` is clamped to `kPingScoreFloor = 0.01`,
+  giving a provable composite-score floor of `5e-4`; `kShadowSentinelScore
+  = 1e-4` sits below that floor by construction, so a real (however noisy)
+  amplitude fragment cannot collide with the shadow sentinel even under the
+  bad-gyro corpus case (2026-06-26 Massabesic bags).
+- No-data preservation: amplitude texture sampling replaces hardware
+  `GL_LINEAR` with manual, coverage-gated interpolation using a new
+  per-row `row_footprint_v_halfwidth` field, so a near-range coverage gap
+  (footprint narrower than ping spacing, inside ~9 m) renders as no-data
+  rather than a fabricated cross-ping blend.
+- Composite readback tests (C.2) now specified as dominance/threshold
+  assertions following `MultiPassColour`'s precedent
+  (`test/test_point_cloud_view.cpp:162-189`), not exact-colour matches.
+- One-PR/two-PR inconsistency resolved per operator decision: Estimated
+  Scope now asserts a single PR unconditionally; A.2's `ping_score` move
+  (not copy) out of `drape_pass()` is explicitly tied to that decision.
+
+Three new/changed tests added to the test plan directly answering the
+must-fixes: `resolve_reported_beamwidth()` rejecting the real confusion
+value `0.44` (not `25.0`), `ExtremeYawPingAmplitudeStillWins` (bad-gyro
+shaped ping, asserts amplitude beats shadow), `CoverageGapStaysNoData`
+(asserts a genuine near-range gap renders no-data, not blended).
+
+### Open questions
+- [ ] `texture_col_pitch_m` default — operator call.
+- [ ] `composite_texel_m` default for the composite FBO — operator call.
+- [ ] Non-uniform sample counts across a pass's pings — needs a source
+  check against a real bag before implementation locks in "pad shorter
+  rows" as sufficient.
+- [ ] Second shader program vs. `u_use_texture` uniform switch —
+  implementation-level choice, no behavioural difference.
+- [ ] Whether `test_sidescan_composite.cpp` is its own file or folds into
+  `test_point_cloud_view.cpp` — depends on fixture-code overlap, decide
+  once both are drafted.
