@@ -331,3 +331,53 @@ shaped ping, asserts amplitude beats shadow), `CoverageGapStaysNoData`
 - [ ] Whether `test_sidescan_composite.cpp` is its own file or folds into
   `test_point_cloud_view.cpp` — depends on fixture-code overlap, decide
   once both are drafted.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-03 14:35 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-39/plan.md` at `aaa0ffd`
+**PR**: PR-less
+**Verdict**: approve-with-suggestions
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | Single PR, A+B coupled, per operator decision; no longer reopened. |
+| Issue alignment | Good | Subsumes issue's deferred step 3; addresses issue review's gate-sync action item via `ping_is_drapable()`. |
+| File targeting | Good | Matches verified source layout (`sidescan_geometry.hpp` confirmed header-only, no `.cpp`). |
+| Consequences | Good | Table covers construction sites, gate unification, `setSurface()` ceiling, CPU->GPU LUT move, test porting, `.agents/README.md`, issue #34 adjacency. |
+| Documentation & instruction impact | Good | Non-silent; correctly scoped as new subsection, not a correction. |
+| Principle alignment | Good | Test-driven, fix-completely, consequences-included all addressed with specifics. |
+| ADR compliance | N/A | No project ADRs exist; correctly stated. |
+| ROS conventions | N/A | Not a ROS-interface change. |
+
+### Findings
+
+Round-2 must-fixes verified against source, not just re-read:
+
+1. **Must-fix 1 (beamwidth axis) — genuinely fixed for along-track.** Confirmed `resolve_reported_beamwidth()` is not yet in source (still to be added) and the plan's derivation is sound: `kAlongTrackMaxBeamwidthRad = 0.1` rejects the real confusion value `0.44` (4.4x margin) while admitting the measured `0.00768`. Verified independently: no along-track degrees value in the sensor class's plausible range (single-digit-to-tens of degrees, i.e. numerically 0.09-0.87 in raw form) survives below `0.1` except implausibly-narrow beams under ~5.7°, which is an acceptable edge for this guard's stated purpose.
+
+   **Residual gap, not must-fix**: for the across-track axis, `kAcrossTrackMaxBeamwidthRad = 1.2` cannot distinguish degrees-mislabeled-as-radians from a genuine radians value, because real rx beamwidths (tens of degrees, e.g. 20-68°) numerically overlap the plausible-radians range (0-1.2) when misread as bare degrees — e.g. a hypothetical 0.9°-beam sensor's degrees value (0.9) misread as radians (0.9 rad = 51.6°) is itself a physically plausible radians value, so the guard cannot flag it as wrong by range alone. This is structurally different from the along-track case, where the true-radians range and the degrees-mistake range are well separated. The plan doesn't claim otherwise for across-track (it only says "sits above the measured value with headroom," not "catches the degrees confusion"), and the field isn't currently consumed by the drape kernel, so this isn't a must-fix — but the plan should say so explicitly (one sentence) rather than leaving a reader to assume symmetric protection from the parallel presentation of both constants.
+
+2. **Must-fix 2 (shadow-sentinel floor) — genuinely fixed, arithmetic verified against source.** Confirmed in `src/sidescan_drape.cpp`: `range_score`'s `std::max(0.05, ...)` floor (line ~191) is unconditional across both `RangeScoreMode` variants — it applies before the ternary, not after. Confirmed `ping_score = 1/(1+(rate/0.05)^2)` (line ~449) is genuinely unclamped in the current code and decays toward but never reaches 0 as `rate` grows — matches the plan's claim exactly, formula and line numbers both check out. The clamp point (A.2, the texture builder) is the single place `ping_score` is computed under this plan, and B.2's `texel_score()` consumes only that clamped value, so `kPingScoreFloor * range_score_floor = 5e-4` is a genuine, provable floor, not an inspection-based guess. `kShadowSentinelScore = 1e-4` sits below it by construction. No path bypasses the clamp as designed.
+
+3. **Clamp is a behaviour change — plan owns it, but slightly undersells how easily it's reached.** Verified against the existing `StraightPassBeatsTurningPassInComposite`/`RangeScoreModeFlipsConflicts` tests (`test/test_sidescan_drape.cpp`): neither depends on unclamped ordering — the turning-pass fixture in the first test already computes a raw `ping_score` of ~0.0039 (rate = 0.8 rad/m from `yaw += 0.4*i` over 0.5 m ping spacing), which is *already below* the proposed `kPingScoreFloor = 0.01`, i.e. this existing fixture already sits in clamp territory today under the new code — yet the test's assertion (straight beats turning) holds identically whether the turning pass's score is 0.0039 or clamped to 0.01, since 1.0 overwhelms either. So: no test breaks. But this means the clamp engages for what the test's own comment calls an ordinary "mid-turn" scenario (not sensor-pose noise), which is milder framing than the plan's "genuinely violent turn ... not normal survey track-keeping." Not a correctness problem — the clamp's job (bound the floor) is unaffected by how often it engages — but the plan's characterization of when it engages is optimistic. Suggest tightening that one sentence in B.2, or noting the existing turning-pass fixture as a concrete example of legitimate track-keeping that already reaches the clamp.
+
+4. **Must-fix 3 (coverage-gated interpolation) — mechanism is sound and `CoverageGapStaysNoData` has real discriminating power.** The three-case logic (both-cover / one-covers / neither-covers) is well-defined and the "neither covers -> no-data" case is exactly what a hardware `GL_LINEAR` sampler cannot express (it always blends), so the test's stated "fails against GL_LINEAR by construction" claim holds. Boundary behavior at the very first/last row of a pass (where only one candidate row exists on one side) isn't spelled out in prose, but the described mechanism degrades correctly there by inspection (one-sided coverage collapses to the existing "exactly one row covers" branch, and true off-pass fragments are already caught by A.3's out-of-range UV sentinel) — this is a documentation completeness nit, not a design gap.
+
+5. **Fix 4 (test citation) — confirmed accurate.** `test/test_point_cloud_view.cpp:162-189` is exactly `MultiPassColour` (`TEST_F` opens at line 162, next test `ColorModePassOnSinglePassIsSafe` opens at line 192). Its dominance-predicate assertion style (per-channel ratio thresholds, not exact `QColor` match) is real and does generalize to the planned composite tests as described.
+
+6. **Open questions — correctly triaged.** `texture_col_pitch_m` and `composite_texel_m` defaults are genuine operator-facing fidelity/perf tradeoffs, appropriately left open. Shader-program-vs-uniform-switch and the test-file split are implementation-level with no behavioral difference, correctly deferred rather than escalated. Non-uniform sample counts is a factual question needing a real-bag check, not a preference — the plan frames it that way already ("needs checking... before implementation locks in"), which is right; only miss is not naming who/when does that check (implementer, at A.2 implementation time, presumably) — minor.
+
+### Summary
+
+Round-2's four must-fix findings are genuinely resolved, not reworded: the beamwidth bound derivation, the provable score floor, the coverage-gated interpolation design, and the test citation all check out against the actual source (`sidescan_drape.cpp`, `sidescan_geometry.hpp`, `test/test_point_cloud_view.cpp`) rather than merely against the plan's own prose. The plan is ready for implementation. Two non-blocking suggestions carried forward as follow-up polish, not gates: (a) state explicitly that the across-track beamwidth bound doesn't distinguish degrees/radians confusion the way the along-track bound now does (it protects only against implausibly-large values), and (b) soften "genuinely violent turn ... not normal survey track-keeping" in B.2, since the existing turning-pass test fixture already reaches clamp territory under ordinary mid-turn conditions.
+
+### Recommended Actions
+
+- [ ] (suggestion) Add one sentence to A.1 noting the across-track bound (`kAcrossTrackMaxBeamwidthRad`) does not disambiguate degrees-vs-radians the way the along-track bound does, since real across-track values and their degrees-misread equivalents overlap numerically — acceptable given the field is currently unconsumed, but should be stated rather than left implicit.
+- [ ] (suggestion) Soften B.2's claim that the clamp "only changes behaviour for exactly the pathological input class" — the existing `StraightPassBeatsTurningPassInComposite` fixture's turning pass already computes a raw `ping_score` (~0.0039) below the clamp floor under ordinary mid-turn conditions, though no test assertion depends on the unclamped value.
+- [ ] Proceed to implementation; no must-fix findings remain.
