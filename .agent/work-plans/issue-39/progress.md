@@ -96,3 +96,53 @@ direction"). No other open issue blocks #39 itself.
 ### Open questions
 - [ ] Triangular vs. Gaussian along-track kernel shape — plan defaults to triangular for simplicity/cost; confirm before implementation since it changes the half-width test assertion.
 - [ ] Default value for the new drape-cell-size UI control — plan suggests ~0.02 m (near measured GCV across-track sample spacing); confirm a fixed default is acceptable vs. defaulting to the CUBE cell size (opt-in decoupling).
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-03 13:42 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-39/plan.md` at `72116fb`
+**PR**: PR-less
+**Verdict**: changes-requested
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | Matches the issue's own suggested steps 1-2; step 3 correctly deferred. |
+| Issue alignment | Good | All 5 review-issue action items (beamwidth convention test, PingGeometry plumbing, not-reported fallback, gate-sync, README update) are explicitly addressed. |
+| File targeting | Good | Verified against source: single call site of `extend_surface_for_drape()` (`sidescan_viewer_window.cpp:1545`), no other `PingGeometry` construction sites outside tests, `.agents/README.md` has no existing drape-specific text to cross-reference (see Documentation finding). |
+| Consequences | Good | Consequences table verified accurate: `terrain.uncertainty[]`/`intensity[]` are read only as an `isfinite()` "measured" boolean flag on the drape path (`sidescan_viewer_window.cpp:1186,1359`), never as a numeric value — confirms the plan's step-5 claim these fields are display-only there and safe to interpolate under the same "NaN unless all 4 finite" rule as depth. |
+| Documentation & instruction impact | Needs work | Section is present and non-silent, but factually inaccurate — see Finding 3. |
+| Principle alignment | Good | Test-driven, minimal, both blur sources addressed together per the Quality Standard. |
+| ADR compliance | N/A | Correctly noted — no ADR governs sonar geometry/resampling. |
+| ROS conventions | N/A | No topics/params/messages changed; internal algorithm + one Qt spinbox. |
+
+### Findings
+
+1. **(must-fix) [Approach, step 3]** — The along-track "weighted accumulation" as described is likely a no-op for the painted value, and its interaction with the existing gap-filling role of `half_width_m` is unresolved — `plan.md:84-109`.
+
+   Within one call to `drapePing()`, a single march step `t` produces exactly **one** amplitude value (the step-4 box average), which today is stamped identically across every offset in `offsets` (built from `half_width_m`, the ping-spacing-derived strip width — `sidescan_drape.cpp:114-119`). Step 3 proposes weighting each offset by a triangular kernel over `0.5*tx_beamwidth_rad*slant` and resolving `weighted_amplitude = Σ(weight·amplitude)/Σ(weight)` per touched cell. Since `amplitude` is the *same* constant for every offset at a given `t` (there is no per-offset amplitude data within a single ping — sidescan has no along-track samples finer than one ping), this ratio algebraically collapses to that same constant regardless of the weights: a weighted average of a repeated constant is the constant. So, on the most direct reading, the described accumulation cannot change what gets painted.
+
+   Two ways to make this a real effect, and the plan doesn't pick one:
+   - **Narrow the paint extent** to the kernel half-width (drop offsets beyond it, rather than merely down-weighting them within the still-full `half_width_m` strip). This would meaningfully tighten the along-track footprint at far range, but at near range (<9 m, per the issue's own numbers) the beam footprint (3.8-7.7 cm) is *narrower* than the ping-to-ping spacing (6.9 cm) that `half_width_m`'s comment (`sidescan_drape.cpp:73-75`) says exists specifically "so consecutive pings tile the grid without grey gaps between their rays." Narrowing to the footprint reopens exactly the gap problem that code comment says the current width was chosen to avoid — the plan doesn't address this trade-off.
+   - **Blend across neighbouring pings** at cells where footprints overlap (the physically correct source of along-track anti-aliasing, since resolution finer than one ping only exists *between* pings, not within one). But step 3's own bullet 3 says the resolved candidate feeds "the **existing unchanged** conflict-resolution path" (`score` winner-take-all), which explicitly rules this out.
+
+   The plan needs to say concretely which of these (or a third option) is intended, and — if it's the first — reconcile it with the near-range gap-filling requirement `half_width_m` currently satisfies. As written, an implementer following the prose literally could ship code that computes and normalizes weights for no visible effect on drape sharpness, while believing the along-track half of the issue's blur has been addressed.
+
+2. **(suggestion) [Test plan, across-track anti-aliasing case]** — `plan.md:200-204`. A box average over the raw samples a march step spans is the textbook anti-aliasing operation for downsampling, but it will legitimately *dilute* a bright sub-window target's peak amplitude in proportion to how much of the averaging window it occupies (e.g. a single strong sample among ~3 averaged samples nets roughly a third of its raw value) — that dilution is correct behaviour, not a bug. The stated acceptance criterion — "preserves the target's amplitude and position" — reads as literal equality, which this kernel will not produce. Recommend the plan specify a quantitative, dilution-aware assertion (e.g. amplitude scales with the target's fractional coverage of the window, and never collapses to exactly the pre-fix nearest-sample outcome of "sometimes present, sometimes 0") rather than "preserved," to avoid the test either being flaky/impossible to satisfy as literally written or silently asserting something weaker than intended.
+
+3. **(suggestion) [Documentation & Instruction Impact]** — `plan.md:248-252`. The plan states `.agents/README.md`'s inventory row "currently state[s] 'Nearest sample per cell, no averaging'" — verified against source, this phrase and any drape-kernel description do not currently appear anywhere in `.agents/README.md` (grep confirms no hits); only `sidescan_drape.hpp`'s header comment (line ~25) has it. The correct framing is that README.md needs a **new** drape-kernel description added (it currently has none), not a correction of an existing stale claim. Minor — doesn't change the Files to Change list, which already lists both files correctly — but worth fixing the prose since the plan's own Principles Self-Check claims doc quantities were "verified against source."
+
+### Summary
+
+The plan is well-researched, correctly scoped against the issue and its review, and the grid-decoupling (step 5) and not-reported-fallback (step 2) mechanics check out cleanly against the source (verified the single call site, the `terrain.uncertainty` display-only usage, the membrane-fill's NaN-triggers-fill behaviour, and the `PingInfo.msg` "may be empty if not reported" comment). However, the along-track kernel (step 3) — the half of the plan addressing the issue's *dominant* blur source (16:1 aspect ratio at swath edge) — is under-specified to the point of being mathematically inert as literally described, and needs to be made concrete before implementation.
+
+### Recommended Actions
+
+- [ ] Resolve Finding 1 — specify precisely what dimension the along-track weighted accumulation operates over, and reconcile the chosen mechanism with `half_width_m`'s near-range gap-filling role, before implementation starts.
+- [ ] Tighten the across-track anti-aliasing test's acceptance criterion (Finding 2) to a dilution-aware assertion.
+- [ ] Correct the Documentation & Instruction Impact wording (Finding 3) — README.md needs a new section, not a correction of existing text.
+- [ ] Open question 1 (triangular vs. Gaussian) is downstream of Finding 1 — resolve the mechanism first; the kernel-shape choice may need to be re-derived once the accumulation dimension is fixed.
+- [ ] Open question 2 (drape-cell default) — no objection to either option; operator call.
