@@ -38,3 +38,21 @@ All three findings from the Integrated Review above are fixed. 522 tests, 0 fail
 - [x] (low) `sidescan_drape.hpp` RangeScoreMode comment — `f854fba`. Also records the 0.05 clamp on the range factor.
 
 The false positive recorded above (`depth_var` as a variance) was NOT acted on — acting on it would have introduced the error it warned of. The misleading upstream name it stemmed from is now filed as [cube_bathymetry#142](https://github.com/rolker/cube_bathymetry/issues/142).
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-03 10:41 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**PR**: #31 at `05697e1`
+**Sources**: 2 (Copilot R4 @ `05697e1`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass at `05697e1` (`build-and-test`, `copilot-pull-request-reviewer`)
+
+Round 4. Both findings were SUPPRESSED (low-confidence) comments on code unchanged since round 3; both were valid on inspection. That is now 3 of 4 suppressed comments on this PR valid across all rounds (the one exception being the R2 `depth_var` claim, a false positive) — the standing lesson to read them every round holds.
+
+### Findings
+- [x] (medium) `extend_surface_for_drape()` returned an all-NaN grid as extended terrain, contradicting the header's "every node of the result is finite" — `1f5e71a`. Root cause was one early return shared by two opposite cases: `frontier.size() == n` (everything measured, contract already holds) and `frontier.empty()` (nothing measured, contract violated). Reachable: run_cube can estimate 0 of N nodes and such a surface still passes `ok()`; drape_pass then skips every ping for a missing nadir depth, giving an empty drape with no stated reason. Now returns the input surface with an explanatory note. — `src/sidescan_drape.cpp`
+- [x] (low, defensive) `CubeSurface::ok()` did not encode the invariant its callers rely on — `cell_m > 0` and all three arrays sized `nx*ny` — `04eaf13`. Verified no current construction path can produce a surface that passes the old guard and then misbehaves, so this is invariant-hardening on a public-header struct, not a live defect. — `src/cube_lab.hpp`
+
+524 tests, 0 failures (was 522). The tightened `ok()` broke no existing fixture.
