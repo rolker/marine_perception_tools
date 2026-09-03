@@ -82,3 +82,17 @@ direction"). No other open issue blocks #39 itself.
 - [ ] Decide and document the fallback when tx_beamwidths is empty (common per rviz_sonar_image#8).
 - [ ] Keep extend_surface_for_drape()'s mirrored ping-level gate in sync with any gating change made in drapePing().
 - [ ] Update .agents/README.md (Common Pitfalls / Package Inventory) once the kernel + decoupled drape-grid resolution land.
+
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-09-03 13:34 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-39/plan.md` at `72116fb`
+**Branch**: feature/issue-39 at `72116fb`
+**Phases**: single
+
+### Open questions
+- [ ] Triangular vs. Gaussian along-track kernel shape — plan defaults to triangular for simplicity/cost; confirm before implementation since it changes the half-width test assertion.
+- [ ] Default value for the new drape-cell-size UI control — plan suggests ~0.02 m (near measured GCV across-track sample spacing); confirm a fixed default is acceptable vs. defaulting to the CUBE cell size (opt-in decoupling).
