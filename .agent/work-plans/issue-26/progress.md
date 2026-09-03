@@ -56,3 +56,27 @@ Round 4. Both findings were SUPPRESSED (low-confidence) comments on code unchang
 - [x] (low, defensive) `CubeSurface::ok()` did not encode the invariant its callers rely on — `cell_m > 0` and all three arrays sized `nx*ny` — `04eaf13`. Verified no current construction path can produce a surface that passes the old guard and then misbehaves, so this is invariant-hardening on a public-header struct, not a live defect. — `src/cube_lab.hpp`
 
 524 tests, 0 failures (was 522). The tightened `ok()` broke no existing fixture.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-03 11:18 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**PR**: #31 at `8053e15`
+**Sources**: 2 (Copilot R5 @ `5c1ab96`, Copilot R6 @ `8053e15`)
+**Cross-source confirmations**: 0
+**CI**: all-pass at `8053e15`
+
+Rounds 5 and 6. Every finding on this PR since round 3 has arrived as a SUPPRESSED (low-confidence) comment on code unchanged since the previous round, and all have been valid. Round 6's are the most serious of the whole PR.
+
+### Findings
+- [x] (low, R5) `utc_offset_s` doc claimed tick POSITIONS "stay at the same real instants" — false; `computeTickLadder()` adds the offset before decomposing to calendar fields, so the ladder lands on the display zone's boundaries and a day tick sits at local midnight. Fixed `8053e15`. — `src/time_bar_model.hpp`
+- [x] (**medium-high**, R6) `drapePing()` marched the GROUND offset `t` to a SLANT bound (`t <= max_slant`), overshooting the swath by `max_slant - sqrt(max_slant^2 - dz^2)`. The amplitude path skipped harmlessly; the SHADOW path branched on geometry before any sample lookup, so never-recorded seabed was marked acoustic shadow and rendered near-black — absence presented as "no return". Fixed `fe8b2d7` by hoisting the swath test above the visible/shadow branch so it gates both. — `src/sidescan_drape.cpp`
+- [x] (medium, R6) `extend_surface_for_drape()` applied a slant `reach` as a horizontal x/y offset, overstating growth and triggering the max_nodes proportional clipping earlier than the data warrants — interacts with the budget fix in `5b3e4ad`. Fixed `fe8b2d7`. — `src/sidescan_drape.cpp`
+
+### Verification note
+Both new tests were confirmed to FAIL by name against the pre-fix code before being accepted (`ShadowStopsAtTheGroundRangeEdgeNotTheSlantRange`, `ExtensionReachIsGroundRangeNotSlantRange`). Geometry chosen deliberately: 12 m slant at 10 m altitude gives a 5.4 m overshoot (10+ cells), whereas the typical 30 m / 4 m case overshoots 0.27 m — under one cell — which is why six review rounds passed over it.
+
+**Gotcha recorded**: colcon's "N tests / M failures" summary double-counts, aggregating ctest's per-executable `Testing/*/Test.xml` with the per-case gtest XML (1 executable failure + 2 case failures was reported as "3 failures"). Read `test_results/*.gtest.xml` for the true set; the headline totals are not a test count.
+
+526 tests, 0 failures.
