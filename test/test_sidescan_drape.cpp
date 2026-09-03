@@ -242,6 +242,29 @@ TEST(SidescanDrape, RangeScoreModeFlipsConflicts)
   EXPECT_EQ(mid.amplitude[ci], 999.0f);
 }
 
+TEST(SidescanDrape, AltitudelessPingDoesNotGrowTheTerrain)
+{
+  // A ping drape_pass() will always skip (no altitude) must not expand the
+  // terrain: the extension budget is shared, so growing for a ping that can
+  // never be painted takes nodes from the pings that can be.
+  const auto surface = flatSurface(20, 20, -10.0f);
+  auto no_altitude = makePing(5.0, 9.0, 0.0);
+  std::string note;
+  const auto ext = marine_perception_tools::extend_surface_for_drape(
+    surface, {no_altitude}, 100000000ULL, note);
+  ASSERT_TRUE(ext.ok());
+  EXPECT_EQ(ext.nx, surface.nx);
+  EXPECT_EQ(ext.ny, surface.ny);
+  EXPECT_DOUBLE_EQ(ext.origin_x, surface.origin_x);
+  EXPECT_DOUBLE_EQ(ext.origin_y, surface.origin_y);
+  // Sanity: the same ping WITH an altitude does grow it, so the guard above
+  // is what stopped the growth, not a geometry that never reached out.
+  auto with_altitude = makePing(5.0, 9.0);
+  const auto grown = marine_perception_tools::extend_surface_for_drape(
+    surface, {with_altitude}, 100000000ULL, note);
+  EXPECT_LT(grown.origin_y, surface.origin_y);
+}
+
 TEST(SidescanDrape, UnusablePingsAreCountedSkipped)
 {
   const auto surface = flatSurface(20, 20, -10.0f);

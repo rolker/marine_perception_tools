@@ -176,7 +176,9 @@ void drapePing(
     // Nearest sample, no averaging; the QUALITY score decides conflicts:
     // straightness x range-closeness, so a straight-running near sample
     // beats a mid-turn or far-edge one (the composite's "better pixels
-    // through" rule; single-pass conflicts reduce to nearer-wins).
+    // through" rule). Note the score is a PRODUCT: nearer-wins holds within
+    // a single ping, where ping_score is constant, but across pings a farther
+    // sample on a straighter ping can outrank a nearer one taken mid-turn.
     const double u = slant / std::max(1e-6, max_slant);
     const double range_score = std::max(
       0.05, range_mode == RangeScoreMode::MidRange ?
@@ -219,8 +221,15 @@ CubeSurface extend_surface_for_drape(
   bool any = false;
   for (const auto & p : pings) {
     const auto & g = p.geometry;
+    // Mirror drapePing()'s ping-level gate, altitude included: a ping it will
+    // always skip must not grow the grid it can never paint. The growth is
+    // capped by max_nodes and then shrunk proportionally on every side, so an
+    // un-drapable ping does not merely waste nodes — it takes them from the
+    // pings that will be draped. (drapePing() additionally requires an
+    // estimated surface at the nadir, which cannot be tested here: that
+    // surface is what this function is about to create.)
     if (g.metres_per_sample <= 0.0 || g.lateral_sign == 0 ||
-      p.amplitudes.empty())
+      g.altitude <= 0.0 || p.amplitudes.empty())
     {
       continue;
     }
