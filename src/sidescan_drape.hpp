@@ -68,8 +68,12 @@ struct SidescanDrape
 // Straightness is derived from each ping's yaw rate against its neighbours
 // in the vector; a pass boundary's position jump makes the rate negligible,
 // so concatenated passes need no explicit boundaries.
-// The range half of the pixel-quality score:
-//  - Nearest: closer samples strictly outrank far ones (best across-track
+// The range half of the pixel-quality score. It is one factor of a product
+// (straightness x range), so it decides a conflict outright only within a
+// single ping, where the straightness factor is constant; across pings a
+// farther sample on a straighter ping can win. The range factor is also
+// clamped at 0.05, so far-range differences compress rather than vanish:
+//  - Nearest: closer samples outrank far ones (best across-track
 //    resolution, but composites favour near-nadir imagery with its
 //    distortion);
 //  - MidRange: the score peaks mid-swath (4u(1-u), u = slant/max_slant),
