@@ -113,10 +113,14 @@ out). See [#1](https://github.com/rolker/marine_perception_tools/issues/1).
 ## survey_explorer
 
 An offline C++/Qt **survey-data explorer** for georeferenced sidescan and MBES
-recordings ([unh_marine_autonomy#258](https://github.com/rolker/unh_marine_autonomy/issues/258)
-umbrella; grew out of the sidescan target viewer,
+recordings (grew out of the sidescan target viewer,
 [#7](https://github.com/rolker/marine_perception_tools/issues/7)/[#8](https://github.com/rolker/marine_perception_tools/issues/8)/[#24](https://github.com/rolker/marine_perception_tools/issues/24)).
 One window, two modes that compose:
+
+> **What it is and what constrains it:** [`docs/survey_explorer.md`](docs/survey_explorer.md).
+> **Where it is going:** [#36](https://github.com/rolker/marine_perception_tools/issues/36).
+> (The original umbrella, [unh_marine_autonomy#258](https://github.com/rolker/unh_marine_autonomy/issues/258),
+> is closed — its five stages are all merged.)
 
 - **Bag mode** — `survey_explorer <bag> [--start T --end T]`: scrub a
   recording along distance travelled; the rolling window paints georeferenced
