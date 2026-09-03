@@ -321,8 +321,20 @@ CubeSurface extend_surface_for_drape(
       frontier.push_back(static_cast<std::int32_t>(i));
     }
   }
-  if (frontier.empty() || frontier.size() == n) {
-    return ext;
+  if (frontier.empty()) {
+    // No measured node anywhere in the surface: there is nothing to grow a
+    // membrane from. Returning the enlarged grid here would break this
+    // function's stated contract (every node of the result is finite) and hand
+    // the caller a terrain on which drape_pass() skips every ping for a
+    // missing nadir depth — an empty drape with no stated reason. Give back
+    // the input unchanged and say why.
+    if (note.empty()) {
+      note = "surface has no estimated nodes - terrain not extended";
+    }
+    return surface;
+  }
+  if (frontier.size() == n) {
+    return ext;   // every node measured: the contract already holds
   }
   std::vector<std::int32_t> next;
   auto visit = [&](std::int32_t from, std::int32_t to) {

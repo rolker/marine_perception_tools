@@ -242,6 +242,27 @@ TEST(SidescanDrape, RangeScoreModeFlipsConflicts)
   EXPECT_EQ(mid.amplitude[ci], 999.0f);
 }
 
+TEST(SidescanDrape, SurfaceWithNoEstimatedNodesIsReturnedUnextended)
+{
+  // Nothing to grow a membrane from. Extending anyway would return an
+  // all-NaN grid, breaking the documented "every node finite" contract and
+  // leaving drape_pass() to skip every ping with no stated reason.
+  auto surface = flatSurface(20, 20, -10.0f);
+  surface.depth.assign(surface.depth.size(), std::nanf(""));
+  auto ping = makePing(5.0, 9.0);
+  std::string note;
+  const auto ext = marine_perception_tools::extend_surface_for_drape(
+    surface, {ping}, 100000000ULL, note);
+  EXPECT_EQ(ext.nx, surface.nx);
+  EXPECT_EQ(ext.ny, surface.ny);
+  EXPECT_FALSE(note.empty());   // the caller is told why
+  // Whatever comes back must satisfy the contract: no all-NaN grid presented
+  // as extended terrain.
+  for (const float d : ext.depth) {
+    EXPECT_FALSE(std::isfinite(d));   // unchanged input, not a fabricated fill
+  }
+}
+
 TEST(SidescanDrape, AltitudelessPingDoesNotGrowTheTerrain)
 {
   // A ping drape_pass() will always skip (no altitude) must not expand the
