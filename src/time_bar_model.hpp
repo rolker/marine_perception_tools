@@ -210,10 +210,13 @@ inline std::int64_t offsetTimeNs(std::int64_t base_ns, double span_px, double sp
 // the original's average-length approximation past the first (calendar-
 // derived) tick — display-grade, like the source design.
 // `utc_offset_s` shifts the calendar decomposition into a display timezone
-// (e.g. -14400 for EDT): tick POSITIONS stay at the same real instants, but
-// hour numbers, midnights and dates read in that zone. The offset is a
-// single value for the whole window — display-grade across a DST change
-// inside one view (the caller re-derives it per repaint).
+// (e.g. -14400 for EDT). This moves the ticks themselves, not just their
+// labels: the ladder is placed on that zone's calendar boundaries, so a day
+// tick sits at LOCAL midnight — a different real instant from UTC midnight.
+// The time axis itself is unchanged; it is the set of instants chosen for
+// ticks that follows the zone. The offset is a single value for the whole
+// window — display-grade across a DST change inside one view (the caller
+// re-derives it per repaint).
 inline std::vector<TickRow> computeTickLadder(
   std::int64_t left_ns, double spp, double width_px, int utc_offset_s = 0)
 {
