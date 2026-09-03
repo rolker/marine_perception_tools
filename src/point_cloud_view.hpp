@@ -22,9 +22,13 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QPoint>
+#include <QTimer>
 #include <QVector3D>
 
 #include <cmath>
+#include <cstdint>
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include "mbes_geometry.hpp"
@@ -101,6 +105,21 @@ public:
   int decimationStride() const {return decimation_stride_;}
   void setZExaggeration(float z);          // >= 1; stretches depth
   void setColorMap(int palette_index);     // marine_colormap palette index
+  // Manual colour range for the scalar modes (Depth/Backscatter), in the
+  // active scalar's units; nullopt (default) auto-scales to the data extent.
+  void setScalarRange(const std::optional<std::pair<float, float>> & range);
+
+  // CUBE surface layer (#27): a triangulated heightmap in the SAME world
+  // frame as the current points (it recentres by the cloud's centroid, so
+  // set points from the same load first). xyz/rgb triples + triangle indices.
+  void setSurface(
+    std::vector<float> positions_xyz, std::vector<float> colors_rgb,
+    std::vector<std::uint32_t> indices);
+  void clearSurface();
+  void setSurfaceVisible(bool on);
+  void setSurfaceAlpha(float alpha);   // clamped to [0.05, 1]
+  // Hide/show the point cloud itself (e.g. to view the CUBE surface alone).
+  void setPointsVisible(bool on);
   void setPointSize(float px);             // GL point size in pixels (>= 1)
 
   // Place a forward-pointing boat arrow (~2.4 m x 1 m) at a world position for
@@ -136,6 +155,10 @@ private:
     const std::vector<MbesSounding> & world_soundings, std::vector<int> pass_ids);
   void rebuild_colors();   // recompute the per-point colour buffer for the mode
   void upload();           // (re)upload position + colour buffers (GL-current)
+  void upload_surface();   // (re)upload the CUBE surface mesh (GL-current)
+  // Nearest point (recentred coords) within a pixel radius of `px`, closest
+  // to the camera on a tie — the middle-click examine pick.
+  bool pick_point(const QPoint & px, QVector3D & out) const;
   void build_arrow();      // (re)build the boat-arrow vertices (GL-current)
   // Draw the 2D overlay (scale bar + E/N/Up orientation axes + linked cursor).
   void draw_overlay(const QMatrix4x4 & view, float metres_per_pixel);
@@ -158,6 +181,30 @@ private:
   float boat_heading_ = 0.0f;
   bool gl_ready_ = false;
   bool buffers_dirty_ = false;
+
+  // CUBE surface layer (#27).
+  QOpenGLVertexArrayObject surface_vao_;
+  QOpenGLBuffer surface_pos_vbo_{QOpenGLBuffer::VertexBuffer};
+  QOpenGLBuffer surface_col_vbo_{QOpenGLBuffer::VertexBuffer};
+  QOpenGLBuffer surface_ibo_{QOpenGLBuffer::IndexBuffer};
+  std::vector<float> surface_pos_;      // world frame; recentred at upload
+  std::vector<float> surface_col_;
+  std::vector<std::uint32_t> surface_idx_;
+  int surface_index_count_ = 0;
+  bool surface_dirty_ = false;
+  bool surface_visible_ = true;
+  float surface_alpha_ = 1.0f;
+  bool points_visible_ = true;
+
+  // GeoZui4D-style examine pivot (#27 follow-up): middle-click animates the
+  // picked point to the view centre and the orbit rotates about it. Stored
+  // UNSCALED in recentred coordinates; z-exaggeration applies at view time
+  // so a later Zx change keeps the pivot on the point.
+  QVector3D pivot_{0.0f, 0.0f, 0.0f};
+  QTimer pivot_timer_;
+  QVector3D pivot_from_;
+  QVector3D pivot_to_;
+  float pivot_progress_ = 1.0f;
 
   // Recentred geometry + the per-point scalars used for colouring.
   std::vector<QVector3D> pts_;     // world soundings minus centroid
@@ -183,6 +230,7 @@ private:
   float cursor_x_ = 0.0f;
   float cursor_y_ = 0.0f;
   ColorMode mode_ = ColorMode::Depth;
+  std::optional<std::pair<float, float>> scalar_range_;   // manual colour range
   int decimation_stride_ = 1;
   int palette_index_ = 0;
   QPoint last_mouse_;

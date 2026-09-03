@@ -23,6 +23,7 @@
 #include <QPolygonF>
 #include <QRectF>
 #include <QString>
+#include <QTimer>
 #include <QVector>
 #include <QWidget>
 
@@ -104,6 +105,11 @@ public:
 
   // Store-tile basemap (geo bounds per tile).
   void setStoreTiles(std::vector<OverviewTile> tiles);
+
+  // The current view for the LOD basemap (#26): visible region in degrees
+  // (nullopt before a geo origin exists) and true ground metres per pixel.
+  std::optional<GeoRect> visibleGeoRegion() const;
+  double groundMetresPerPixel() const {return 1.0 / px_per_m_;}
 
   // Decimated nav track, pre-segmented per bag, as (lat, lon) polylines.
   void setNavTrack(std::vector<std::vector<std::pair<double, double>>> segments);
@@ -193,6 +199,15 @@ signals:
   // The set of selected index tiles changed (ctrl-click / rubber band).
   void tileSelectionChanged();
 
+  // The settled view changed (zoom step, pan release, fit, resize) — the
+  // LOD basemap re-evaluates its level + visible-tile demand load (#26).
+  void viewChanged();
+
+  // Shift-drag CUBE box (#27): a geographic box was drawn / cleared (a
+  // shift-click without a drag clears). The box stays as a map overlay.
+  void cubeBoxSelected(double south, double west, double north, double east);
+  void cubeBoxCleared();
+
 protected:
   void paintEvent(QPaintEvent * event) override;
   void resizeEvent(QResizeEvent * event) override;
@@ -217,6 +232,10 @@ private:
   QPointF cache_center_;
   QSize cache_size_;
   bool panning_ = false;
+  // Zoom snappiness (#26): a zoom step blits the stale cache scaled (like the
+  // pan blit) and the expensive rebuild waits for the wheel to settle.
+  QTimer cache_settle_;
+  bool cache_rebuild_due_ = false;
 
   // canvas metres <-> screen pixels (view transform).
   QPointF mapToScreen(double mx, double my) const;
@@ -262,6 +281,10 @@ private:
   bool band_selecting_ = false;   // mid ctrl-drag rubber band
   QPoint band_start_;
   QPoint band_cur_;
+  bool cube_box_selecting_ = false;   // mid shift-drag CUBE box (#27)
+  QPoint cube_box_start_;
+  QPoint cube_box_cur_;
+  std::optional<GeoRect> cube_box_geo_;   // the persistent box overlay
 
   // --- per-bag layers ---
   QImage coverage_;

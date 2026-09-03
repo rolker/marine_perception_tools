@@ -47,6 +47,14 @@ SidescanCanvas::SidescanCanvas(QWidget * parent)
   setMinimumSize(480, 360);
   setMouseTracking(true);   // hover reporting (hoverWorld) needs moves without a button
   setAutoFillBackground(true);
+  // Zoom settle: while the wheel is turning, repaints blit the stale layer
+  // cache scaled; once it stops for a beat, one full-quality rebuild runs.
+  cache_settle_.setSingleShot(true);
+  cache_settle_.setInterval(160);
+  connect(&cache_settle_, &QTimer::timeout, this, [this]() {
+      cache_rebuild_due_ = true;
+      update();
+    });
 }
 
 // --- geographic frame -------------------------------------------------------
@@ -263,6 +271,21 @@ void SidescanCanvas::applyPendingFit()
   px_per_m_ = std::clamp((fit > 0.0 ? fit : 4.0) * 0.95, 1e-4, 500.0);
   // Stay pending: refit on every resize until the user takes the view over,
   // so the first laid-out paint (not the pre-layout ctor size) wins.
+  emit viewChanged();
+}
+
+std::optional<GeoRect> SidescanCanvas::visibleGeoRegion() const
+{
+  if (!geo_mode_ || width() <= 0 || height() <= 0) {
+    return std::nullopt;
+  }
+  const QPointF tl = screenToMap(0.0, 0.0);
+  const QPointF br = screenToMap(width(), height());
+  const auto [n_lat, w_lon] = canvasToGeo(tl.x(), tl.y());
+  const auto [s_lat, e_lon] = canvasToGeo(br.x(), br.y());
+  return GeoRect{
+    std::min(s_lat, n_lat), std::min(w_lon, e_lon),
+    std::max(s_lat, n_lat), std::max(w_lon, e_lon)};
 }
 
 // --- per-bag layers ---------------------------------------------------------
@@ -508,7 +531,8 @@ void SidescanCanvas::rebuildLayerCache()
   painter.fillRect(layer_cache_.rect(), QColor(20, 24, 28));
 
   if (geo_mode_ && !store_tile_rects_.empty()) {
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    // Nearest-neighbour on purpose: store cells must stay crisp pixels so
+    // the imagery reads at its true resolution — never bilinear-blended.
     for (std::size_t i = 0; i < store_tile_rects_.size(); ++i) {
       const auto & r = store_tile_rects_[i];
       const QPointF nw = mapToScreen(r.left(), r.top() + r.height());
@@ -519,7 +543,6 @@ void SidescanCanvas::rebuildLayerCache()
       }
       painter.drawImage(target, store_tiles_[i].image);
     }
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
   }
 
   drawGrid(painter);
@@ -550,9 +573,16 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
   }
   const bool view_matches = layer_cache_valid_ && cache_size_ == size() &&
     cache_px_per_m_ == px_per_m_ && cache_center_ == center_map_;
-  const bool pan_blit = panning_ && layer_cache_valid_ &&
-    cache_size_ == size() && cache_px_per_m_ == px_per_m_;
+  const bool stale_ok = layer_cache_valid_ && cache_size_ == size() &&
+    !cache_rebuild_due_;
+  const bool pan_blit = panning_ && stale_ok && cache_px_per_m_ == px_per_m_;
+  // A zoom step (wheel) blits the stale cache scaled about the widget centre
+  // — same slippy-map idea as the pan blit — and queues one full-quality
+  // rebuild for when the wheel settles (#26 snappiness).
+  const bool zoom_blit = stale_ok && cache_px_per_m_ > 0.0 &&
+    cache_px_per_m_ != px_per_m_;
   if (view_matches) {
+    cache_rebuild_due_ = false;   // the view came back; the cache is exact
     painter.drawPixmap(0, 0, layer_cache_);
   } else if (pan_blit) {
     painter.fillRect(rect(), QColor(20, 24, 28));
@@ -560,8 +590,26 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
       (cache_center_.x() - center_map_.x()) * px_per_m_,
       (center_map_.y() - cache_center_.y()) * px_per_m_);
     painter.drawPixmap(off, layer_cache_);
+  } else if (zoom_blit) {
+    painter.fillRect(rect(), QColor(20, 24, 28));
+    // Cache pixel p was rendered at the old view; under the new one the same
+    // map point lands at C + s*(p - C) + (cache_center - center)*px_per_m
+    // (y flipped) with s the zoom ratio — a pure transform blit.
+    const double s = px_per_m_ / cache_px_per_m_;
+    const QPointF c(width() * 0.5, height() * 0.5);
+    QTransform t;
+    t.translate(
+      c.x() + (cache_center_.x() - center_map_.x()) * px_per_m_,
+      c.y() + (center_map_.y() - cache_center_.y()) * px_per_m_);
+    t.scale(s, s);
+    t.translate(-c.x(), -c.y());
+    painter.setTransform(t);
+    painter.drawPixmap(0, 0, layer_cache_);
+    painter.resetTransform();
+    cache_settle_.start();   // one real rebuild once the wheel stops
   } else {
     rebuildLayerCache();
+    cache_rebuild_due_ = false;
     painter.drawPixmap(0, 0, layer_cache_);
   }
 
@@ -688,6 +736,27 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     painter.setBrush(QColor(0, 255, 255, 30));
     painter.drawRect(QRectF(band_start_, band_cur_).normalized());
   }
+
+  // CUBE box (#27): the persistent geographic box, plus the live shift-drag
+  // rubber band. Orange like the time arrow — the "lab focus" accents.
+  if (geo_mode_ && cube_box_geo_) {
+    const QPointF sw = geoToCanvas(cube_box_geo_->south, cube_box_geo_->west);
+    const QPointF ne = geoToCanvas(cube_box_geo_->north, cube_box_geo_->east);
+    const QPointF s_sw = mapToScreen(sw.x(), sw.y());
+    const QPointF s_ne = mapToScreen(ne.x(), ne.y());
+    QPen pen(QColor(255, 140, 0));
+    pen.setWidthF(1.5);
+    painter.setPen(pen);
+    painter.setBrush(QColor(255, 140, 0, 25));
+    painter.drawRect(QRectF(s_sw, s_ne).normalized());
+  }
+  if (cube_box_selecting_) {
+    QPen pen(QColor(255, 140, 0));
+    pen.setStyle(Qt::DashLine);
+    painter.setPen(pen);
+    painter.setBrush(QColor(255, 140, 0, 30));
+    painter.drawRect(QRectF(cube_box_start_, cube_box_cur_).normalized());
+  }
 }
 
 void SidescanCanvas::resizeEvent(QResizeEvent * event)
@@ -698,6 +767,7 @@ void SidescanCanvas::resizeEvent(QResizeEvent * event)
   if (fit_pending_ && !user_adjusted_) {
     update();
   }
+  emit viewChanged();
 }
 
 void SidescanCanvas::wheelEvent(QWheelEvent * event)
@@ -714,6 +784,7 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
   user_adjusted_ = true;
   fit_pending_ = false;
   update();
+  emit viewChanged();
 }
 
 void SidescanCanvas::mousePressEvent(QMouseEvent * event)
@@ -731,6 +802,13 @@ void SidescanCanvas::mousePressEvent(QMouseEvent * event)
     band_selecting_ = true;
     band_start_ = event->pos();
     band_cur_ = event->pos();
+    update();
+    return;
+  }
+  if ((event->modifiers() & Qt::ShiftModifier) && geo_mode_) {
+    cube_box_selecting_ = true;   // shift-drag CUBE box (#27)
+    cube_box_start_ = event->pos();
+    cube_box_cur_ = event->pos();
     update();
     return;
   }
@@ -766,6 +844,11 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
     update();
     return;
   }
+  if (cube_box_selecting_) {
+    cube_box_cur_ = event->pos();
+    update();
+    return;
+  }
   if (marking_) {
     mark_cur_ = event->pos();
     update();
@@ -785,6 +868,7 @@ void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
   if (panning_) {
     panning_ = false;
     update();   // rebuild the layer cache at the settled view
+    emit viewChanged();
   }
   if (band_selecting_) {
     band_selecting_ = false;
@@ -809,6 +893,29 @@ void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
     if (changed) {
       emit tileSelectionChanged();
     }
+    return;
+  }
+  if (cube_box_selecting_) {
+    cube_box_selecting_ = false;
+    if ((event->pos() - cube_box_start_).manhattanLength() <= 4) {
+      // A shift-click, not a drag: clear the box.
+      if (cube_box_geo_) {
+        cube_box_geo_.reset();
+        emit cubeBoxCleared();
+      }
+    } else {
+      const QPointF a = screenToMap(cube_box_start_.x(), cube_box_start_.y());
+      const QPointF b = screenToMap(event->pos().x(), event->pos().y());
+      const auto [lat_a, lon_a] = canvasToGeo(a.x(), a.y());
+      const auto [lat_b, lon_b] = canvasToGeo(b.x(), b.y());
+      cube_box_geo_ = GeoRect{
+        std::min(lat_a, lat_b), std::min(lon_a, lon_b),
+        std::max(lat_a, lat_b), std::max(lon_a, lon_b)};
+      emit cubeBoxSelected(
+        cube_box_geo_->south, cube_box_geo_->west,
+        cube_box_geo_->north, cube_box_geo_->east);
+    }
+    update();
     return;
   }
   if (!marking_) {return;}

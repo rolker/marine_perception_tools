@@ -65,6 +65,20 @@ std::vector<marine_survey_index::PassRow> SurveyIndexBridge::queryPoint(
   return marine_survey_index::queryPasses(db_, tiles, "");
 }
 
+std::vector<marine_survey_index::PassRow> SurveyIndexBridge::queryBox(
+  double south, double west, double north, double east,
+  const std::string & sensor_filter) const
+{
+  // Tile keys at every level the index holds (same reason as queryPoint).
+  std::vector<gggs::GridIndex> tiles;
+  for (const auto level_n : marine_survey_index::distinctLevels(db_, "")) {
+    const auto level_tiles = marine_survey_index::tilesForBoundingBox(
+      south, west, north, east, gggs::Level(level_n));
+    tiles.insert(tiles.end(), level_tiles.begin(), level_tiles.end());
+  }
+  return marine_survey_index::queryPasses(db_, tiles, sensor_filter);
+}
+
 std::vector<IndexedTile> SurveyIndexBridge::indexedTiles() const
 {
   // gggs::GridIndex knows its own bounds but its (level, row, col) constructor

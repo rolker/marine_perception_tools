@@ -23,8 +23,13 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QElapsedTimer>
 #include <QDoubleSpinBox>
 #include <QEvent>
+#include <QFormLayout>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -61,6 +66,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -70,11 +76,16 @@
 #include <vector>
 
 #include "basemap_contrast.hpp"
+#include "basemap_lod.hpp"
+#include "cube_bathymetry/angular_response_curve.h"
+#include "cube_export.hpp"
+#include "sidescan_drape_loader.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_contacts/contact_store.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
 #include "map_geo_anchor.hpp"
+#include "tf_lift.hpp"   // rotate_by_quat (the export anchor probe)
 #include "marine_colormap/colormap.hpp"
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
@@ -93,196 +104,6 @@ namespace marine_perception_tools
 {
 namespace
 {
-
-QString isoUtc(std::int64_t t_ns)
-{
-  return QDateTime::fromMSecsSinceEpoch(t_ns / 1000000LL, QTimeZone::utc())
-         .toString("yyyy-MM-dd HH:mm:ss");
-}
-
-// Colormap one store tile's band 0 into an RGBA image: valid values span the
-// given range, NoData stays transparent so gaps read as gaps instead of
-// painting as the deepest colour. NoData is NaN (the float stores' sentinel);
-// integer-backed stores (the sidescan composites, uint16) use 0 instead —
-// loadTile reads raw values without honoring the file's NoData metadata, so
-// the caller says which convention applies via `zero_is_nodata`.
-QImage tileToImage(
-  const marine_tiled_raster_store::TiledRasterTile<double> & tile,
-  double lo, double hi, const std::vector<marine_colormap::Rgba8> & lut,
-  bool zero_is_nodata)
-{
-  const auto & band = tile.band(0);
-  const int rows = marine_tiled_raster_store::TiledRasterTile<double>::edge;
-  const int cols = marine_tiled_raster_store::TiledRasterTile<double>::edge;
-  QImage image(cols, rows, QImage::Format_ARGB32);
-  image.fill(Qt::transparent);
-  const double span = (hi > lo) ? (hi - lo) : 1.0;
-  for (int r = 0; r < rows; ++r) {
-    // Store row 0 is the SOUTH edge (GGGS rows grow northward); QImage row 0
-    // is drawn at the TOP (north) of the target rect, so flip vertically.
-    QRgb * out = reinterpret_cast<QRgb *>(image.scanLine(rows - 1 - r));
-    for (int c = 0; c < cols; ++c) {
-      const double v = band[static_cast<std::size_t>(r) * cols + c];
-      if (std::isnan(v) || (zero_is_nodata && v == 0.0)) {
-        continue;
-      }
-      const double t = std::clamp((v - lo) / span, 0.0, 1.0);
-      const auto & rgba =
-        lut[static_cast<std::size_t>(t * static_cast<double>(lut.size() - 1) + 0.5)];
-      out[c] = qRgba(rgba.r, rgba.g, rgba.b, 255);
-    }
-  }
-  return image;
-}
-
-// One basemap layer loaded + colormapped off the UI thread (#24 basemap
-// controls). Adapted from the stage-2 overview loader with two hardenings
-// from desk verification: percentile contrast (robust_range — residual
-// outlier cells in the stores destroyed a min/max scale) and an image-memory
-// budget (the sidescan composite layer is ~1000 tiles; full-res QImages for
-// all of them would be gigabytes, so large layers decimate — still finer
-// than screen resolution at basemap zooms).
-struct BasemapLoadResult
-{
-  std::vector<OverviewTile> tiles;
-  QString note;
-};
-
-BasemapLoadResult load_basemap(
-  const std::string & dir, std::size_t palette_idx, bool zero_is_nodata)
-{
-  BasemapLoadResult out;
-
-  // The tile level is encoded in the filenames (<level>_<row>_<col>.tif). A
-  // store should hold a single level; scan every tile so we render one level
-  // deterministically (the lowest) and can warn when the directory mixes
-  // levels — otherwise the other levels vanish silently. A missing or empty
-  // directory degrades to an empty basemap.
-  std::error_code ec;
-  std::map<int, std::vector<std::string>> by_level;   // level -> tile paths
-  for (const auto & entry : std::filesystem::directory_iterator(dir, ec)) {
-    const auto name = entry.path().filename().string();
-    if (entry.path().extension() != ".tif" || name.find('_') == std::string::npos) {
-      continue;
-    }
-    try {
-      const int level = std::stoi(name.substr(0, name.find('_')));
-      // Reject non-GGGS levels here: by_level renders its LOWEST key, so one
-      // junk "-1_x_y.tif" would otherwise win level selection and blank the
-      // real tiles (gggs::Level itself throws only at load time, per tile).
-      if (level < 0 || static_cast<std::size_t>(level) >= gggs::levels.size()) {
-        continue;
-      }
-      by_level[level].push_back(entry.path().string());
-    } catch (const std::exception &) {
-      continue;
-    }
-  }
-  if (by_level.empty()) {
-    out.note = QString(" (no store tiles under %1)").arg(QString::fromStdString(dir));
-    return out;
-  }
-
-  const int level = by_level.begin()->first;   // render the lowest level
-  const auto & level_paths = by_level.begin()->second;
-
-  if (by_level.size() > 1) {
-    QStringList others;
-    for (const auto & [lvl, paths] : by_level) {
-      if (lvl != level) {
-        others << QString::number(lvl);
-      }
-    }
-    out.note += QString(" (mixed store: ignoring levels %1)").arg(others.join(", "));
-  }
-
-  // Image-memory budget: decimate per-tile images so the whole layer stays
-  // within ~256 MB of ARGB32 pixels.
-  constexpr double kImageBudgetBytes = 256.0 * 1024.0 * 1024.0;
-  const int full_edge = marine_tiled_raster_store::TiledRasterTile<double>::edge;
-  const int target_edge = std::clamp(
-    static_cast<int>(std::sqrt(
-      kImageBudgetBytes / 4.0 / static_cast<double>(level_paths.size()))),
-    32, full_edge);
-
-  // Pass 1 over tile data happens per tile (load, sample, image) — but the
-  // shared contrast range must span the whole layer, so load in two passes:
-  // sample values first, then colormap. Holding every raw tile between the
-  // passes would be gigabytes for the big layers, so tiles are re-read in
-  // pass 2; GDAL's block cache makes the second read cheap.
-  const std::size_t total_cells = level_paths.size() *
-    static_cast<std::size_t>(full_edge) * static_cast<std::size_t>(full_edge);
-  constexpr std::size_t kMaxSamples = 2000000;
-  const std::size_t stride = std::max<std::size_t>(1, total_cells / kMaxSamples);
-
-  std::vector<double> samples;
-  samples.reserve(kMaxSamples + level_paths.size());
-  int failed_tiles = 0;
-  const auto load_one = [&](const std::string & path)
-    -> std::optional<marine_tiled_raster_store::TiledRasterTile<double>> {
-      try {
-        const int band_count = marine_tiled_raster_store::tileRasterCount(path);
-        if (band_count < 1) {
-          return std::nullopt;
-        }
-        return marine_tiled_raster_store::loadTile<double>(
-          path, gggs::Level(static_cast<std::uint8_t>(level)),
-          static_cast<std::size_t>(band_count));
-      } catch (const std::exception &) {
-        return std::nullopt;
-      }
-    };
-
-  for (const auto & path : level_paths) {
-    const auto tile = load_one(path);
-    if (!tile) {
-      ++failed_tiles;   // counted once here; pass 2 skips silently
-      continue;
-    }
-    const auto & band = tile->band(0);
-    for (std::size_t i = 0; i < band.size(); i += stride) {
-      const double v = band[i];
-      if (!std::isnan(v) && !(zero_is_nodata && v == 0.0)) {
-        samples.push_back(v);
-      }
-    }
-  }
-  if (failed_tiles > 0) {
-    out.note += QString(" (%1 unreadable tile%2 skipped)")
-      .arg(failed_tiles).arg(failed_tiles == 1 ? "" : "s");
-  }
-  if (samples.empty()) {
-    out.note += " (store tiles hold no valid values)";
-    return out;
-  }
-  // Percentile contrast: residual outlier cells (pre-outlier-gate junk
-  // reaching km-scale depths) must not own the colour scale.
-  const auto [lo, hi] = robust_range(samples);
-  const auto lut = marine_colormap::bake_lut(
-    marine_colormap::palette(palette_idx), marine_colormap::TransferParams{}, 256);
-
-  out.tiles.reserve(level_paths.size());
-  for (const auto & path : level_paths) {
-    const auto tile = load_one(path);
-    if (!tile) {
-      continue;
-    }
-    OverviewTile ot;
-    ot.image = tileToImage(*tile, lo, hi, lut, zero_is_nodata);
-    if (target_edge < full_edge) {
-      ot.image = ot.image.scaled(
-        target_edge, target_edge, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    }
-    ot.south = tile->index().southLatitude();
-    ot.west = tile->index().westLongitude();
-    ot.north = tile->index().northLatitude();
-    ot.east = tile->index().eastLongitude();
-    out.tiles.push_back(std::move(ot));
-  }
-  out.note += QString(" (%1 tiles, L%2, %3–%4)")
-    .arg(out.tiles.size()).arg(level).arg(lo, 0, 'f', 1).arg(hi, 0, 'f', 1);
-  return out;
-}
 
 // Maximum slant range (≈ far ground range) of a ping's last sample, used to pad
 // the swath bounding box.
@@ -516,7 +337,8 @@ marine_sonar_widgets::WaterfallRow build_mbes_backscatter_row(const MbesWindowPi
 // thread; the caller applies the result on the UI thread.
 SidescanRenderResult render_window(
   std::shared_ptr<SidescanBagSession> session, double head, double total,
-  double win_lo, double win_hi, int max_pings, double res, int palette_index)
+  double win_lo, double win_hi, int max_pings, double res, int palette_index,
+  std::optional<std::pair<float, float>> manual_range = std::nullopt)
 {
   SidescanRenderResult out;
   out.res_m = res;
@@ -531,8 +353,10 @@ SidescanRenderResult render_window(
   if (paint.empty()) {return out;}  // ok, but a null image -> canvas clears
 
   // Shared colormap (marine_colormap, same as the rqt/rviz/CAMP apps) with an
-  // auto contrast scale from this window's backscatter distribution.
-  const auto [lo, hi] = auto_range(paint, 0.02, 0.98);
+  // auto contrast scale from this window's backscatter distribution — or the
+  // operator's manual range (#26), shared with the sidescan waterfall so the
+  // map overlay and waterfall read identically.
+  const auto [lo, hi] = manual_range ? *manual_range : auto_range(paint, 0.02, 0.98);
   const std::size_t n_pal = marine_colormap::palette_count();
   const std::size_t idx = (n_pal > 0) ?
     static_cast<std::size_t>(std::clamp(palette_index, 0, static_cast<int>(n_pal - 1))) :
@@ -642,6 +466,1097 @@ SidescanRenderResult render_window(
 }
 
 }  // namespace
+
+void SidescanViewerWindow::setupRangeControls()
+{
+  // Per-pane colour-range controls (#26): "auto" (default) or manual lo/hi
+  // spin boxes in the pane's native units; the spins enable when auto is off.
+  const auto make_range = [this](
+    RangeControls & rc, double min, double max, double step, int decimals,
+    double init_lo, double init_hi, const QString & tip) {
+      rc.auto_check = new QCheckBox("auto", this);
+      rc.auto_check->setChecked(true);
+      rc.auto_check->setToolTip(tip);
+      rc.lo = new QDoubleSpinBox(this);
+      rc.hi = new QDoubleSpinBox(this);
+      for (auto * s : {rc.lo, rc.hi}) {
+        s->setRange(min, max);
+        s->setDecimals(decimals);
+        s->setSingleStep(step);
+        s->setEnabled(false);
+        s->setToolTip(tip);
+        s->setKeyboardTracking(false);   // apply on commit, not per keystroke
+      }
+      rc.lo->setValue(init_lo);
+      rc.hi->setValue(init_hi);
+    };
+  make_range(
+    ss_range_, 0.0, 1.0, 0.02, 3, 0.0, 1.0,
+    "Sidescan colour range (normalized amplitude); also scales the map's "
+    "coverage overlay");
+  make_range(
+    bs_range_, 0.0, 1.0, 0.02, 3, 0.0, 1.0,
+    "MBES backscatter colour range (normalized amplitude)");
+  make_range(
+    wc_range_, 0.0, 1.0, 0.02, 3, 0.0, 1.0,
+    "Water-column black/white points within the buffered data extent");
+  make_range(
+    cloud_range_, -12000.0, 12000.0, 1.0, 1, -50.0, 0.0,
+    "3D cloud colour range in the active scalar's units (depth m / intensity)");
+  make_range(
+    map_range_, -12000.0, 12000.0, 1.0, 1, -50.0, 0.0,
+    "Basemap contrast range in layer units (auto = robust percentile scale)");
+
+  // Range-control wiring (#26): one applier per pane, fired by the auto
+  // toggle (which also gates the spins) and by either spin commit.
+  const auto wire_range = [this](RangeControls & rc, std::function<void()> apply) {
+      RangeControls * p = &rc;   // the member outlives every connection
+      connect(p->auto_check, &QCheckBox::toggled, this, [p, apply](bool on) {
+          p->lo->setEnabled(!on);
+          p->hi->setEnabled(!on);
+          apply();
+        });
+      connect(p->lo, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this, [p, apply](double) {if (!p->auto_check->isChecked()) {apply();}});
+      connect(p->hi, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this, [p, apply](double) {if (!p->auto_check->isChecked()) {apply();}});
+    };
+  wire_range(ss_range_, [this]() {
+      if (ss_range_.auto_check->isChecked()) {
+        waterfall_->set_auto_range(true);
+      } else {
+        waterfall_->set_auto_range(false);
+        waterfall_->set_manual_range(
+          static_cast<float>(ss_range_.lo->value()),
+          static_cast<float>(ss_range_.hi->value()));
+      }
+      requestRender();   // the map coverage overlay follows the same range
+    });
+  wire_range(bs_range_, [this]() {
+      if (bs_range_.auto_check->isChecked()) {
+        mbes_waterfall_->set_auto_range(true);
+      } else {
+        mbes_waterfall_->set_auto_range(false);
+        mbes_waterfall_->set_manual_range(
+          static_cast<float>(bs_range_.lo->value()),
+          static_cast<float>(bs_range_.hi->value()));
+      }
+    });
+  wire_range(wc_range_, [this]() {
+      const bool a = wc_range_.auto_check->isChecked();
+      echogram_->setAutoRange(a);
+      if (!a) {
+        echogram_->setBlackPoint(static_cast<float>(wc_range_.lo->value()));
+        echogram_->setWhitePoint(static_cast<float>(wc_range_.hi->value()));
+      }
+    });
+  wire_range(cloud_range_, [this]() {
+      if (cloud_range_.auto_check->isChecked()) {
+        cloud_->setScalarRange(std::nullopt);
+      } else {
+        cloud_->setScalarRange(std::pair<float, float>(
+            static_cast<float>(cloud_range_.lo->value()),
+            static_cast<float>(cloud_range_.hi->value())));
+      }
+    });
+  wire_range(map_range_, [this]() {
+      if (!basemap_lod_) {
+        return;
+      }
+      if (map_range_.auto_check->isChecked()) {
+        basemap_lod_->setRangeOverride(std::nullopt);
+      } else {
+        basemap_lod_->setRangeOverride(std::pair<double, double>(
+            map_range_.lo->value(), map_range_.hi->value()));
+      }
+    });
+}
+
+void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
+{
+  // CUBE-lab controls (#27) in their own row under the cloud pane's header:
+  // cell size, IHO order, the explicit Run trigger (CUBE is expensive — no
+  // auto-runs), and the surface's display controls.
+  cube_cell_spin_ = new QDoubleSpinBox(this);
+  cube_cell_spin_->setRange(0.02, 50.0);
+  cube_cell_spin_->setDecimals(2);
+  cube_cell_spin_->setSingleStep(0.05);
+  cube_cell_spin_->setValue(0.1);
+  cube_cell_spin_->setSuffix(" m");
+  cube_cell_spin_->setToolTip("CUBE node spacing");
+  cube_order_combo_ = new QComboBox(this);
+  for (const auto * order : {"exclusive", "special", "order1a", "order1b", "order2"}) {
+    cube_order_combo_->addItem(order);
+  }
+  cube_order_combo_->setCurrentText("order1a");
+  cube_order_combo_->setToolTip("IHO order (CUBE capture/hypothesis limits)");
+  cube_run_btn_ = new QPushButton("Run CUBE", this);
+  cube_run_btn_->setEnabled(false);   // until a shift-drag box exists
+  cube_run_btn_->setToolTip(
+    "Gather every MBES sounding in the shift-drag map box and CUBE it "
+    "at the chosen cell size");
+  cube_tuning_ = default_cube_tuning();
+  {
+    // The ARA curve path survives sessions (a per-sonar file, not a knob
+    // you want to re-browse every start).
+    const QSettings settings("UNH-CCOM", "survey_explorer");
+    cube_tuning_.ara_curve_path =
+      settings.value("ara_curve_path").toString().toStdString();
+  }
+  cube_params_btn_ = new QPushButton("params…", this);
+  cube_params_btn_->setToolTip(
+    "CUBE algorithm parameters (capture scale, median filter, intervention "
+    "thresholds, extractor) — applied on the next Run CUBE");
+  cube_selfcal_btn_ = new QPushButton("self-cal BS", this);
+  cube_selfcal_btn_->setEnabled(false);   // needs a completed run's beams
+  cube_selfcal_btn_->setToolTip(
+    "Derive the angular-response curve from THIS box's own beams (TL-removed, "
+    "2-degree bins), save it as a curve CSV, adopt it and re-run — flattens "
+    "whatever gain behaviour the sonar actually has, by construction");
+  cube_points_check_ = new QCheckBox("points", this);
+  cube_points_check_->setChecked(true);
+  cube_points_check_->setToolTip("Show/hide the point cloud");
+  cube_surf_check_ = new QCheckBox("surface", this);
+  cube_surf_check_->setChecked(true);
+  cube_alpha_spin_ = new QDoubleSpinBox(this);
+  cube_alpha_spin_->setRange(0.05, 1.0);
+  cube_alpha_spin_->setDecimals(2);
+  cube_alpha_spin_->setSingleStep(0.1);
+  cube_alpha_spin_->setValue(1.0);
+  cube_alpha_spin_->setToolTip("Surface opacity");
+  cube_shade_combo_ = new QComboBox(this);
+  cube_shade_combo_->addItems({"Depth", "Uncertainty", "Backscatter", "Sidescan"});
+  cube_shade_combo_->setToolTip(
+    "Surface colouring: depth, CUBE uncertainty, CUBE-settled backscatter, "
+    "or the draped sidescan pass (pick one in the drape combo)");
+  cube_drape_combo_ = new QComboBox(this);
+  cube_drape_combo_->addItem("drape: none");
+  cube_drape_combo_->setToolTip(
+    "Sidescan pass to drape onto the surface (passes crossing the box; "
+    "port + starboard of the same interval drape together). Single pass by "
+    "design — blending kills shadows.");
+  cube_range_score_combo_ = new QComboBox(this);
+  cube_range_score_combo_->addItems({"near wins", "mid-range wins"});
+  cube_range_score_combo_->setToolTip(
+    "Range half of the drape quality score: near wins = closest samples "
+    "outrank (best resolution, favours nadir); mid-range wins = the score "
+    "peaks mid-swath, penalising nadir distortion AND the far edge (the "
+    "classic mosaicking preference)");
+  cube_mesh_combo_ = new QComboBox(this);
+  cube_mesh_combo_->addItems({"crisp cells", "stepped cells", "blended"});
+  cube_mesh_combo_->setToolTip(
+    "Surface rendering: crisp cells = one unblended texel per CUBE node on "
+    "a smooth watertight relief (the default); stepped cells = the fully "
+    "literal view, each node a flat plateau at its own depth; blended = "
+    "conventional Gouraud-interpolated colours.");
+  cube_srange_.auto_check = new QCheckBox("auto", this);
+  cube_srange_.auto_check->setChecked(true);
+  cube_srange_.lo = new QDoubleSpinBox(this);
+  cube_srange_.hi = new QDoubleSpinBox(this);
+  for (auto * s : {cube_srange_.lo, cube_srange_.hi}) {
+    s->setRange(-12000.0, 12000.0);
+    s->setDecimals(2);
+    s->setSingleStep(0.5);
+    s->setEnabled(false);
+    s->setKeyboardTracking(false);
+  }
+  const QString srange_tip =
+    "Surface colour range in the ACTIVE shade's units (depth m, "
+    "uncertainty m, backscatter dB, sidescan amplitude). Auto shows the "
+    "computed range in the spins.";
+  cube_srange_.auto_check->setToolTip(srange_tip);
+  cube_srange_.lo->setToolTip(srange_tip);
+  cube_srange_.hi->setToolTip(srange_tip);
+  cube_palette_ = new QComboBox(this);
+  for (const auto & name : marine_colormap::palette_names()) {
+    cube_palette_->addItem(QString::fromStdString(name));
+  }
+  if (const auto vi = marine_colormap::palette_index("bronze")) {
+    cube_palette_->setCurrentIndex(static_cast<int>(*vi));
+  }
+  cube_palette_->setToolTip(
+    "Surface palette — independent of the point cloud's, so cloud and "
+    "surface can contrast");
+
+  auto * row = new QHBoxLayout();
+  row->setContentsMargins(2, 0, 2, 0);
+  row->addWidget(new QLabel("CUBE:", this));
+  row->addWidget(cube_cell_spin_);
+  row->addWidget(cube_order_combo_);
+  row->addWidget(cube_params_btn_);
+  row->addWidget(cube_run_btn_);
+  row->addWidget(cube_selfcal_btn_);
+  row->addStretch(1);
+  row->addWidget(cube_points_check_);
+  row->addWidget(cube_surf_check_);
+  row->addWidget(cube_alpha_spin_);
+  row->addWidget(cube_shade_combo_);
+  row->addWidget(cube_srange_.auto_check);
+  row->addWidget(cube_srange_.lo);
+  row->addWidget(cube_srange_.hi);
+  row->addWidget(cube_palette_);
+  row->addWidget(cube_drape_combo_);
+  row->addWidget(cube_range_score_combo_);
+  row->addWidget(cube_mesh_combo_);
+  // make_pane builds a QVBoxLayout(header, view); the lab row slots between.
+  if (auto * v = qobject_cast<QVBoxLayout *>(cloud_pane->layout())) {
+    v->insertLayout(1, row);
+  }
+
+  connect(cube_run_btn_, &QPushButton::clicked, this, [this]() {runCubeLab();});
+  connect(cube_selfcal_btn_, &QPushButton::clicked,
+    this, [this]() {selfCalibrateBackscatter();});
+  connect(cube_params_btn_, &QPushButton::clicked, this, [this]() {
+      // Modal CUBE-parameter editor, seeded from the current tuning; the
+      // Defaults button restores the library's own values. Nothing re-runs
+      // automatically — the next Run CUBE picks the tuning up.
+      QDialog dialog(this);
+      dialog.setWindowTitle("CUBE parameters");
+      auto * form = new QFormLayout(&dialog);
+      const auto make_dspin = [&dialog](
+        double min, double max, double step, int decimals, double value) {
+        auto * s = new QDoubleSpinBox(&dialog);
+        s->setRange(min, max);
+        s->setSingleStep(step);
+        s->setDecimals(decimals);
+        s->setValue(value);
+        return s;
+      };
+      const auto make_ispin = [&dialog](int min, int max, int value) {
+        auto * s = new QSpinBox(&dialog);
+        s->setRange(min, max);
+        s->setValue(value);
+        return s;
+      };
+      auto * capture = make_dspin(
+        0.001, 2.0, 0.01, 3, cube_tuning_.capture_distance_scale);
+      capture->setToolTip(
+        "Scale on depth for how far out a sounding is accepted "
+        "(hydrography ~0.05; larger for sparse/flat areas)");
+      auto * median = make_ispin(
+        1, 101, static_cast<int>(cube_tuning_.median_length));
+      median->setToolTip("Median pre-filter sort queue length");
+      auto * quotient = make_dspin(1.0, 255.0, 1.0, 1, cube_tuning_.quotient_limit);
+      quotient->setToolTip("Outlier quotient upper allowable limit");
+      auto * discount = make_dspin(0.5, 1.0, 0.01, 2, cube_tuning_.discount);
+      discount->setToolTip("Discount factor for evolution noise variance");
+      auto * offset = make_dspin(0.1, 20.0, 0.5, 1, cube_tuning_.estimate_offset);
+      offset->setToolTip(
+        "Offset from the current estimate (in std devs) that warrants a "
+        "new-hypothesis intervention");
+      auto * bayes = make_dspin(
+        0.001, 10.0, 0.01, 3, cube_tuning_.bayes_factor_threshold);
+      bayes->setToolTip("Bayes factor threshold for an intervention");
+      auto * runlen = make_ispin(
+        1, 100, static_cast<int>(cube_tuning_.runlength_threshold));
+      runlen->setToolTip("Run-length threshold for a drift intervention");
+      auto * extractor = new QComboBox(&dialog);
+      extractor->addItems({"prior (sample count)", "lhood (spatial context)",
+        "posterior (combined)"});
+      extractor->setCurrentIndex(std::clamp(cube_tuning_.extractor, 0, 2));
+      extractor->setToolTip("Multi-hypothesis disambiguation method");
+      auto * ara_path = new QLineEdit(
+        QString::fromStdString(cube_tuning_.ara_curve_path), &dialog);
+      ara_path->setPlaceholderText("(none — raw intensities)");
+      ara_path->setToolTip(
+        "Per-sonar angular-response curve CSV (cube#81); corrects the "
+        "CUBE-settled backscatter for beam angle (removes the bright-nadir "
+        "bias). Tier-2 TL terms come from the CSV header.");
+      ara_path->setMinimumWidth(280);
+      auto * ara_browse = new QPushButton("…", &dialog);
+      connect(ara_browse, &QPushButton::clicked, &dialog, [&dialog, ara_path]() {
+        const QString start = ara_path->text().isEmpty() ?
+        QDir::homePath() + "/data/logs/analysis" :
+        QFileInfo(ara_path->text()).absolutePath();
+        const QString f = QFileDialog::getOpenFileName(
+            &dialog, "Angular-response curve", start, "CSV (*.csv);;All (*)");
+        if (!f.isEmpty()) {ara_path->setText(f);}
+        });
+      auto * ara_row = new QWidget(&dialog);
+      auto * ara_lay = new QHBoxLayout(ara_row);
+      ara_lay->setContentsMargins(0, 0, 0, 0);
+      ara_lay->addWidget(ara_path, 1);
+      ara_lay->addWidget(ara_browse);
+      auto * max_nodes = make_dspin(
+        0.1, 1000000.0, 10.0, 1,
+        static_cast<double>(cube_tuning_.max_nodes) / 1e6);
+      max_nodes->setSuffix(" M nodes");
+      max_nodes->setToolTip(
+        "Largest grid a run may allocate before asking (baseline ~20 B/node "
+        "+ per-populated-node CUBE state; 100 M ≈ 2 GB). The run "
+        "confirmation can override this per run.");
+      form->addRow("Capture distance scale", capture);
+      form->addRow("Median filter length", median);
+      form->addRow("Outlier quotient limit", quotient);
+      form->addRow("Evolution discount", discount);
+      form->addRow("Intervention offset (σ)", offset);
+      form->addRow("Bayes factor threshold", bayes);
+      form->addRow("Run-length threshold", runlen);
+      form->addRow("Extractor", extractor);
+      form->addRow("ARA curve CSV", ara_row);
+      form->addRow("Max grid nodes", max_nodes);
+      auto * buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel |
+        QDialogButtonBox::RestoreDefaults, &dialog);
+      form->addRow(buttons);
+      connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+      connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+      connect(
+        buttons->button(QDialogButtonBox::RestoreDefaults),
+        &QPushButton::clicked, &dialog, [&]() {
+          const CubeTuning d = default_cube_tuning();
+          capture->setValue(d.capture_distance_scale);
+          median->setValue(static_cast<int>(d.median_length));
+          quotient->setValue(d.quotient_limit);
+          discount->setValue(d.discount);
+          offset->setValue(d.estimate_offset);
+          bayes->setValue(d.bayes_factor_threshold);
+          runlen->setValue(static_cast<int>(d.runlength_threshold));
+          extractor->setCurrentIndex(std::clamp(d.extractor, 0, 2));
+          max_nodes->setValue(static_cast<double>(d.max_nodes) / 1e6);
+          ara_path->clear();
+        });
+      if (dialog.exec() != QDialog::Accepted) {
+        return;
+      }
+      cube_tuning_.capture_distance_scale =
+      static_cast<float>(capture->value());
+      cube_tuning_.median_length = static_cast<std::uint32_t>(median->value());
+      cube_tuning_.quotient_limit = static_cast<float>(quotient->value());
+      cube_tuning_.discount = static_cast<float>(discount->value());
+      cube_tuning_.estimate_offset = static_cast<float>(offset->value());
+      cube_tuning_.bayes_factor_threshold = static_cast<float>(bayes->value());
+      cube_tuning_.runlength_threshold =
+      static_cast<std::uint32_t>(runlen->value());
+      cube_tuning_.extractor = extractor->currentIndex();
+      cube_tuning_.max_nodes =
+      static_cast<std::uint64_t>(max_nodes->value() * 1e6);
+      cube_tuning_.ara_curve_path = ara_path->text().toStdString();
+      {
+        QSettings settings("UNH-CCOM", "survey_explorer");
+        settings.setValue(
+          "ara_curve_path", QString::fromStdString(cube_tuning_.ara_curve_path));
+      }
+      status_->setText("CUBE parameters updated — press Run CUBE to apply.");
+    });
+  connect(cube_points_check_, &QCheckBox::toggled,
+    this, [this](bool on) {cloud_->setPointsVisible(on);});
+  connect(cube_surf_check_, &QCheckBox::toggled,
+    this, [this](bool on) {cloud_->setSurfaceVisible(on);});
+  connect(
+    cube_alpha_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, [this](double a) {cloud_->setSurfaceAlpha(static_cast<float>(a));});
+  connect(cube_shade_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {refreshCubeSurface();});
+  connect(cube_mesh_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {refreshCubeSurface();});
+  connect(cube_srange_.auto_check, &QCheckBox::toggled, this, [this](bool on) {
+      cube_srange_.lo->setEnabled(!on);
+      cube_srange_.hi->setEnabled(!on);
+      refreshCubeSurface();
+    });
+  connect(cube_srange_.lo, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, [this](double) {
+      if (!cube_srange_.auto_check->isChecked()) {refreshCubeSurface();}
+    });
+  connect(cube_srange_.hi, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+    this, [this](double) {
+      if (!cube_srange_.auto_check->isChecked()) {refreshCubeSurface();}
+    });
+  connect(cube_palette_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {refreshCubeSurface();});
+  connect(
+    cube_range_score_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int) {requestDrape();});   // re-march with the new score
+  connect(cube_drape_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    this, [this](int idx) {
+      if (idx <= 0) {
+        cube_drape_ = SidescanDrape{};
+        cube_drape_terrain_ = CubeSurface{};
+        refreshCubeSurface();
+        return;
+      }
+      requestDrape();
+    });
+  connect(&drape_watcher_, &QFutureWatcher<DrapeTicket>::finished, this, [this]() {
+      DrapeTicket ticket = drape_watcher_.result();
+      if (ticket.generation != drape_gen_) {
+        return;   // a newer drape (or a new CUBE run) superseded this one
+      }
+      cube_drape_ = std::move(ticket.drape);
+      cube_drape_terrain_ = std::move(ticket.terrain);
+      refreshCubeSurface();
+      std::size_t painted = 0;
+      for (const auto & a : cube_drape_.amplitude) {
+        if (std::isfinite(a)) {
+          ++painted;
+        }
+      }
+      status_->setText(QString("Drape: %1 pings, %2 cells painted, in %3 s%4")
+      .arg(cube_drape_.pings_used)
+      .arg(painted)
+      .arg(ticket.elapsed_ms / 1000.0, 0, 'f', 1)
+      .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
+    });
+  connect(&cube_watcher_, &QFutureWatcher<CubeLabTicket>::finished, this, [this]() {
+      CubeLabTicket ticket = cube_watcher_.result();
+      if (ticket.generation != cube_gen_) {
+        return;   // a newer run superseded this one
+      }
+      cube_surface_ = std::move(ticket.surface);
+      if (!cube_surface_.ok()) {
+        cloud_->clearSurface();
+        status_->setText(QString("CUBE: %1%2")
+        .arg(QString::fromStdString(cube_surface_.note))
+        .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
+        cube_run_btn_->setEnabled(cube_box_.has_value());
+        return;
+      }
+      // The lab owns the cloud pane now: plain points in the same frame as
+      // the surface, scalar modes + range controls live.
+      selection_cloud_ = false;
+      ++cloud_gen_;   // any tile-selection load in flight is stale
+      cloud_legend_->clear();
+      cloud_legend_->setVisible(false);
+      cloud_color_combo_->setEnabled(true);
+      cloud_->setColorMode(
+        cloud_color_combo_->currentIndex() == 1 ?
+        PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
+      cloud_->setPoints(ticket.soundings);
+      cube_soundings_ = std::move(ticket.soundings);   // self-cal input
+      cube_selfcal_btn_->setEnabled(!cube_soundings_.empty());
+      // The drape frame follows the CUBE load: remember the reference and
+      // re-offer the box's sidescan passes; any previous drape is stale.
+      cube_ref_bag_ = ticket.ref_bag;
+      cube_ref_has_geo_ = ticket.ref_has_geo;
+      cube_ref_anchor_ = ticket.ref_earth_from_world;
+      ++drape_gen_;
+      cube_drape_ = SidescanDrape{};
+      cube_drape_terrain_ = CubeSurface{};
+      populateDrapePasses();
+      refreshCubeSurface();
+      status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5")
+      .arg(cube_surface_.cell_m)
+      .arg(cube_surface_.soundings_in)
+      .arg(QString::fromStdString(cube_surface_.note))
+      .arg(ticket.elapsed_ms / 1000.0, 0, 'f', 1)
+      .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
+      cube_run_btn_->setEnabled(cube_box_.has_value());
+    });
+
+  connect(canvas_, &SidescanCanvas::cubeBoxSelected, this,
+    [this](double s, double w, double n, double e) {
+      cube_box_ = GeoRect{s, w, n, e};
+      cube_run_btn_->setEnabled(true);
+      constexpr double kMetersPerDegLat = 111320.0;
+      const double h_m = (n - s) * kMetersPerDegLat;
+      const double w_m = (e - w) * kMetersPerDegLat *
+      std::max(0.01, std::cos(0.5 * (s + n) * M_PI / 180.0));
+      status_->setText(QString("CUBE box: %1 x %2 m — press Run CUBE.")
+      .arg(w_m, 0, 'f', 0).arg(h_m, 0, 'f', 0));
+    });
+  connect(canvas_, &SidescanCanvas::cubeBoxCleared, this, [this]() {
+      cube_box_.reset();
+      cube_run_btn_->setEnabled(false);
+      status_->setText("CUBE box cleared.");
+    });
+}
+
+void SidescanViewerWindow::selfCalibrateBackscatter()
+{
+  if (cube_soundings_.empty()) {
+    status_->setText("Self-cal: run CUBE first — no beams held.");
+    return;
+  }
+  // Compose with the same absorption the currently-loaded curve uses (the
+  // derive and the apply must share alpha); no curve -> 0 (self-consistent).
+  double alpha = 0.0;
+  if (!cube_tuning_.ara_curve_path.empty()) {
+    try {
+      alpha = cube::loadAngularResponseCurveWithHeader(
+        cube_tuning_.ara_curve_path).absorption_db_per_m;
+    } catch (const std::exception &) {
+    }
+  }
+  const QString path = QFileDialog::getSaveFileName(
+    this, "Save box self-calibrated ARA curve",
+    QDir::homePath() + "/data/logs/analysis/box_selfcal.csv",
+    "CSV (*.csv)");
+  if (path.isEmpty()) {
+    return;
+  }
+  const std::string err =
+    derive_box_curve(cube_soundings_, alpha, path.toStdString());
+  if (!err.empty()) {
+    QMessageBox::warning(
+      this, "Self-calibrate backscatter", QString::fromStdString(err));
+    return;
+  }
+  cube_tuning_.ara_curve_path = path.toStdString();
+  {
+    QSettings settings("UNH-CCOM", "survey_explorer");
+    settings.setValue("ara_curve_path", path);
+  }
+  status_->setText(
+    QString("Self-cal curve written to %1 — re-running CUBE with it.")
+    .arg(path));
+  runCubeLab();
+}
+
+void SidescanViewerWindow::runCubeLab()
+{
+  if (!bridge_ || !cube_box_) {
+    return;
+  }
+  std::vector<marine_survey_index::PassRow> rows;
+  try {
+    rows = bridge_->queryBox(
+      cube_box_->south, cube_box_->west, cube_box_->north, cube_box_->east,
+      "mbes-bathy");
+  } catch (const std::exception & e) {
+    status_->setText(QString("CUBE pass query failed: %1").arg(e.what()));
+    return;
+  }
+  std::vector<CloudPassInfo> passes;
+  for (const auto & p : coalescePasses(rows)) {
+    CloudPassInfo info;
+    info.bag_path = p.bag_path;
+    info.t_start_ns = p.t_start_ns;
+    info.t_end_ns = p.t_end_ns;
+    info.label = passLabel(p.t_start_ns, p.bag_path);
+    passes.push_back(std::move(info));
+  }
+  if (passes.empty()) {
+    status_->setText("CUBE: no MBES passes intersect the box.");
+    return;
+  }
+
+  // Load clip: the geographic box about its centre (evaluated per pass in
+  // its own world frame; the loader's ENU-alignment assumption).
+  constexpr double kMetersPerDegLat = 111320.0;
+  GeoClip clip;
+  clip.lat = 0.5 * (cube_box_->south + cube_box_->north);
+  clip.lon = 0.5 * (cube_box_->west + cube_box_->east);
+  clip.alt = 0.0;
+  clip.half_north_m =
+    0.5 * (cube_box_->north - cube_box_->south) * kMetersPerDegLat;
+  clip.half_east_m = 0.5 * (cube_box_->east - cube_box_->west) *
+    kMetersPerDegLat * std::max(0.01, std::cos(clip.lat * M_PI / 180.0));
+
+  const double cell_m = cube_cell_spin_->value();
+  const std::string order = cube_order_combo_->currentText().toStdString();
+  CubeTuning tuning = cube_tuning_;
+  // Pre-flight grid estimate from the box itself (known before any loading):
+  // over the operator's max-nodes limit, ask — with the real numbers — and
+  // let them run anyway (one-shot override; the limit itself is editable in
+  // params…). Never a silent refusal.
+  {
+    const double est_nx = 2.0 * clip.half_east_m / cell_m + 3.0;
+    const double est_ny = 2.0 * clip.half_north_m / cell_m + 3.0;
+    const double est_nodes = est_nx * est_ny;
+    if (est_nodes > static_cast<double>(tuning.max_nodes)) {
+      const double base_gb = est_nodes * 20.0 / 1e9;
+      const auto answer = QMessageBox::question(
+        this, "Large CUBE grid",
+        QString("This box at %1 m cells needs a ~%2 x %3 node grid "
+        "(~%4 nodes, roughly %5 GB baseline before per-node CUBE state) — "
+        "over the max-nodes limit of %6 set in params….\n\nRun anyway?")
+        .arg(cell_m)
+        .arg(static_cast<qulonglong>(est_nx))
+        .arg(static_cast<qulonglong>(est_ny))
+        .arg(static_cast<qulonglong>(est_nodes))
+        .arg(base_gb, 0, 'f', 1)
+        .arg(static_cast<qulonglong>(tuning.max_nodes)),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+      if (answer != QMessageBox::Yes) {
+        status_->setText("CUBE run cancelled (grid over the max-nodes limit).");
+        return;
+      }
+      tuning.max_nodes = static_cast<std::uint64_t>(est_nodes * 2.0) + 1;
+    }
+  }
+  ++cube_gen_;
+  const auto gen = cube_gen_;
+  cube_run_btn_->setEnabled(false);
+  status_->setText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
+    .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
+  cube_watcher_.setFuture(
+    QtConcurrent::run([passes, clip, cell_m, order, tuning, gen]() {
+      CubeLabTicket ticket;
+      ticket.generation = gen;
+      QElapsedTimer timer;
+      timer.start();
+      try {
+        auto outcome = load_cloud_passes(passes, clip);
+        ticket.notes = std::move(outcome.notes);
+        ticket.ref_bag = outcome.ref_bag;
+        ticket.ref_has_geo = outcome.ref_has_geo;
+        ticket.ref_earth_from_world = outcome.ref_earth_from_world;
+        std::size_t total = 0;
+        for (const auto & pc : outcome.pass_clouds) {
+          total += pc.size();
+        }
+        ticket.soundings.reserve(total);
+        for (auto & pc : outcome.pass_clouds) {
+          ticket.soundings.insert(ticket.soundings.end(), pc.begin(), pc.end());
+        }
+        ticket.surface = run_cube(ticket.soundings, cell_m, order, tuning);
+      } catch (const std::exception & e) {
+        ticket.surface = CubeSurface{};
+        ticket.surface.note = e.what();
+      }
+      ticket.elapsed_ms = timer.elapsed();
+      return ticket;
+    }));
+}
+
+void SidescanViewerWindow::refreshCubeSurface()
+{
+  if (!cube_surface_.ok()) {
+    cloud_->clearSurface();
+    return;
+  }
+  const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const int style_i = cube_mesh_combo_ ? cube_mesh_combo_->currentIndex() : 0;
+  const CubeMeshStyle style =
+    (style_i == 1) ? CubeMeshStyle::CrispStepped :
+    (style_i == 2) ? CubeMeshStyle::Blended : CubeMeshStyle::CrispSmooth;
+
+  // Sidescan shade (#29): colour each node from the drape — painted cells
+  // through the SIDESCAN pane's palette + range (so drape and waterfall read
+  // identically), acoustic shadows near-black, ensonified-but-unseen nodes
+  // dim grey (the relief stays legible).
+  if (shade_i == 3) {
+    // The drape rides its own extended terrain (surface grown to the
+    // swath); fall back to the CUBE surface for pre-terrain drapes.
+    const CubeSurface & terrain =
+      cube_drape_terrain_.ok() ? cube_drape_terrain_ : cube_surface_;
+    const std::size_t n_nodes =
+      static_cast<std::size_t>(terrain.nx) *
+      static_cast<std::size_t>(terrain.ny);
+    if (!cube_drape_.ok() ||
+      cube_drape_.amplitude.size() != n_nodes)
+    {
+      status_->setText(
+        "Sidescan shade: pick a pass in the drape combo (and re-run after a "
+        "new CUBE).");
+      cloud_->clearSurface();
+      return;
+    }
+    const auto ss_lut = marine_colormap::bake_lut(
+      marine_colormap::palette(static_cast<std::size_t>(
+        std::max(0, sidescan_cmap_->currentIndex()))),
+      marine_colormap::TransferParams{}, 256);
+    float lo = 0.0f;
+    float hi = 1.0f;
+    if (cube_srange_.auto_check && !cube_srange_.auto_check->isChecked()) {
+      // The CUBE row's own range outranks everything.
+      lo = static_cast<float>(cube_srange_.lo->value());
+      hi = static_cast<float>(cube_srange_.hi->value());
+    } else if (ss_range_.auto_check && !ss_range_.auto_check->isChecked()) {
+      lo = static_cast<float>(ss_range_.lo->value());
+      hi = static_cast<float>(ss_range_.hi->value());
+    } else {
+      // Auto: robust percentiles of the painted amplitudes (the stores'
+      // contrast convention — outliers must not own the ramp).
+      std::vector<double> samples;
+      samples.reserve(cube_drape_.amplitude.size());
+      for (const auto a : cube_drape_.amplitude) {
+        if (std::isfinite(a)) {
+          samples.push_back(a);
+        }
+      }
+      const auto [rlo, rhi] = robust_range(samples);
+      lo = static_cast<float>(rlo);
+      hi = static_cast<float>(rhi);
+      if (!(hi > lo)) {
+        lo = 0.0f;
+        hi = 1.0f;
+      }
+    }
+    const float span = (hi > lo) ? (hi - lo) : 1.0f;
+    // Colour per node; interpolated terrain that the pass never touched is
+    // a HOLE (invented bathymetry must never render as relief), while
+    // measured-but-unseen nodes stay dim grey. isfinite(uncertainty) is
+    // the measured flag (extend_surface_for_drape leaves it NaN on fills).
+    CubeSurface render = terrain;
+    std::vector<float> node_rgb(n_nodes * 3, 0.25f);   // unseen = dim grey
+    for (std::size_t i = 0; i < n_nodes; ++i) {
+      const float a = cube_drape_.amplitude[i];
+      const bool measured = std::isfinite(terrain.uncertainty[i]);
+      if (std::isfinite(a)) {
+        const float t = std::clamp((a - lo) / span, 0.0f, 1.0f);
+        const auto & c = ss_lut[static_cast<std::size_t>(
+              t * static_cast<float>(ss_lut.size() - 1) + 0.5f)];
+        node_rgb[i * 3] = c.r / 255.0f;
+        node_rgb[i * 3 + 1] = c.g / 255.0f;
+        node_rgb[i * 3 + 2] = c.b / 255.0f;
+      } else if (cube_drape_.shadow[i]) {
+        node_rgb[i * 3] = 0.05f;   // acoustic shadow: near-black
+        node_rgb[i * 3 + 1] = 0.05f;
+        node_rgb[i * 3 + 2] = 0.05f;
+      } else if (!measured) {
+        render.depth[i] = std::nanf("");   // no data, no invented relief
+      }
+    }
+    auto mesh = build_cube_mesh_colored(render, node_rgb, style);
+    cloud_->setSurface(
+      std::move(mesh.positions), std::move(mesh.colors),
+      std::move(mesh.indices));
+    if (cube_srange_.auto_check && cube_srange_.auto_check->isChecked()) {
+      cube_srange_.lo->blockSignals(true);
+      cube_srange_.hi->blockSignals(true);
+      cube_srange_.lo->setValue(lo);
+      cube_srange_.hi->setValue(hi);
+      cube_srange_.lo->blockSignals(false);
+      cube_srange_.hi->blockSignals(false);
+    }
+    return;
+  }
+
+  const CubeShade shade =
+    (shade_i == 1) ? CubeShade::Uncertainty :
+    (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
+  const std::size_t n_pal = marine_colormap::palette_count();
+  const auto pal_i = (n_pal > 0) ?
+    static_cast<std::size_t>(std::clamp(
+      cube_palette_ ? cube_palette_->currentIndex() : 0, 0,
+      static_cast<int>(n_pal - 1))) : 0;
+  const auto lut = marine_colormap::bake_lut(
+    marine_colormap::palette(pal_i), marine_colormap::TransferParams{}, 256);
+  std::optional<std::pair<float, float>> range;
+  if (cube_srange_.auto_check && !cube_srange_.auto_check->isChecked()) {
+    range = std::pair<float, float>(
+      static_cast<float>(cube_srange_.lo->value()),
+      static_cast<float>(cube_srange_.hi->value()));
+  }
+  auto mesh = build_cube_mesh(cube_surface_, shade, lut, style, range);
+  if (cube_srange_.auto_check && cube_srange_.auto_check->isChecked()) {
+    cube_srange_.lo->blockSignals(true);
+    cube_srange_.hi->blockSignals(true);
+    cube_srange_.lo->setValue(mesh.scalar_lo);
+    cube_srange_.hi->setValue(mesh.scalar_hi);
+    cube_srange_.lo->blockSignals(false);
+    cube_srange_.hi->blockSignals(false);
+  }
+  cloud_->setSurface(
+    std::move(mesh.positions), std::move(mesh.colors), std::move(mesh.indices));
+}
+
+std::optional<MapGeoAffine> SidescanViewerWindow::cubeSurfaceAnchor() const
+{
+  if (!cube_ref_has_geo_ || !cube_surface_.ok()) {
+    return std::nullopt;
+  }
+  // Probe world->geo through the reference earth anchor at the surface's
+  // mean depth (the vertical offset moves lat/lon by ~nothing but keeps the
+  // ECEF conversion honest).
+  double z_sum = 0.0;
+  std::size_t z_cnt = 0;
+  for (const float d : cube_surface_.depth) {
+    if (std::isfinite(d)) {
+      z_sum += d;
+      ++z_cnt;
+    }
+  }
+  const double z0 = (z_cnt > 0) ? z_sum / static_cast<double>(z_cnt) : 0.0;
+  const auto & t = cube_ref_anchor_.transform;
+  return probe_map_anchor(
+    [&t, z0](double x, double y, double & lat, double & lon, double & alt) {
+      double ex = 0.0;
+      double ey = 0.0;
+      double ez = 0.0;
+      rotate_by_quat(
+        t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w,
+        x, y, z0, ex, ey, ez);
+      ecef_to_geodetic(
+        ex + t.translation.x, ey + t.translation.y, ez + t.translation.z,
+        lat, lon, alt);
+      return true;
+    });
+}
+
+void SidescanViewerWindow::onExportSurfaceData()
+{
+  if (!cube_surface_.ok()) {
+    status_->setText("Export: run CUBE first — no surface yet.");
+    return;
+  }
+  const auto anchor = cubeSurfaceAnchor();
+  if (!anchor) {
+    QMessageBox::warning(
+      this, "Export CUBE surface",
+      "No geographic anchor for the surface's frame — cannot georeference "
+      "the GeoTIFF (the CUBE load had no earth reference).");
+    return;
+  }
+  const QString path = QFileDialog::getSaveFileName(
+    this, "Export CUBE surface (data bands)", "cube_surface.tif",
+    "GeoTIFF (*.tif)");
+  if (path.isEmpty()) {
+    return;
+  }
+  const std::string err = write_cube_geotiff_float(
+    cube_surface_, *anchor, path.toStdString());
+  if (!err.empty()) {
+    QMessageBox::warning(
+      this, "Export CUBE surface", QString::fromStdString(err));
+    return;
+  }
+  status_->setText(QString(
+      "Exported %1x%2 nodes (depth/uncertainty/backscatter Float32) to %3")
+    .arg(cube_surface_.nx).arg(cube_surface_.ny).arg(path));
+}
+
+void SidescanViewerWindow::onExportSurfaceRgba()
+{
+  if (!cube_surface_.ok()) {
+    status_->setText("Export: run CUBE first — no surface yet.");
+    return;
+  }
+  const auto anchor = cubeSurfaceAnchor();
+  if (!anchor) {
+    QMessageBox::warning(
+      this, "Export CUBE surface",
+      "No geographic anchor for the surface's frame — cannot georeference "
+      "the GeoTIFF (the CUBE load had no earth reference).");
+    return;
+  }
+  // Render the ACTIVE shade to per-node RGBA, mirroring refreshCubeSurface:
+  // alpha 0 = hole (unestimated; or, in the Sidescan shade, interpolated
+  // terrain the pass never touched).
+  const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const CubeSurface * srf = &cube_surface_;
+  const std::size_t n_scalar =
+    static_cast<std::size_t>(cube_surface_.nx) *
+    static_cast<std::size_t>(cube_surface_.ny);
+  std::vector<std::uint8_t> rgba;
+  if (shade_i == 3) {
+    const CubeSurface & terrain =
+      cube_drape_terrain_.ok() ? cube_drape_terrain_ : cube_surface_;
+    const std::size_t n =
+      static_cast<std::size_t>(terrain.nx) *
+      static_cast<std::size_t>(terrain.ny);
+    if (!cube_drape_.ok() || cube_drape_.amplitude.size() != n) {
+      status_->setText("Export: no drape yet — pick a pass first.");
+      return;
+    }
+    srf = &terrain;
+    const auto ss_lut = marine_colormap::bake_lut(
+      marine_colormap::palette(static_cast<std::size_t>(
+        std::max(0, sidescan_cmap_->currentIndex()))),
+      marine_colormap::TransferParams{}, 256);
+    float lo = static_cast<float>(cube_srange_.lo->value());
+    float hi = static_cast<float>(cube_srange_.hi->value());
+    if (!(hi > lo)) {
+      lo = 0.0f;
+      hi = 1.0f;
+    }
+    const float span = hi - lo;
+    rgba.assign(n * 4, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+      const float a = cube_drape_.amplitude[i];
+      const bool measured = std::isfinite(terrain.uncertainty[i]);
+      if (std::isfinite(a)) {
+        const float u = std::clamp((a - lo) / span, 0.0f, 1.0f);
+        const auto & col = ss_lut[static_cast<std::size_t>(
+              u * static_cast<float>(ss_lut.size() - 1) + 0.5f)];
+        rgba[i * 4] = col.r;
+        rgba[i * 4 + 1] = col.g;
+        rgba[i * 4 + 2] = col.b;
+        rgba[i * 4 + 3] = 255;
+      } else if (cube_drape_.shadow[i]) {
+        rgba[i * 4] = 13;
+        rgba[i * 4 + 1] = 13;
+        rgba[i * 4 + 2] = 13;
+        rgba[i * 4 + 3] = 255;
+      } else if (measured) {
+        rgba[i * 4] = 64;
+        rgba[i * 4 + 1] = 64;
+        rgba[i * 4 + 2] = 64;
+        rgba[i * 4 + 3] = 255;
+      }
+    }
+  } else {
+    // Scalar shades: the spins hold the ramp in force (auto keeps them
+    // synced to the computed range), so read the ramp straight from them.
+    const CubeShade shade =
+      (shade_i == 1) ? CubeShade::Uncertainty :
+      (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
+    const auto & scalar =
+      (shade == CubeShade::Depth) ? cube_surface_.depth :
+      (shade == CubeShade::Uncertainty) ? cube_surface_.uncertainty :
+      cube_surface_.intensity;
+    const std::size_t n_pal = marine_colormap::palette_count();
+    const auto pal_i = (n_pal > 0) ?
+      static_cast<std::size_t>(std::clamp(
+        cube_palette_ ? cube_palette_->currentIndex() : 0, 0,
+        static_cast<int>(n_pal - 1))) : 0;
+    const auto lut = marine_colormap::bake_lut(
+      marine_colormap::palette(pal_i), marine_colormap::TransferParams{}, 256);
+    float lo = static_cast<float>(cube_srange_.lo->value());
+    float hi = static_cast<float>(cube_srange_.hi->value());
+    if (!(hi > lo)) {
+      lo = 0.0f;
+      hi = 1.0f;
+    }
+    const float span = hi - lo;
+    rgba.assign(n_scalar * 4, 0);
+    for (std::size_t i = 0; i < n_scalar; ++i) {
+      if (!std::isfinite(cube_surface_.depth[i])) {
+        continue;   // hole: alpha 0
+      }
+      const float v = std::isfinite(scalar[i]) ? scalar[i] : lo;
+      const float u = std::clamp((v - lo) / span, 0.0f, 1.0f);
+      const auto & col = lut[static_cast<std::size_t>(
+            u * static_cast<float>(lut.size() - 1) + 0.5f)];
+      rgba[i * 4] = col.r;
+      rgba[i * 4 + 1] = col.g;
+      rgba[i * 4 + 2] = col.b;
+      rgba[i * 4 + 3] = 255;
+    }
+  }
+  const QString path = QFileDialog::getSaveFileName(
+    this, "Export CUBE surface (coloured)", "cube_surface_rgba.tif",
+    "GeoTIFF (*.tif)");
+  if (path.isEmpty()) {
+    return;
+  }
+  const std::string err =
+    write_cube_geotiff_rgba(*srf, rgba, *anchor, path.toStdString());
+  if (!err.empty()) {
+    QMessageBox::warning(
+      this, "Export CUBE surface", QString::fromStdString(err));
+    return;
+  }
+  status_->setText(QString("Exported %1x%2 coloured nodes to %3")
+    .arg(srf->nx).arg(srf->ny).arg(path));
+}
+
+void SidescanViewerWindow::populateDrapePasses()
+{
+  if (!cube_drape_combo_) {
+    return;
+  }
+  cube_drape_combo_->blockSignals(true);
+  cube_drape_combo_->clear();
+  cube_drape_combo_->addItem("drape: none");
+  drape_passes_.clear();
+  if (bridge_ && cube_box_) {
+    std::vector<marine_survey_index::PassRow> rows;
+    try {
+      rows = bridge_->queryBox(
+        cube_box_->south, cube_box_->west, cube_box_->north, cube_box_->east,
+        "sidescan");
+    } catch (const std::exception &) {
+      rows.clear();
+    }
+    // Merge port + starboard of the same bag into one interval entry when
+    // they overlap (within the pass-coalescing gap): they drape together —
+    // no spatial overlap, shadows survive (design decision on #29).
+    constexpr std::int64_t kMergeGapNs = 5000000000LL;
+    for (const auto & p : coalescePasses(rows)) {
+      bool merged = false;
+      for (auto & e : drape_passes_) {
+        if (e.bag_path == p.bag_path &&
+          p.t_start_ns <= e.t1_ns + kMergeGapNs &&
+          e.t0_ns <= p.t_end_ns + kMergeGapNs)
+        {
+          e.t0_ns = std::min(e.t0_ns, p.t_start_ns);
+          e.t1_ns = std::max(e.t1_ns, p.t_end_ns);
+          merged = true;
+          break;
+        }
+      }
+      if (!merged) {
+        drape_passes_.push_back({p.bag_path, p.t_start_ns, p.t_end_ns});
+      }
+    }
+    if (drape_passes_.size() > 1) {
+      cube_drape_combo_->addItem(
+        QString("composite: best pixel (%1 passes)").arg(drape_passes_.size()));
+    }
+    for (const auto & e : drape_passes_) {
+      cube_drape_combo_->addItem(
+        QString::fromStdString(passLabel(e.t0_ns, e.bag_path)));
+    }
+  }
+  cube_drape_combo_->setEnabled(cube_drape_combo_->count() > 1);
+  cube_drape_combo_->blockSignals(false);
+}
+
+void SidescanViewerWindow::requestDrape()
+{
+  const int idx = cube_drape_combo_ ? cube_drape_combo_->currentIndex() : 0;
+  if (idx <= 0 || !cube_surface_.ok()) {
+    return;
+  }
+  // Item layout: [0] none, [1] composite (only when >1 pass), then passes.
+  const bool has_composite = drape_passes_.size() > 1;
+  std::vector<DrapePassEntry> targets;
+  if (has_composite && idx == 1) {
+    targets = drape_passes_;   // best-pixel composite over every pass
+  } else {
+    const int entry_i = idx - (has_composite ? 2 : 1);
+    if (entry_i < 0 || static_cast<std::size_t>(entry_i) >= drape_passes_.size()) {
+      return;
+    }
+    targets.push_back(drape_passes_[static_cast<std::size_t>(entry_i)]);
+  }
+  const CubeSurface surface = cube_surface_;   // worker's own copy
+  const std::string cache_dir = cache_dir_;
+  const std::string ref_bag = cube_ref_bag_;
+  const bool ref_has_geo = cube_ref_has_geo_;
+  const geometry_msgs::msg::TransformStamped ref_anchor = cube_ref_anchor_;
+  const std::uint64_t max_nodes = cube_tuning_.max_nodes;
+  const RangeScoreMode range_mode =
+    (cube_range_score_combo_ && cube_range_score_combo_->currentIndex() == 1) ?
+    RangeScoreMode::MidRange : RangeScoreMode::Nearest;
+  ++drape_gen_;
+  const auto gen = drape_gen_;
+  status_->setText(targets.size() == 1 ?
+    QString("Draping %1 …")
+    .arg(QFileInfo(QString::fromStdString(targets.front().bag_path)).fileName()) :
+    QString("Draping composite of %1 passes …").arg(targets.size()));
+  drape_watcher_.setFuture(QtConcurrent::run(
+      [targets, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor,
+      max_nodes, range_mode, gen]() {
+        DrapeTicket ticket;
+        ticket.generation = gen;
+        QElapsedTimer timer;
+        timer.start();
+        std::vector<WindowPing> pings;
+        for (const auto & entry : targets) {
+          const auto loaded = load_drape_pings(
+            entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
+            ref_bag, ref_has_geo, ref_anchor);
+          for (const auto & n : loaded.notes) {
+            ticket.notes << QString::fromStdString(n);
+          }
+          if (loaded.ok) {
+            pings.insert(pings.end(), loaded.pings.begin(), loaded.pings.end());
+          }
+        }
+        if (!pings.empty()) {
+          // The sidescan outreaches the MBES: extend the surface to the
+          // swath (holes filled, edges extrapolated) so the drape has
+          // terrain to land on beyond the bathymetry.
+          std::string grow_note;
+          ticket.terrain = extend_surface_for_drape(
+            surface, pings, max_nodes, grow_note);
+          if (!grow_note.empty()) {
+            ticket.notes << QString::fromStdString(grow_note);
+          }
+          ticket.drape = drape_pass(ticket.terrain, pings, range_mode);
+          if (ticket.drape.pings_skipped > 0) {
+            ticket.notes << QString("%1 pings unusable (no altitude/side or "
+              "off the surface)").arg(ticket.drape.pings_skipped);
+          }
+        }
+        ticket.elapsed_ms = timer.elapsed();
+        return ticket;
+      }));
+}
 
 SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 : QMainWindow(parent)
@@ -783,6 +1698,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   show_grid_check_->setToolTip(
     "Show the index-tile grid (selected tiles stay visible)");
   show_grid_check_->setVisible(false);
+  // Times display in the system local zone by default (#26); this switches
+  // the time bar, tooltips, status messages and pass labels to UTC — the
+  // zone of bag stamps and survey_index_query output.
+  utc_check_ = new QCheckBox("UTC", this);
+  utc_check_->setChecked(false);
+  utc_check_->setToolTip(
+    "Display times in UTC instead of local time "
+    "(bag stamps and survey_index_query output are UTC)");
   // Apply each combo's initial palette to its widget (combos don't fire on init).
   waterfall_->set_color_map(marine_colormap::palette(sidescan_cmap_->currentIndex()));
   mbes_waterfall_->set_color_map(marine_colormap::palette(mbes_cmap_->currentIndex()));
@@ -795,6 +1718,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     cloud_palette_->setCurrentIndex(static_cast<int>(*vi));
     cloud_->setColorMap(static_cast<int>(*vi));
   }
+
+  setupRangeControls();
 
   // Wrap a view in a titled panel with a small header row (title + per-pane controls).
   auto make_pane = [this](
@@ -814,9 +1739,15 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       return panel;
     };
 
-  auto * ss_pane = make_pane("Sidescan", waterfall_, {sidescan_cmap_});
-  auto * bs_pane = make_pane("MBES Backscatter", mbes_waterfall_, {mbes_cmap_});
-  auto * wc_pane = make_pane("Water Column", echogram_, {echo_cmap_});
+  auto * ss_pane = make_pane(
+    "Sidescan", waterfall_,
+    {ss_range_.auto_check, ss_range_.lo, ss_range_.hi, sidescan_cmap_});
+  auto * bs_pane = make_pane(
+    "MBES Backscatter", mbes_waterfall_,
+    {bs_range_.auto_check, bs_range_.lo, bs_range_.hi, mbes_cmap_});
+  auto * wc_pane = make_pane(
+    "Water Column", echogram_,
+    {wc_range_.auto_check, wc_range_.lo, wc_range_.hi, echo_cmap_});
   // The cloud pane carries a pass legend beside the 3D view (#24): hidden in
   // scrub mode, shown when a tile selection drives the cloud (per-pass colours).
   cloud_legend_ = new QTreeWidget(this);
@@ -840,8 +1771,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   clip_margin_spin_->setToolTip("Margin around the selected contact");
   auto * cloud_pane = make_pane(
     "MBES 3D", cloud_split_,
-    {clip_contact_check_, clip_margin_spin_,
-      cloud_color_combo_, zexag_spin_, point_size_spin_, cloud_palette_});
+    {clip_contact_check_, clip_margin_spin_, cloud_color_combo_,
+      cloud_range_.auto_check, cloud_range_.lo, cloud_range_.hi,
+      zexag_spin_, point_size_spin_, cloud_palette_});
+  setupCubeLab(cloud_pane);   // the CUBE-lab controls row (#27)
 
   // 2x2 grid of the four sonar views, each pane independently resizable:
   //   sidescan waterfall (UL) | MBES backscatter (UR)
@@ -864,7 +1797,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // header carries the basemap layer/colormap combos (survey mode only).
   auto * map_pane = make_pane(
     "Map", canvas_,
-    {basemap_layer_, basemap_cmap_, show_track_check_, show_grid_check_});
+    {basemap_layer_, basemap_cmap_,
+      map_range_.auto_check, map_range_.lo, map_range_.hi,
+      show_track_check_, show_grid_check_});
   outer_split_ = new QSplitter(Qt::Horizontal, this);
   outer_split_->addWidget(contacts_pane);
   outer_split_->addWidget(map_pane);
@@ -881,6 +1816,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   srow->setContentsMargins(0, 0, 0, 0);
   srow->addWidget(status_, 1);
   srow->addWidget(hover_geo_);
+  srow->addWidget(utc_check_);   // right under the time bar it switches
 
   // GeoZui-style time bar (replaced phase d's gap-compressed axis at desk
   // verify): zoomable tape + extent scrollbar under the scrub controls, with
@@ -899,6 +1835,11 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   auto * file_menu = menuBar()->addMenu("&File");
   file_menu->addAction("&Open Bag…", this, &SidescanViewerWindow::onOpenBag);
+  file_menu->addAction(
+    "Open Survey &Index…", this, &SidescanViewerWindow::onOpenIndex);
+  reopen_index_action_ = file_menu->addAction(
+    "Reopen &Last Index", this, &SidescanViewerWindow::onReopenLastIndex);
+  refreshReopenIndexAction();
   file_menu->addAction("&Fit View", this, [this]() {
       canvas_->resetView();
       cloud_->resetView();
@@ -909,10 +1850,32 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   file_menu->addAction(
     "Export Contacts as &GeoJSON…", this, &SidescanViewerWindow::onExportGeoJson);
   file_menu->addSeparator();
+  file_menu->addAction(
+    "Export CUBE Surface (&Data GeoTIFF)…", this,
+    &SidescanViewerWindow::onExportSurfaceData);
+  file_menu->addAction(
+    "Export CUBE Surface (Colo&ured GeoTIFF)…", this,
+    &SidescanViewerWindow::onExportSurfaceRgba);
+  file_menu->addSeparator();
   file_menu->addAction("E&xit", this, &QWidget::close);
 
   connect(this, &SidescanViewerWindow::indexProgress,
     this, &SidescanViewerWindow::onIndexProgress);
+  connect(this, &SidescanViewerWindow::sessionOpened,
+    this, &SidescanViewerWindow::onSessionOpened);
+  connect(this, &SidescanViewerWindow::openFailed,
+    this, &SidescanViewerWindow::onOpenFailed);
+  // Scrub-driven opens are debounced: rapid time-bar commits while fine-tuning
+  // collapse into one openBag (~2 event-loop breaths after the hand settles).
+  open_debounce_.setSingleShot(true);
+  open_debounce_.setInterval(400);
+  connect(&open_debounce_, &QTimer::timeout, this, [this]() {
+      if (!debounce_uri_.empty()) {
+        const std::string uri = debounce_uri_;
+        debounce_uri_.clear();
+        openBag(uri, debounce_t0_ns_, debounce_t1_ns_);
+      }
+    });
   connect(&render_watcher_, &QFutureWatcher<SidescanRenderResult>::finished,
     this, &SidescanViewerWindow::onRenderFinished);
   connect(&cloud_watcher_, &QFutureWatcher<CloudLoadTicket>::finished,
@@ -936,8 +1899,51 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       }
       cloud_->setMultiPassPoints(visible);
     });
-  connect(&basemap_watcher_, &QFutureWatcher<BasemapLoadTicket>::finished,
-    this, &SidescanViewerWindow::onBasemapLoaded);
+  // LOD basemap (#26, camp ADR-0013 shape): the loader owns discovery,
+  // level selection and demand loads; the canvas's settled-view signal
+  // drives it, and every resident-set change re-pushes the paint list.
+  basemap_lod_ = new BasemapLod(this);
+  connect(basemap_lod_, &BasemapLod::opened, this, [this]() {
+      const auto ext = basemap_lod_->dataExtent();
+      if (ext) {
+        // The basemap bounds are the best fit box: the index extent can be
+        // blown out by outlier tiles (junk-GPS passes index far from the
+        // survey). Refit unless the operator already took the view over;
+        // with an empty index this also establishes the geo origin.
+        if (!canvas_->hasGeoOrigin()) {
+          canvas_->setGeoOrigin(
+            0.5 * (ext->south + ext->north), 0.5 * (ext->west + ext->east));
+        }
+        if (!canvas_->viewAdjustedByUser()) {
+          canvas_->fitGeo(ext->south, ext->west, ext->north, ext->east);
+        }
+      }
+      // Show the sampled auto range in the (disabled) spins, so switching to
+      // manual starts from the live scale instead of a stale default.
+      if (map_range_.auto_check->isChecked()) {
+        map_range_.lo->blockSignals(true);
+        map_range_.hi->blockSignals(true);
+        map_range_.lo->setValue(basemap_lod_->rangeLo());
+        map_range_.hi->setValue(basemap_lod_->rangeHi());
+        map_range_.lo->blockSignals(false);
+        map_range_.hi->blockSignals(false);
+      }
+      pushBasemapView();
+    });
+  connect(basemap_lod_, &BasemapLod::tilesChanged, this, [this]() {
+      const auto tiles = basemap_lod_->renderTiles();
+      const auto n_tiles = tiles.size();
+      canvas_->setStoreTiles(std::move(tiles));
+      const int li = basemap_layer_->currentIndex();
+      const QString label =
+      (li >= 0 && li < static_cast<int>(basemap_layers_.size())) ?
+      basemap_layers_[static_cast<std::size_t>(li)].first : QString();
+      status_->setText(QString("Basemap %1: %2 tile%3%4")
+      .arg(label).arg(n_tiles).arg(n_tiles == 1 ? "" : "s")
+      .arg(basemap_lod_->note()));
+    });
+  connect(canvas_, &SidescanCanvas::viewChanged,
+    this, &SidescanViewerWindow::pushBasemapView);
   connect(basemap_layer_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {requestBasemapLoad();});
   connect(basemap_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -946,6 +1952,11 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, [this](bool on) {canvas_->setNavTrackVisible(on);});
   connect(show_grid_check_, &QCheckBox::toggled,
     this, [this](bool on) {canvas_->setIndexTilesVisible(on);});
+  connect(utc_check_, &QCheckBox::toggled, this, [this](bool on) {
+      time_bar_->setDisplayUtc(on);
+      refreshPassLabels();
+    });
+
   // Clip changes re-run the selection load (cheap: the query is local, the
   // read is the same windowed machinery).
   const auto reload_selection = [this]() {
@@ -1107,14 +2118,19 @@ SidescanViewerWindow::~SidescanViewerWindow()
 {
   // Don't let a worker outlive the widgets it would signal: wait for any in-flight
   // index/render to finish before the members tear down (~QObject then discards any
-  // already-queued indexProgress events targeted at this window).
+  // already-queued indexProgress events targeted at this window). Cancelling the
+  // live scan first turns a minutes-long wait into milliseconds.
+  if (scan_cancel_) {scan_cancel_->store(true);}
   if (index_watcher_.isRunning()) {index_watcher_.waitForFinished();}
   for (auto & f : superseded_index_futures_) {
     f.waitForFinished();   // orphaned indexers also captured `this`
   }
   if (render_watcher_.isRunning()) {render_watcher_.waitForFinished();}
   if (cloud_watcher_.isRunning()) {cloud_watcher_.waitForFinished();}
-  if (basemap_watcher_.isRunning()) {basemap_watcher_.waitForFinished();}
+  if (cube_watcher_.isRunning()) {cube_watcher_.waitForFinished();}
+  if (drape_watcher_.isRunning()) {drape_watcher_.waitForFinished();}
+  // basemap_lod_ is a child QObject: its destructor (which cancels + waits
+  // its own worker) runs during QObject teardown after this body.
 }
 
 void SidescanViewerWindow::closeEvent(QCloseEvent * event)
@@ -1172,20 +2188,96 @@ void SidescanViewerWindow::onOpenBag()
   if (!dir.isEmpty()) {openBag(dir.toStdString());}
 }
 
+void SidescanViewerWindow::onOpenIndex()
+{
+  // Start where the remembered index lives — reloading the usual campaign
+  // is one Enter away even without the quick-reload entry.
+  const QSettings settings("UNH-CCOM", "survey_explorer");
+  const QString last = settings.value("last_index").toString();
+  const QString start_dir =
+    last.isEmpty() ? QString() : QFileInfo(last).absolutePath();
+  const QString path = QFileDialog::getOpenFileName(
+    this, "Open survey index", start_dir,
+    "Survey index (*.db);;All files (*)");
+  if (path.isEmpty()) {
+    return;
+  }
+  openIndexWithDefaults(path.toStdString());
+}
+
+void SidescanViewerWindow::reopenLastIndexIfAny()
+{
+  const QSettings settings("UNH-CCOM", "survey_explorer");
+  const QString last = settings.value("last_index").toString();
+  if (last.isEmpty() || !QFileInfo::exists(last)) {
+    return;   // nothing remembered (or it moved) — start empty, no dialog
+  }
+  openIndexWithDefaults(last.toStdString());
+}
+
+void SidescanViewerWindow::onReopenLastIndex()
+{
+  const QSettings settings("UNH-CCOM", "survey_explorer");
+  const QString last = settings.value("last_index").toString();
+  if (last.isEmpty()) {
+    return;   // action is disabled without a remembered index; belt-and-braces
+  }
+  openIndexWithDefaults(last.toStdString());
+}
+
+void SidescanViewerWindow::openIndexWithDefaults(const std::string & index_path)
+{
+  // Same stores default as the --stores CLI option: the sibling
+  // bathymetry/survey layer next to the index (discovery finds the rest).
+  const std::string stores_dir =
+    (std::filesystem::path(index_path).parent_path() /
+    "bathymetry" / "survey").string();
+  try {
+    openSurveyIndex(index_path, stores_dir);
+  } catch (const std::exception & e) {
+    QMessageBox::critical(
+      this, "Open survey index failed", QString::fromUtf8(e.what()));
+  }
+}
+
+void SidescanViewerWindow::refreshReopenIndexAction()
+{
+  if (!reopen_index_action_) {
+    return;
+  }
+  const QSettings settings("UNH-CCOM", "survey_explorer");
+  const QString last = settings.value("last_index").toString();
+  const bool usable = !last.isEmpty() && QFileInfo::exists(last);
+  reopen_index_action_->setEnabled(usable);
+  reopen_index_action_->setText(
+    usable ?
+    QString("Reopen &Last Index (%1)").arg(QFileInfo(last).fileName()) :
+    QString("Reopen &Last Index"));
+  if (usable) {
+    reopen_index_action_->setToolTip(last);
+  }
+}
+
+void SidescanViewerWindow::scheduleOpen(
+  const std::string & bag_uri, int64_t t0_ns, int64_t t1_ns)
+{
+  debounce_uri_ = bag_uri;
+  debounce_t0_ns_ = t0_ns;
+  debounce_t1_ns_ = t1_ns;
+  open_debounce_.start();   // restart on every commit; the last one wins
+  status_->setText(QString("Cueing %1 …")
+    .arg(QFileInfo(QString::fromStdString(bag_uri)).fileName()));
+}
+
 void SidescanViewerWindow::openBag(
   const std::string & bag_uri, int64_t cue_start_ns, int64_t cue_end_ns)
 {
-  // Construct the session cheaply (open + validate) on the UI thread so a bad bag
-  // surfaces immediately; then index in the background, growing the usable scrub
-  // range live as the bag resolves.
-  std::shared_ptr<SidescanBagSession> session;
-  try {
-    session = std::make_shared<SidescanBagSession>(bag_uri);
-  } catch (const std::exception & e) {
-    status_->setText("Open a bag to begin (File → Open Bag).");
-    QMessageBox::critical(this, "Open bag failed", QString::fromStdString(e.what()));
-    return;
-  }
+  // A direct open (menu, pass click) outranks a pending debounced one.
+  open_debounce_.stop();
+  debounce_uri_.clear();
+  // The session is constructed AND indexed on a worker: the UI thread never
+  // touches a multi-GB bag synchronously (#26 responsiveness). A bad bag
+  // surfaces via openFailed; the session arrives via sessionOpened.
 
   // Jump-to-pass cue: remembered here, applied once indexing completes (the
   // time→distance mapping needs the finished index). Reset on every open so a
@@ -1202,6 +2294,10 @@ void SidescanViewerWindow::openBag(
   // `this`, so remember the superseded future for the destructor to wait out
   // (setFuture alone stops watching but neither cancels nor waits), pruning
   // any that already finished.
+  if (scan_cancel_) {
+    scan_cancel_->store(true);   // stop the abandoned scan's bag streaming
+  }
+  scan_cancel_ = std::make_shared<std::atomic<bool>>(false);
   if (index_watcher_.isRunning()) {
     superseded_index_futures_.push_back(index_watcher_.future());
   }
@@ -1212,7 +2308,7 @@ void SidescanViewerWindow::openBag(
     superseded_index_futures_.end());
   ++index_epoch_;
   const quint64 epoch = index_epoch_;
-  session_ = session;
+  session_.reset();   // no session until the worker's open lands (sessionOpened)
   current_bag_uri_ = bag_uri;   // a same-bag timeline cue can skip the re-open
   ++session_epoch_;   // any render in flight for the previous bag is now stale
 
@@ -1231,16 +2327,33 @@ void SidescanViewerWindow::openBag(
   scrub_->blockSignals(false);
   progress_->setVisible(true);
   loading_ = true;
-  status_->setText(QString("Indexing %1 …").arg(QString::fromStdString(bag_uri)));
+  status_->setText(QString("Opening %1 …").arg(QString::fromStdString(bag_uri)));
 
-  // Index off the UI thread; the progress callback emits a queued signal so the UI
-  // grows the range + track as the bag resolves. The session is captured (shared_ptr)
-  // so it outlives the task; index_watcher_ is waited on in the destructor.
-  // Bag-index cache (#24): a valid cache replaces the whole-bag metadata scan
-  // with a file read; a miss scans as before and saves for next time.
+  // Open + index off the UI thread; the progress callback emits a queued signal
+  // so the UI grows the range + track as the bag resolves. The session lives in
+  // the task until sessionOpened hands it over; index_watcher_ is waited on in
+  // the destructor. Bag-index cache (#24): a valid cache replaces the whole-bag
+  // metadata scan with a file read; a miss scans as before and saves for next
+  // time — unless the scan was cancelled, whose partial index must never be
+  // cached.
   const std::string cache_path =
     cache_dir_.empty() ? std::string() : cachePathFor(cache_dir_, bag_uri);
-  index_watcher_.setFuture(QtConcurrent::run([this, session, epoch, bag_uri, cache_path]() {
+  const auto cancel = scan_cancel_;
+  index_watcher_.setFuture(
+    QtConcurrent::run([this, epoch, bag_uri, cache_path, cancel]() {
+      std::shared_ptr<SidescanBagSession> session;
+      try {
+        session = std::make_shared<SidescanBagSession>(bag_uri);
+      } catch (const std::exception & e) {
+        Q_EMIT openFailed(epoch, QString::fromStdString(e.what()));
+        return;
+      }
+      {
+        QMutexLocker lock(&pending_open_mutex_);
+        pending_open_session_ = session;
+        pending_open_epoch_ = epoch;
+      }
+      Q_EMIT sessionOpened(epoch);
       // A non-QException from a QtConcurrent task std::terminates in Qt5 —
       // never let a corrupt cache or a failing scan out of the worker
       // (review round-2 finding); a failure just ends progress where it is.
@@ -1253,21 +2366,57 @@ void SidescanViewerWindow::openBag(
             Q_EMIT indexProgress(epoch, total, true);
             return;
           }
-          session->buildIndex([this, epoch](double resolved_m, bool done) {
-            Q_EMIT indexProgress(epoch, resolved_m, done);
-        });
+          session->buildIndex(
+            [this, epoch](double resolved_m, bool done) {
+              Q_EMIT indexProgress(epoch, resolved_m, done);
+            }, cancel);
+          if (cancel->load(std::memory_order_relaxed)) {
+            return;   // superseded: a partial index must not poison the cache
+          }
           if (const auto snap = session->snapshot()) {
             saveSessionIndex(cache_path, identity, *snap);   // best-effort
           }
           return;
         }
-        session->buildIndex([this, epoch](double resolved_m, bool done) {
-          Q_EMIT indexProgress(epoch, resolved_m, done);
-      });
+        session->buildIndex(
+          [this, epoch](double resolved_m, bool done) {
+            Q_EMIT indexProgress(epoch, resolved_m, done);
+          }, cancel);
       } catch (const std::exception &) {
         Q_EMIT indexProgress(epoch, 0.0, true);   // surface as an empty done
       }
-      }));
+    }));
+}
+
+void SidescanViewerWindow::onSessionOpened(quint64 epoch)
+{
+  std::shared_ptr<SidescanBagSession> session;
+  {
+    QMutexLocker lock(&pending_open_mutex_);
+    if (pending_open_epoch_ != epoch) {
+      return;   // a newer open already parked its session; wait for its signal
+    }
+    session = std::move(pending_open_session_);
+    pending_open_session_.reset();
+  }
+  if (epoch != index_epoch_ || !session) {
+    return;   // superseded while opening: discard (its scan is cancelled)
+  }
+  session_ = std::move(session);
+  status_->setText(
+    QString("Indexing %1 …").arg(QString::fromStdString(current_bag_uri_)));
+}
+
+void SidescanViewerWindow::onOpenFailed(quint64 epoch, const QString & message)
+{
+  if (epoch != index_epoch_) {
+    return;   // a stale open's failure is moot
+  }
+  loading_ = false;
+  progress_->setVisible(false);
+  current_bag_uri_.clear();
+  status_->setText("Open a bag to begin (File → Open Bag).");
+  QMessageBox::critical(this, "Open bag failed", message);
 }
 
 void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, bool done)
@@ -1592,12 +2741,20 @@ void SidescanViewerWindow::requestRender()
   const double res = window_len_m_ / static_cast<double>(std::max(1, max_window_pings_));
   const int palette = palette_combo_ ? palette_combo_->currentIndex() : 0;
   const uint64_t epoch = session_epoch_;
+  // Manual amplitude range from the sidescan pane's controls (#26): the map
+  // coverage overlay renders the same data, so it follows the same range.
+  std::optional<std::pair<float, float>> manual_range;
+  if (ss_range_.auto_check && !ss_range_.auto_check->isChecked()) {
+    manual_range = {static_cast<float>(ss_range_.lo->value()),
+      static_cast<float>(ss_range_.hi->value())};
+  }
   render_watcher_.setFuture(QtConcurrent::run(
-      [session, head, total, win, max_pings, res, palette, epoch]() {
+      [session, head, total, win, max_pings, res, palette, epoch, manual_range]() {
         SidescanRenderResult r;
         try {
           r = render_window(
-            session, head, total, win.lo, win.hi, max_pings, res, palette);
+            session, head, total, win.lo, win.hi, max_pings, res, palette,
+            manual_range);
         } catch (const std::exception &) {
           r.ok = false;   // e.g. the bag became unreadable mid-session
         }
@@ -1718,6 +2875,15 @@ void SidescanViewerWindow::openSurveyIndex(
   bridge_ = std::make_unique<SurveyIndexBridge>(index_path);   // throws on a bad DB
   setWindowTitle(QString("Survey Explorer — %1")
     .arg(QString::fromStdString(index_path)));
+  {
+    // Remember the index that actually opened (past the throwing ctor) for
+    // File -> Reopen Last Index and as the Open dialog's start directory.
+    QSettings settings("UNH-CCOM", "survey_explorer");
+    settings.setValue(
+      "last_index",
+      QFileInfo(QString::fromStdString(index_path)).absoluteFilePath());
+  }
+  refreshReopenIndexAction();
 
   // The canvas-metre plane needs a geographic origin before layers derive
   // their geometry: the index extent's centre. With an empty index the origin
@@ -1877,56 +3043,19 @@ void SidescanViewerWindow::requestBasemapLoad()
   const auto palette_idx = static_cast<std::size_t>(
     std::max(0, basemap_cmap_->currentIndex()));
 
-  ++basemap_gen_;
-  const auto gen = basemap_gen_;
   status_->setText(QString("Loading basemap %1…").arg(label));
-  basemap_watcher_.setFuture(
-    QtConcurrent::run([dir, palette_idx, zero_is_nodata, gen]() {
-      BasemapLoadTicket ticket;
-      ticket.generation = gen;
-      auto result = load_basemap(dir, palette_idx, zero_is_nodata);
-      ticket.tiles = std::move(result.tiles);
-      ticket.note = std::move(result.note);
-      return ticket;
-    }));
+  basemap_lod_->open(dir, palette_idx, zero_is_nodata);
 }
 
-void SidescanViewerWindow::onBasemapLoaded()
+void SidescanViewerWindow::pushBasemapView()
 {
-  BasemapLoadTicket ticket = basemap_watcher_.result();
-  if (ticket.generation != basemap_gen_) {
-    return;   // a newer layer/colormap choice superseded this load
+  if (!basemap_lod_ || !basemap_lod_->isOpen()) {
+    return;
   }
-  // The basemap bounds are the best fit box: the index extent can be blown
-  // out by outlier tiles (junk-GPS passes index far from the survey — the
-  // Massabesic extent spans kilometres of nothing, shrinking the lake to a
-  // speck). Refit to the tiles unless the operator already took the view
-  // over; with an empty index this also establishes the geo origin.
-  if (!ticket.tiles.empty()) {
-    double s = ticket.tiles.front().south;
-    double w = ticket.tiles.front().west;
-    double n = ticket.tiles.front().north;
-    double e = ticket.tiles.front().east;
-    for (const auto & t : ticket.tiles) {
-      s = std::min(s, t.south);
-      w = std::min(w, t.west);
-      n = std::max(n, t.north);
-      e = std::max(e, t.east);
-    }
-    if (!canvas_->hasGeoOrigin()) {
-      canvas_->setGeoOrigin(0.5 * (s + n), 0.5 * (w + e));
-    }
-    if (!canvas_->viewAdjustedByUser()) {
-      canvas_->fitGeo(s, w, n, e);
-    }
+  const auto region = canvas_->visibleGeoRegion();
+  if (region) {
+    basemap_lod_->viewChanged(*region, canvas_->groundMetresPerPixel());
   }
-  const auto n_tiles = ticket.tiles.size();
-  canvas_->setStoreTiles(std::move(ticket.tiles));
-  const int li = basemap_layer_->currentIndex();
-  const QString label = (li >= 0 && li < static_cast<int>(basemap_layers_.size())) ?
-    basemap_layers_[static_cast<std::size_t>(li)].first : QString();
-  status_->setText(QString("Basemap %1: %2 tile%3%4")
-    .arg(label).arg(n_tiles).arg(n_tiles == 1 ? "" : "s").arg(ticket.note));
 }
 
 void SidescanViewerWindow::onTileSelectionChanged()
@@ -1976,10 +3105,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
       info.bag_path = p.bag_path;
       info.t_start_ns = p.t_start_ns;
       info.t_end_ns = p.t_end_ns;
-      info.label = QString("%1  (%2)")
-        .arg(isoUtc(p.t_start_ns))
-        .arg(QFileInfo(QString::fromStdString(p.bag_path)).fileName())
-        .toStdString();
+      info.label = passLabel(p.t_start_ns, p.bag_path);
       cloud_passes.push_back(std::move(info));
     }
     timeline_passes.push_back(std::move(bar));
@@ -1989,6 +3115,15 @@ void SidescanViewerWindow::onTileSelectionChanged()
   time_bar_->setVisible(true);
 
   // Selection mode: the cloud pane belongs to the selection until it clears.
+  // A CUBE surface from a previous load is in a different reference frame —
+  // drop it rather than draw it misplaced (#27).
+  cube_surface_ = CubeSurface{};
+  cube_drape_ = SidescanDrape{};
+  cube_drape_terrain_ = CubeSurface{};
+  cube_soundings_.clear();
+  if (cube_selfcal_btn_) {cube_selfcal_btn_->setEnabled(false);}
+  ++drape_gen_;
+  cloud_->clearSurface();
   selection_cloud_ = true;
   cloud_->setColorMode(PointCloudView::ColorMode::Pass);
   cloud_color_combo_->setEnabled(false);
@@ -2044,9 +3179,36 @@ void SidescanViewerWindow::onTileSelectionChanged()
     }));
 }
 
+std::string SidescanViewerWindow::passLabel(
+  std::int64_t t_start_ns, const std::string & bag_path) const
+{
+  return QString("%1  (%2)")
+         .arg(time_bar_->formatTime(t_start_ns))
+         .arg(QFileInfo(QString::fromStdString(bag_path)).fileName())
+         .toStdString();
+}
+
+void SidescanViewerWindow::refreshPassLabels()
+{
+  // The legend items bake formatted times at load; re-render them in the new
+  // display zone. Counts (column 1) and check states are untouched.
+  for (int i = 0; i < cloud_legend_->topLevelItemCount() &&
+    i < static_cast<int>(cloud_passes_.size()); ++i)
+  {
+    auto & pass = cloud_passes_[static_cast<std::size_t>(i)];
+    pass.label = passLabel(pass.t_start_ns, pass.bag_path);
+    cloud_legend_->topLevelItem(i)->setText(0, QString::fromStdString(pass.label));
+  }
+}
+
 void SidescanViewerWindow::exitSelectionCloud()
 {
   selection_passes_.clear();
+  cube_surface_ = CubeSurface{};   // the scrub cloud is a different frame (#27)
+  cube_drape_ = SidescanDrape{};
+  cube_drape_terrain_ = CubeSurface{};
+  ++drape_gen_;
+  cloud_->clearSurface();
   if (time_bar_) {
     time_bar_->clearPasses();
     // The extent survives the selection: the campaign (index mode), else the
@@ -2134,30 +3296,55 @@ void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)
       return;
     }
   }
-  // Otherwise: the selection pass covering that time (skipping the open bag,
-  // which just answered "nothing there").
+  // While the current bag is still opening/indexing, a commit inside it
+  // becomes the pending cue (applied when the index completes) instead of a
+  // dead-end "No data" — fine-tuning during a load stays meaningful.
+  const auto cue_into_loading_bag = [this, t0, t1, t_ns]() {
+      pending_cue_start_ns_ = t0;
+      pending_cue_end_ns_ = t1;
+      status_->setText(QString("Will cue to %1 once %2 finishes indexing.")
+        .arg(time_bar_->formatTime(static_cast<std::int64_t>(t_ns)))
+        .arg(QFileInfo(QString::fromStdString(current_bag_uri_)).fileName()));
+    };
+  // Otherwise: the selection pass covering that time. The open bag is skipped
+  // when idle (it just answered "nothing there"), but while loading it takes
+  // the commit as the pending cue.
   for (const auto & p : selection_passes_) {
-    if (t_ns >= p.t_start_ns && t_ns <= p.t_end_ns && p.bag_path != current_bag_uri_) {
-      openBag(p.bag_path, t0, t1);
+    if (t_ns >= p.t_start_ns && t_ns <= p.t_end_ns) {
+      if (p.bag_path == current_bag_uri_) {
+        if (loading_) {
+          cue_into_loading_bag();
+          return;
+        }
+        continue;
+      }
+      scheduleOpen(p.bag_path, t0, t1);
       return;
     }
   }
   // Otherwise: any campaign bag whose nav track covers that time — release
   // on the campaign-wide bar means "go there" (the bag-index cache makes the
-  // open cheap after the first visit).
+  // open cheap after the first visit). Debounced: rapid fine-tune commits
+  // collapse into one open.
   if (const auto fix = fixAtTime(nav_track_points_, static_cast<int64_t>(t_ns))) {
     for (const auto & [bag_id, path] : bag_paths_) {
-      if (bag_id == fix->bag_id && !path.empty() && path != current_bag_uri_) {
-        openBag(path, t0, t1);
-        return;
+      if (bag_id != fix->bag_id || path.empty()) {
+        continue;
       }
+      if (path == current_bag_uri_) {
+        if (loading_) {
+          cue_into_loading_bag();
+          return;
+        }
+        continue;
+      }
+      scheduleOpen(path, t0, t1);
+      return;
     }
   }
-  const QString when = QDateTime::fromMSecsSinceEpoch(
-    static_cast<qint64>(t_ns / 1000000LL), QTimeZone::utc())
-    .toString("yyyy-MM-dd HH:mm:ss");
   status_->setText(
-    QString("No data at %1 in the open bag or campaign.").arg(when));
+    QString("No data at %1 in the open bag or campaign.")
+    .arg(time_bar_->formatTime(static_cast<std::int64_t>(t_ns))));
 }
 
 void SidescanViewerWindow::onCenterTimeChanged(qlonglong t_ns)

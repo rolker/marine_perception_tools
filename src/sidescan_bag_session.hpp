@@ -16,6 +16,7 @@
 #define SIDESCAN_BAG_SESSION_HPP_
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -176,7 +177,27 @@ struct SessionIndex
   double geo_qy = 0.0;
   double geo_qz = 0.0;
   double geo_qw = 1.0;
+  // Derived, rebuilt by every snapshot producer (publishSnapshot/adoptIndex)
+  // and never serialized to the bag-index cache: the posed track decimated to
+  // ~1 m along-track samples. Cursor<->track queries (nearestTrackDistance,
+  // positionAtDistance) fire on every mouse move — scanning thousands of
+  // tight PODs instead of every fat ping keeps hover off the UI thread's
+  // budget (#26: a finished long bag froze the app the moment the mouse
+  // crossed the map).
+  struct TrackSample
+  {
+    double x = 0.0;
+    double y = 0.0;
+    double cum_dist_m = 0.0;
+  };
+  std::vector<TrackSample> track_lookup;
 };
+
+// Fill `index.track_lookup` from its posed pings: samples at least
+// kTrackLookupStrideM apart along track, plus the final posed ping.
+// O(pings); run by the snapshot producers on the worker thread.
+constexpr double kTrackLookupStrideM = 1.0;
+void buildTrackLookup(SessionIndex & index);
 
 // Along-track distance interval covered by the pings (sidescan + MBES) whose
 // stamps fall within [t_start_ns, t_end_ns] — maps a survey-index pass interval
@@ -207,7 +228,13 @@ public:
   // call concurrently from other threads while this runs — they read a lock-free
   // immutable snapshot.
   using ProgressFn = std::function<void(double resolved_distance_m, bool complete)>;
-  void buildIndex(const ProgressFn & progress = {});
+  // `cancel` (optional) is polled while streaming: once set, the scan stops
+  // promptly and returns WITHOUT publishing a final snapshot or firing the
+  // done tick — the abandoned session just stops consuming I/O. The caller
+  // that superseded it decides what happens next.
+  void buildIndex(
+    const ProgressFn & progress = {},
+    const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
   // Install a complete pre-built index (the bag-index cache, #24): published
   // as the snapshot so every reader works immediately; buildIndex is skipped.

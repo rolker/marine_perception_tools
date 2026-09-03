@@ -17,6 +17,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
@@ -36,13 +37,18 @@
 namespace marine_perception_tools
 {
 
-// One projected MBES sounding in the sensor frame (metres), plus its backscatter.
+// One projected MBES sounding in the sensor frame (metres), plus its backscatter
+// and the per-beam geometry cube's angular-response correction consumes (#27):
+// the receive/steering angle and the slant range, kept bound to the intensity
+// they measured (the same {raw intensity, angle} pairing as cube::Sounding).
 struct MbesSounding
 {
   double x = 0.0;          // along-track (sensor frame)
   double y = 0.0;          // across-track
   double z = 0.0;          // down
   float intensity = 0.0f;  // backscatter (dB), from detections.intensities[i]
+  float beam_angle = std::numeric_limits<float>::quiet_NaN();   // rx, radians
+  float slant_range = std::numeric_limits<float>::quiet_NaN();  // metres
 };
 
 // Project a single beam to a sensor-frame point. `tx_angle`/`rx_angle` in radians,
@@ -55,6 +61,8 @@ inline MbesSounding project_beam(
   s.x = range * -std::sin(tx_angle);
   s.y = range * std::sin(rx_angle);
   s.z = range * std::cos(tx_angle) * std::cos(rx_angle);
+  s.beam_angle = static_cast<float>(rx_angle);
+  s.slant_range = static_cast<float>(range);
   return s;
 }
 

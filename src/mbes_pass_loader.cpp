@@ -72,16 +72,29 @@ CloudLoadOutcome load_cloud_passes(
           -t.rotation.x, -t.rotation.y, -t.rotation.z, t.rotation.w,
           ex - t.translation.x, ey - t.translation.y, ez - t.translation.z,
           cx, cy, cz);
-        const double m2 = clip->margin_m * clip->margin_m;
-        res.world_soundings.erase(
-          std::remove_if(
-            res.world_soundings.begin(), res.world_soundings.end(),
-            [&](const MbesSounding & s) {
-              const double dx = s.x - cx;
-              const double dy = s.y - cy;
-              return dx * dx + dy * dy > m2;
-            }),
-          res.world_soundings.end());
+        if (clip->isBox()) {
+          // Box clip (#27): axis-aligned about the centre in this frame.
+          const double he = clip->half_east_m;
+          const double hn = clip->half_north_m;
+          res.world_soundings.erase(
+            std::remove_if(
+              res.world_soundings.begin(), res.world_soundings.end(),
+              [&](const MbesSounding & s) {
+                return std::abs(s.x - cx) > he || std::abs(s.y - cy) > hn;
+              }),
+            res.world_soundings.end());
+        } else {
+          const double m2 = clip->margin_m * clip->margin_m;
+          res.world_soundings.erase(
+            std::remove_if(
+              res.world_soundings.begin(), res.world_soundings.end(),
+              [&](const MbesSounding & s) {
+                const double dx = s.x - cx;
+                const double dy = s.y - cy;
+                return dx * dx + dy * dy > m2;
+              }),
+            res.world_soundings.end());
+        }
       } else {
         out.notes << QString("%1: no geo anchor — not clipped")
           .arg(QString::fromStdString(pass.label));
@@ -100,6 +113,12 @@ CloudLoadOutcome load_cloud_passes(
       ref_frame = res.world_frame;
       ref_has_geo = res.has_geo;
       ref_earth_from_world = res.earth_from_world;
+      // Surface the reference identity (#29): the sidescan drape reprojects
+      // its pings into this same frame later.
+      out.ref_bag = ref_bag;
+      out.ref_frame = ref_frame;
+      out.ref_has_geo = ref_has_geo;
+      out.ref_earth_from_world = ref_earth_from_world;
     }
 
     FrameReprojection reproject;   // identity by default

@@ -85,15 +85,31 @@ jobs:
       #   marine_autonomy (gggs tile grid) + marine_tiled_raster_store (store tiles)
       #   marine_survey_index (index query lib) and its deps marine_sidescan_mosaic
       #   + marine_backscatter — the survey-overview basemap/pass-list chain.
+      #   marine_bathymetry_store + marine_mbes_backscatter_store +
+      #   marine_vertical_datum — not used directly by the viewer; they are
+      #   cube_bathymetry's own uma dependencies, needed since the CUBE lab
+      #   (#27) made cube_bathymetry a dependency of this package.
       - name: Clone unh_marine_autonomy source dependencies
         run: |
           git clone --depth 1 -b jazzy \
             https://github.com/rolker/unh_marine_autonomy.git /tmp/uma
           for pkg in marine_interfaces marine_contacts marine_autonomy \
             marine_tiled_raster_store marine_backscatter marine_sidescan_mosaic \
-            marine_survey_index; do
+            marine_survey_index marine_bathymetry_store \
+            marine_mbes_backscatter_store marine_vertical_datum; do
             mv "/tmp/uma/$pkg" "../ws/src/$pkg"
           done
+
+      # cube_bathymetry is a source sibling (not in rosdep): the survey
+      # explorer's box CUBE lab (#27) runs CUBE in-process, so package.xml
+      # declares it and rosdep cannot resolve the key without this clone. Its
+      # own uma dependencies are pulled in the step above. The repo root also
+      # holds original_cube/, which carries no package.xml and is ignored.
+      - name: Clone cube_bathymetry source dependency
+        run: >
+          git clone --depth 1 -b jazzy
+          https://github.com/rolker/cube_bathymetry.git
+          ../ws/src/cube_bathymetry
 
       # geodesy from the released jazzy debian predates the WGS84-geodesics API
       # (geodesy/geodesics.h) that marine_sidescan_mosaic uses; the workspace

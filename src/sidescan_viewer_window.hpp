@@ -18,14 +18,19 @@
 #include <QFutureWatcher>
 #include <QImage>
 #include <QMainWindow>
+#include <QMutex>
 #include <QString>
+#include <QTimer>
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "cube_lab.hpp"
+#include "sidescan_drape.hpp"
 #include "marine_contacts/contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
 #include "mbes_pass_loader.hpp"
@@ -34,6 +39,7 @@
 #include "survey_index_bridge.hpp"
 #include "time_bar_widget.hpp"   // TimelinePassInfo (pass bars on the time bar)
 
+class QAction;
 class QLabel;
 class QSlider;
 class QDoubleSpinBox;
@@ -54,6 +60,7 @@ namespace marine_perception_tools
 class SidescanCanvas;
 class PointCloudView;
 class TimeBarWidget;
+class BasemapLod;
 }  // namespace marine_perception_tools
 
 namespace marine_sonar_widgets {class WaterfallWidget; class EchogramWidget;}
@@ -104,14 +111,35 @@ struct CloudLoadTicket
   CloudLoadOutcome outcome;
 };
 
-// A basemap (store-tile) load in flight: layer/palette changes supersede via
-// the generation, same pattern as the cloud load.
-struct BasemapLoadTicket
+// A box-CUBE run in flight (#27): the gathered box soundings (reference
+// world frame) + the estimated surface. Superseded via the generation.
+struct CubeLabTicket
 {
   std::uint64_t generation = 0;
-  std::vector<OverviewTile> tiles;
-  QString note;
+  std::vector<MbesSounding> soundings;
+  CubeSurface surface;
+  QStringList notes;
+  qint64 elapsed_ms = 0;
+  // Reference frame identity from the cloud load (#29): the sidescan drape
+  // reprojects its pings into this frame.
+  std::string ref_bag;
+  bool ref_has_geo = false;
+  geometry_msgs::msg::TransformStamped ref_earth_from_world;
 };
+
+// A sidescan drape load+march in flight (#29), superseded via generation.
+struct DrapeTicket
+{
+  std::uint64_t generation = 0;
+  SidescanDrape drape;
+  // The terrain the drape marched on: the CUBE surface extended to the
+  // pass's swath, holes filled / edges extrapolated (uncertainty NaN on
+  // interpolated nodes — never presented as bathymetry).
+  CubeSurface terrain;
+  QStringList notes;
+  qint64 elapsed_ms = 0;
+};
+
 
 // Offline sidescan viewer main window: File->Open a bag, then scrub along
 // distance travelled. A rolling ~window of pings is painted (quality-wins) into a
@@ -142,6 +170,12 @@ public:
   // index pass, not a whole-bag sample read.
   void openBag(const std::string & bag_uri, int64_t cue_start_ns = 0, int64_t cue_end_ns = 0);
 
+  // Startup convenience: open the remembered last index (QSettings) if one
+  // exists on disk. Called by main when the app launches with neither
+  // --index nor a bag argument, so a plain start comes back where the
+  // operator left off instead of empty.
+  void reopenLastIndexIfAny();
+
 protected:
   // Persist window geometry + splitter sizes on close (QSettings).
   void closeEvent(QCloseEvent * event) override;
@@ -156,10 +190,20 @@ signals:
   // queued connection marshals it to the UI thread. `epoch` guards against a stale
   // bag's worker updating after a newer bag was opened.
   void indexProgress(quint64 epoch, double resolved_distance_m, bool done);
+  // The worker constructed the session (parked in pending_open_session_) /
+  // failed to open the bag. Queued to the UI thread like indexProgress.
+  void sessionOpened(quint64 epoch);
+  void openFailed(quint64 epoch, const QString & message);
 
 private slots:
   void onOpenBag();
+  void onOpenIndex();   // File menu: pick a survey_index.db (#27 follow-up)
+  void onExportSurfaceData();   // GeoTIFF: float depth/uncertainty/backscatter
+  void onExportSurfaceRgba();   // GeoTIFF: the rendered shade, RGBA
+  void onReopenLastIndex();   // File menu: reload the remembered index
   void onIndexProgress(quint64 epoch, double resolved_distance_m, bool done);
+  void onSessionOpened(quint64 epoch);
+  void onOpenFailed(quint64 epoch, const QString & message);
   void onRenderFinished();
   void onScrubChanged();
   void onGridSpacingChanged(double metres);
@@ -171,7 +215,6 @@ private slots:
   void onExportGeoJson();
   void onTileSelectionChanged();
   void onCloudPassesLoaded();
-  void onBasemapLoaded();
   void onTimelinePassActivated(const QString & bag_path, qlonglong t_start_ns, qlonglong t_end_ns);
   void onTimeSelected(qlonglong t_ns);   // time-bar centre committed: cue there
   void onCenterTimeChanged(qlonglong t_ns);   // live: move the map's position arrow
@@ -189,11 +232,45 @@ private:
   // Populate the basemap layer combo from the store layers under `root`
   // (subdirectories holding GGGS *.tif tiles), selecting `initial_dir`.
   void discoverBasemapLayers(const std::string & root, const std::string & initial_dir);
-  // (Re)load the selected basemap layer with the selected colormap on a
-  // worker thread; a newer request supersedes via basemap_gen_.
+  // (Re)open the selected basemap layer with the selected colormap in the
+  // LOD loader (#26); a newer request supersedes in the loader.
   void requestBasemapLoad();
+  // Push the canvas's settled view into the LOD loader (level + demand load).
+  void pushBasemapView();
   // Leave selection-cloud mode: restore the scrub-window cloud + colour mode.
   void exitSelectionCloud();
+  // Cloud-legend label for a pass, in the time bar's display zone (#26).
+  std::string passLabel(std::int64_t t_start_ns, const std::string & bag_path) const;
+  // Debounced scrub-driven open: the last commit before the hand settles wins.
+  void scheduleOpen(const std::string & bag_uri, int64_t t0_ns, int64_t t1_ns);
+  // Build + wire the per-pane colour-range controls (#26); ctor helper, must
+  // run before the pane headers consume the widgets.
+  void setupRangeControls();
+  // Build + wire the CUBE-lab controls row (#27) into the cloud pane;
+  // ctor helper, run after the pane exists.
+  void setupCubeLab(QWidget * cloud_pane);
+  // Open an index with the default sibling stores root; errors -> message box.
+  void openIndexWithDefaults(const std::string & index_path);
+  // Sync the Reopen Last Index action's label/enabled state with QSettings.
+  void refreshReopenIndexAction();
+  // Derive an ARA curve from the last run's own beams, adopt it, re-run.
+  void selfCalibrateBackscatter();
+  // Gather the box's mbes passes, load + clip their soundings, run CUBE at
+  // the chosen cell size on a worker; results land in onCubeLabFinished.
+  void runCubeLab();
+  // Re-triangulate + recolour the stored surface for the shade combo (cheap;
+  // no CUBE re-run) and hand it to the cloud pane.
+  void refreshCubeSurface();
+  // The CUBE frame's world->geo affine, probed through the reference
+  // earth anchor; nullopt without a geo reference (export refuses then).
+  std::optional<MapGeoAffine> cubeSurfaceAnchor() const;
+  // Fill the drape pass combo with the sidescan passes crossing the box
+  // (port + starboard of the same bag interval merged into one entry).
+  void populateDrapePasses();
+  // Load + march the selected pass onto the current surface on a worker.
+  void requestDrape();
+  // Re-render the legend's baked pass labels after a display-zone change.
+  void refreshPassLabels();
   // Launch a window render on a worker thread, coalescing rapid scrub changes:
   // if a render is in flight, just flag a pending one and re-launch on finish
   // with the latest scrub position.
@@ -245,6 +322,21 @@ private:
   // indexer's emit dereferences a freed window (found in #24 review).
   std::vector<QFuture<void>> superseded_index_futures_;
   uint64_t index_epoch_ = 0;             // bumped per opened bag; guards stale progress
+  // Cancel token for the CURRENT scan; superseding an open sets it so the
+  // abandoned worker stops streaming the bag instead of running to the end.
+  std::shared_ptr<std::atomic<bool>> scan_cancel_;
+  // Session handoff worker -> UI (the constructor runs in the worker so the
+  // UI never touches a multi-GB bag synchronously): the worker parks the
+  // session + its epoch here, then emits sessionOpened.
+  QMutex pending_open_mutex_;
+  std::shared_ptr<SidescanBagSession> pending_open_session_;
+  quint64 pending_open_epoch_ = 0;
+  // Debounce for scrub-driven opens (time-bar commits): rapid fine-tune
+  // commits collapse into one openBag once the hand settles.
+  QTimer open_debounce_;
+  std::string debounce_uri_;
+  int64_t debounce_t0_ns_ = 0;
+  int64_t debounce_t1_ns_ = 0;
   QFutureWatcher<SidescanRenderResult> render_watcher_;
   bool loading_ = false;
   bool rendering_ = false;
@@ -296,13 +388,71 @@ private:
   QComboBox * basemap_cmap_ = nullptr;
   QCheckBox * show_track_check_ = nullptr;
   QCheckBox * show_grid_check_ = nullptr;
+  QCheckBox * utc_check_ = nullptr;
+
+  // Per-pane colour-range controls (#26): auto (default) or a manual lo/hi
+  // in the pane's native units. The sidescan range also drives the map's
+  // coverage-overlay render (same data, same scale).
+  struct RangeControls
+  {
+    QCheckBox * auto_check = nullptr;
+    QDoubleSpinBox * lo = nullptr;
+    QDoubleSpinBox * hi = nullptr;
+  };
+  RangeControls ss_range_;      // sidescan waterfall + map coverage, 0..1
+  RangeControls bs_range_;      // MBES backscatter waterfall, 0..1
+  RangeControls wc_range_;      // water column: black/white points, 0..1
+  RangeControls cloud_range_;   // 3D cloud scalar (depth m / intensity)
+  RangeControls map_range_;     // basemap contrast, layer units
+
+  // CUBE lab (#27): the shift-drag box, its in-flight run and last surface.
+  std::optional<GeoRect> cube_box_;
+  QFutureWatcher<CubeLabTicket> cube_watcher_;
+  std::uint64_t cube_gen_ = 0;
+  CubeSurface cube_surface_;
+  QDoubleSpinBox * cube_cell_spin_ = nullptr;
+  QComboBox * cube_order_combo_ = nullptr;
+  QPushButton * cube_run_btn_ = nullptr;
+  QCheckBox * cube_points_check_ = nullptr;
+  QCheckBox * cube_surf_check_ = nullptr;
+  QComboBox * cube_mesh_combo_ = nullptr;   // crisp+smooth / stepped / blended
+  QComboBox * cube_palette_ = nullptr;      // surface palette, independent of the cloud's
+
+  // Sidescan drape (#29): pass picker + the draped amplitudes for the
+  // "Sidescan" surface shade. The reference identity comes from the CUBE
+  // load; entries merge port+starboard of the same bag interval.
+  struct DrapePassEntry
+  {
+    std::string bag_path;
+    std::int64_t t0_ns = 0;
+    std::int64_t t1_ns = 0;
+  };
+  QComboBox * cube_drape_combo_ = nullptr;
+  QComboBox * cube_range_score_combo_ = nullptr;   // near-wins vs mid-range-wins
+  RangeControls cube_srange_;   // surface-shade colour range (active shade's units)
+  std::vector<DrapePassEntry> drape_passes_;
+  SidescanDrape cube_drape_;
+  CubeSurface cube_drape_terrain_;   // the extended terrain the drape rode
+  QFutureWatcher<DrapeTicket> drape_watcher_;
+  std::uint64_t drape_gen_ = 0;
+  std::string cube_ref_bag_;
+  bool cube_ref_has_geo_ = false;
+  geometry_msgs::msg::TransformStamped cube_ref_anchor_;
+  QPushButton * cube_params_btn_ = nullptr;
+  QPushButton * cube_selfcal_btn_ = nullptr;   // derive ARA curve from the box
+  std::vector<MbesSounding> cube_soundings_;   // last run's beams (self-cal input)
+  CubeTuning cube_tuning_;   // seeded from the library defaults in setupCubeLab
+  // File-menu quick reload: shows the remembered index (QSettings) and
+  // refreshes after every successful openSurveyIndex.
+  QAction * reopen_index_action_ = nullptr;
+  QDoubleSpinBox * cube_alpha_spin_ = nullptr;
+  QComboBox * cube_shade_combo_ = nullptr;
   // Clip the selection cloud to the selected contact + margin (#24 desk
   // finding: several passes over a tile is millions of soundings).
   QCheckBox * clip_contact_check_ = nullptr;
   QDoubleSpinBox * clip_margin_spin_ = nullptr;
   std::vector<std::pair<QString, std::string>> basemap_layers_;   // {label, dir}
-  QFutureWatcher<BasemapLoadTicket> basemap_watcher_;
-  std::uint64_t basemap_gen_ = 0;
+  BasemapLod * basemap_lod_ = nullptr;   // LOD basemap loader (#26), child
 };
 
 }  // namespace marine_perception_tools

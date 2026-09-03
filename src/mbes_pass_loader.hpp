@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "mbes_geometry.hpp"
 
 namespace marine_perception_tools
@@ -51,6 +52,13 @@ struct CloudLoadOutcome
   QStringList notes;                  // per-pass problems, human-readable
   int skipped_passes = 0;             // passes dropped (frame not resolvable)
   int skipped_pings = 0;              // pings dropped (no TF), summed
+  // The reference frame's identity (#29): the first loadable pass's bag,
+  // frame name and earth anchor — so later loads (the sidescan drape) can
+  // reproject into the SAME frame the clouds and CUBE surface live in.
+  std::string ref_bag;
+  std::string ref_frame;
+  bool ref_has_geo = false;
+  geometry_msgs::msg::TransformStamped ref_earth_from_world;
 };
 
 // Optional clip region: keep only soundings within `margin_m` horizontally
@@ -64,6 +72,14 @@ struct GeoClip
   double lon = 0.0;
   double alt = 0.0;
   double margin_m = 25.0;
+  // Box clip (#27, the CUBE lab): when both half-extents are positive the
+  // clip is the axis-aligned box |east| <= half_east_m, |north| <= half_north_m
+  // about (lat, lon) instead of the circle — evaluated in each pass's own
+  // world frame, whose axes are assumed ENU-aligned (the same isotropy
+  // assumption the circular clip already makes).
+  double half_east_m = 0.0;
+  double half_north_m = 0.0;
+  bool isBox() const {return half_east_m > 0.0 && half_north_m > 0.0;}
 };
 
 // Load every pass's soundings into the first loadable pass's world frame.

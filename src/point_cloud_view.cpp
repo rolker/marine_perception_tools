@@ -27,6 +27,7 @@
 #include <QtMath>
 
 #include <algorithm>
+#include <cstdint>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -60,10 +61,11 @@ void main()
 constexpr char kFragmentShader[] =
   R"(#version 330 core
 in vec3 v_col;
+uniform float u_alpha;
 out vec4 frag_color;
 void main()
 {
-  frag_color = vec4(v_col, 1.0);
+  frag_color = vec4(v_col, u_alpha);
 }
 )";
 }  // namespace
@@ -82,6 +84,20 @@ PointCloudView::PointCloudView(QWidget * parent)
   fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
   fmt.setDepthBufferSize(24);
   setFormat(fmt);
+
+  // Examine-pivot animation (GeoZui4D's middle-click translate, 0.25 s —
+  // the same feel as the time bar's jump).
+  pivot_timer_.setInterval(16);
+  connect(&pivot_timer_, &QTimer::timeout, this, [this]() {
+      pivot_progress_ += 16.0f / 250.0f;
+      if (pivot_progress_ >= 1.0f) {
+        pivot_timer_.stop();
+        pivot_ = pivot_to_;
+      } else {
+        pivot_ = pivot_from_ + pivot_progress_ * (pivot_to_ - pivot_from_);
+      }
+      update();
+    });
 }
 
 PointCloudView::~PointCloudView()
@@ -93,6 +109,10 @@ PointCloudView::~PointCloudView()
     arrow_vbo_.destroy();
     arrow_vao_.destroy();
     vao_.destroy();
+    surface_pos_vbo_.destroy();
+    surface_col_vbo_.destroy();
+    surface_ibo_.destroy();
+    surface_vao_.destroy();
     doneCurrent();
   }
 }
@@ -178,6 +198,9 @@ void PointCloudView::set_points_impl(
 
   rebuild_colors();
   buffers_dirty_ = true;
+  surface_dirty_ = true;   // the centroid moved; re-recentre the surface
+  pivot_timer_.stop();
+  pivot_ = QVector3D(0.0f, 0.0f, 0.0f);   // pivot was in the old frame
   update();
 }
 
@@ -211,6 +234,8 @@ void PointCloudView::resetView()
   azimuth_deg_ = 0.0f;
   elevation_deg_ = 35.0f;
   framed_ = false;
+  pivot_timer_.stop();
+  pivot_ = QVector3D(0.0f, 0.0f, 0.0f);   // examine pivot back to the centroid
   if (radius_ > 0.0f) {distance_ = radius_ * 2.5f;}
   update();
 }
@@ -227,6 +252,54 @@ void PointCloudView::setColorMode(ColorMode mode)
 void PointCloudView::setZExaggeration(float z)
 {
   zexag_ = std::max(1.0f, z);
+  update();
+}
+
+void PointCloudView::setScalarRange(
+  const std::optional<std::pair<float, float>> & range)
+{
+  scalar_range_ = range;
+  rebuild_colors();
+  buffers_dirty_ = true;
+  update();
+}
+
+void PointCloudView::setSurface(
+  std::vector<float> positions_xyz, std::vector<float> colors_rgb,
+  std::vector<std::uint32_t> indices)
+{
+  surface_pos_ = std::move(positions_xyz);
+  surface_col_ = std::move(colors_rgb);
+  surface_idx_ = std::move(indices);
+  surface_dirty_ = true;
+  update();
+}
+
+void PointCloudView::clearSurface()
+{
+  surface_pos_.clear();
+  surface_col_.clear();
+  surface_idx_.clear();
+  surface_index_count_ = 0;
+  surface_dirty_ = true;
+  update();
+}
+
+void PointCloudView::setSurfaceVisible(bool on)
+{
+  surface_visible_ = on;
+  update();
+}
+
+void PointCloudView::setPointsVisible(bool on)
+{
+  points_visible_ = on;
+  update();
+}
+
+void PointCloudView::setSurfaceAlpha(float alpha)
+{
+  surface_alpha_ = std::clamp(alpha, 0.05f, 1.0f);
   update();
 }
 
@@ -323,11 +396,17 @@ void PointCloudView::rebuild_colors()
   }
   const std::vector<float> & scalar = (mode_ == ColorMode::Depth) ? depth_ : intensity_;
 
+  // Manual range (#26) wins; otherwise auto-scale to the data extent.
   float lo = std::numeric_limits<float>::max();
   float hi = std::numeric_limits<float>::lowest();
-  for (const float v : scalar) {
-    lo = std::min(lo, v);
-    hi = std::max(hi, v);
+  if (scalar_range_) {
+    lo = scalar_range_->first;
+    hi = scalar_range_->second;
+  } else {
+    for (const float v : scalar) {
+      lo = std::min(lo, v);
+      hi = std::max(hi, v);
+    }
   }
   const float span = (hi > lo) ? (hi - lo) : 1.0f;
 
@@ -368,6 +447,10 @@ void PointCloudView::initializeGL()
   col_vbo_.create();
   arrow_vao_.create();
   arrow_vbo_.create();
+  surface_vao_.create();
+  surface_pos_vbo_.create();
+  surface_col_vbo_.create();
+  surface_ibo_.create();
   gl_ready_ = true;
   if (!pts_.empty()) {upload();}
   if (boat_valid_) {build_arrow();}
@@ -392,6 +475,42 @@ void PointCloudView::upload()
 
   vao_.release();
   buffers_dirty_ = false;
+}
+
+void PointCloudView::upload_surface()
+{
+  if (!gl_ready_) {return;}
+  surface_index_count_ = 0;
+  if (surface_pos_.empty() || surface_idx_.empty()) {
+    surface_dirty_ = false;
+    return;
+  }
+  // Recentre by the CLOUD's centroid so surface and points share the origin
+  // the camera orbits (setSurface contract: same load, same frame).
+  std::vector<float> centred(surface_pos_.size());
+  for (std::size_t i = 0; i + 2 < surface_pos_.size(); i += 3) {
+    centred[i] = surface_pos_[i] - center_x_;
+    centred[i + 1] = surface_pos_[i + 1] - center_y_;
+    centred[i + 2] = surface_pos_[i + 2] - center_z_;
+  }
+  surface_vao_.bind();
+  surface_pos_vbo_.bind();
+  surface_pos_vbo_.allocate(
+    centred.data(), static_cast<int>(centred.size() * sizeof(float)));
+  program_.enableAttributeArray(0);
+  program_.setAttributeBuffer(0, GL_FLOAT, 0, 3, 3 * sizeof(float));
+  surface_col_vbo_.bind();
+  surface_col_vbo_.allocate(
+    surface_col_.data(), static_cast<int>(surface_col_.size() * sizeof(float)));
+  program_.enableAttributeArray(1);
+  program_.setAttributeBuffer(1, GL_FLOAT, 0, 3, 3 * sizeof(float));
+  surface_ibo_.bind();
+  surface_ibo_.allocate(
+    surface_idx_.data(),
+    static_cast<int>(surface_idx_.size() * sizeof(std::uint32_t)));
+  surface_vao_.release();
+  surface_index_count_ = static_cast<int>(surface_idx_.size());
+  surface_dirty_ = false;
 }
 
 void PointCloudView::resizeGL(int w, int h)
@@ -421,12 +540,15 @@ void PointCloudView::paintGL()
 
   const float az = qDegreesToRadians(azimuth_deg_);
   const float el = qDegreesToRadians(elevation_deg_);
-  const QVector3D eye(
+  // Orbit about the examine pivot (scaled here so z-exaggeration changes
+  // keep the pivot on its point — pivot_ is stored unscaled).
+  const QVector3D pivot(pivot_.x(), pivot_.y(), pivot_.z() * zexag_);
+  const QVector3D eye = pivot + QVector3D(
     distance_ * std::cos(el) * std::cos(az),
     distance_ * std::cos(el) * std::sin(az),
     distance_ * std::sin(el));
   QMatrix4x4 view;
-  view.lookAt(eye, QVector3D(0, 0, 0), QVector3D(0, 0, 1));
+  view.lookAt(eye, pivot, QVector3D(0, 0, 1));
 
   QMatrix4x4 model;
   model.scale(1.0f, 1.0f, zexag_);   // stretch depth about the centroid
@@ -435,9 +557,12 @@ void PointCloudView::paintGL()
   program_.bind();
   program_.setUniformValue("u_mvp", mvp_);
   program_.setUniformValue("u_point_size", point_size_);
-  vao_.bind();
-  glDrawArrays(GL_POINTS, 0, static_cast<int>(pts_.size()));
-  vao_.release();
+  program_.setUniformValue("u_alpha", 1.0f);
+  if (points_visible_) {
+    vao_.bind();
+    glDrawArrays(GL_POINTS, 0, static_cast<int>(pts_.size()));
+    vao_.release();
+  }
 
   // Boat-context arrow (same MVP; flat in the horizontal plane at the boat z).
   if (arrow_dirty_) {build_arrow();}
@@ -445,6 +570,27 @@ void PointCloudView::paintGL()
     arrow_vao_.bind();
     glDrawArrays(GL_TRIANGLES, 0, arrow_verts_);
     arrow_vao_.release();
+  }
+
+  // CUBE surface (#27): drawn after the points; translucent surfaces blend
+  // without writing depth so the cloud stays visible through them.
+  if (surface_dirty_) {upload_surface();}
+  if (surface_visible_ && surface_index_count_ > 0) {
+    program_.setUniformValue("u_alpha", surface_alpha_);
+    if (surface_alpha_ < 1.0f) {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      glDepthMask(GL_FALSE);
+    }
+    surface_vao_.bind();
+    glDrawElements(
+      GL_TRIANGLES, surface_index_count_, GL_UNSIGNED_INT, nullptr);
+    surface_vao_.release();
+    if (surface_alpha_ < 1.0f) {
+      glDepthMask(GL_TRUE);
+      glDisable(GL_BLEND);
+    }
+    program_.setUniformValue("u_alpha", 1.0f);
   }
   program_.release();
 
@@ -557,12 +703,59 @@ bool PointCloudView::unproject_ground(
   return true;
 }
 
+bool PointCloudView::pick_point(const QPoint & px, QVector3D & out) const
+{
+  // Project every point through the last painted MVP and take the one within
+  // a pixel radius of the click nearest the camera. A linear pass is a few
+  // ms on a million points — fine for a click, never run per frame.
+  if (pts_.empty() || width() <= 0 || height() <= 0) {return false;}
+  constexpr float kRadiusPx = 15.0f;
+  const float w2 = 0.5f * static_cast<float>(width());
+  const float h2 = 0.5f * static_cast<float>(height());
+  float best_depth = std::numeric_limits<float>::max();
+  bool found = false;
+  for (const auto & p : pts_) {
+    const QVector4D clip = mvp_ * QVector4D(p, 1.0f);
+    if (clip.w() <= 0.0f) {continue;}   // behind the camera
+    const float sx = (clip.x() / clip.w()) * w2 + w2;
+    const float sy = h2 - (clip.y() / clip.w()) * h2;
+    const float dx = sx - static_cast<float>(px.x());
+    const float dy = sy - static_cast<float>(px.y());
+    if (dx * dx + dy * dy > kRadiusPx * kRadiusPx) {continue;}
+    if (clip.w() < best_depth) {   // clip w ≈ view distance: nearest wins
+      best_depth = clip.w();
+      out = p;
+      found = true;
+    }
+  }
+  return found;
+}
+
 void PointCloudView::mousePressEvent(QMouseEvent * event)
 {
   if (event->button() == Qt::MiddleButton) {
-    double wx = 0.0;
-    double wy = 0.0;
-    if (unproject_ground(event->pos(), wx, wy)) {Q_EMIT seekWorld(wx, wy);}
+    // GeoZui4D examine: animate the clicked point to the view centre and
+    // orbit about it (a miss falls back to the ground-plane hit). The cloud's
+    // old middle-click seek moved to the map canvas alone.
+    QVector3D picked;
+    bool have = pick_point(event->pos(), picked);
+    if (!have) {
+      double wx = 0.0;
+      double wy = 0.0;
+      if (unproject_ground(event->pos(), wx, wy)) {
+        picked = QVector3D(
+          static_cast<float>(wx - center_x_),
+          static_cast<float>(wy - center_y_), 0.0f);
+        have = true;
+      }
+    }
+    if (have) {
+      // pick_point returns unscaled recentred coords; the view scales z.
+      pivot_from_ = pivot_;
+      pivot_to_ = picked;
+      pivot_progress_ = 0.0f;
+      pivot_timer_.start();
+    }
     return;
   }
   last_mouse_ = event->pos();

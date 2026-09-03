@@ -254,7 +254,9 @@ SidescanBagSession::SidescanBagSession(
   tf_buffer_ = std::make_unique<tf2::BufferCore>(tf2::durationFromSec(opts_.tf_cache_s));
 }
 
-void SidescanBagSession::buildIndex(const ProgressFn & progress)
+void SidescanBagSession::buildIndex(
+  const ProgressFn & progress,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
 {
   // Optional load profiling: set SIDESCAN_PROFILE=1 to print per-phase timings to
   // stderr. Quiet by default.
@@ -351,6 +353,9 @@ void SidescanBagSession::buildIndex(const ProgressFn & progress)
 
   // ---- Single pass: stream the bag in order. ----
   while (reader.has_next()) {
+    if (cancel && cancel->load(std::memory_order_relaxed)) {
+      return;   // superseded: stop streaming, publish nothing more
+    }
     auto bag_msg = reader.read_next();
     maybe_flush();   // grow the published snapshot as the bag streams in
     // One unreadable message (corrupt/truncated) is skipped + counted, not fatal.
@@ -574,6 +579,33 @@ void SidescanBagSession::buildIndex(const ProgressFn & progress)
   if (progress) {progress(total_distance_m_, true);}
 }
 
+void buildTrackLookup(SessionIndex & index)
+{
+  index.track_lookup.clear();
+  const SidescanPing * last_posed = nullptr;
+  for (const auto & p : index.pings) {
+    if (!p.has_pose) {
+      continue;
+    }
+    last_posed = &p;
+    if (index.track_lookup.empty() ||
+      p.cumulative_distance_m - index.track_lookup.back().cum_dist_m >=
+      kTrackLookupStrideM)
+    {
+      index.track_lookup.push_back(
+        {p.geometry.sensor_x, p.geometry.sensor_y, p.cumulative_distance_m});
+    }
+  }
+  // The exact track end, so queries near it don't snap up to a stride short.
+  if (last_posed &&
+    last_posed->cumulative_distance_m > index.track_lookup.back().cum_dist_m)
+  {
+    index.track_lookup.push_back(
+      {last_posed->geometry.sensor_x, last_posed->geometry.sensor_y,
+        last_posed->cumulative_distance_m});
+  }
+}
+
 void SidescanBagSession::publishSnapshot(bool complete)
 {
   // Copy the worker's current working index into a fresh immutable snapshot and swap
@@ -596,6 +628,7 @@ void SidescanBagSession::publishSnapshot(bool complete)
   idx->geo_qy = geo_qy_;
   idx->geo_qz = geo_qz_;
   idx->geo_qw = geo_qw_;
+  buildTrackLookup(*idx);
   std::lock_guard<std::mutex> lock(snap_mutex_);
   snap_ = std::move(idx);
 }
@@ -603,6 +636,7 @@ void SidescanBagSession::publishSnapshot(bool complete)
 void SidescanBagSession::adoptIndex(SessionIndex index)
 {
   index.complete = true;
+  buildTrackLookup(index);   // the cache stores pings only, not the lookup
   auto idx = std::make_shared<const SessionIndex>(std::move(index));
   std::lock_guard<std::mutex> lock(snap_mutex_);
   snap_ = std::move(idx);
@@ -745,44 +779,44 @@ double SidescanBagSession::timeAtDistance(double dist_m) const
 bool SidescanBagSession::nearestTrackDistance(
   double map_x, double map_y, double & dist_m) const
 {
+  // Hover-rate query (#26): scan the ~1 m-decimated track_lookup, not every
+  // ping — the answer is within a stride of exact, well inside the scrub's
+  // 1 m granularity.
   const auto snap = snapshot();
-  if (!snap) {return false;}
+  if (!snap || snap->track_lookup.empty()) {return false;}
   bool found = false;
   double best_d2 = 0.0;
-  double best_dist = 0.0;
-  for (const auto & p : snap->pings) {
-    if (!p.has_pose) {continue;}
-    const double dx = p.geometry.sensor_x - map_x;
-    const double dy = p.geometry.sensor_y - map_y;
+  for (const auto & s : snap->track_lookup) {
+    const double dx = s.x - map_x;
+    const double dy = s.y - map_y;
     const double d2 = dx * dx + dy * dy;
     if (!found || d2 < best_d2) {
       best_d2 = d2;
-      best_dist = p.cumulative_distance_m;
+      dist_m = s.cum_dist_m;
       found = true;
     }
   }
-  if (found) {dist_m = best_dist;}
   return found;
 }
 
 bool SidescanBagSession::positionAtDistance(
   double dist_m, double & map_x, double & map_y) const
 {
+  // Hover-rate query (#26): the lookup is cumulative-distance-ordered by
+  // construction, so binary-search it and take the nearer neighbour.
   const auto snap = snapshot();
-  if (!snap) {return false;}
-  bool found = false;
-  double best_dd = 0.0;
-  for (const auto & p : snap->pings) {
-    if (!p.has_pose) {continue;}
-    const double dd = std::abs(p.cumulative_distance_m - dist_m);
-    if (!found || dd < best_dd) {
-      best_dd = dd;
-      map_x = p.geometry.sensor_x;
-      map_y = p.geometry.sensor_y;
-      found = true;
-    }
-  }
-  return found;
+  if (!snap || snap->track_lookup.empty()) {return false;}
+  const auto & lut = snap->track_lookup;
+  const auto after = std::lower_bound(
+    lut.begin(), lut.end(), dist_m,
+    [](const SessionIndex::TrackSample & s, double d) {return s.cum_dist_m < d;});
+  const auto b = (after == lut.end()) ? after - 1 : after;
+  const auto a = (b == lut.begin()) ? b : b - 1;
+  const auto & best =
+    (std::abs(a->cum_dist_m - dist_m) <= std::abs(b->cum_dist_m - dist_m)) ? *a : *b;
+  map_x = best.x;
+  map_y = best.y;
+  return true;
 }
 
 std::vector<WindowPing> SidescanBagSession::readWindow(

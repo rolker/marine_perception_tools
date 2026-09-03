@@ -234,6 +234,12 @@ int main(int argc, char ** argv)
   if (!positional.isEmpty()) {
     window.openBag(positional.first().toStdString(), cue_start_ns, cue_end_ns);
   }
+  // A plain start (no --index, no bag) comes back where the operator left
+  // off: the remembered last index auto-reopens (#27 follow-up — starting
+  // empty read as the app "forgetting" the index).
+  if (!parser.isSet(index_opt) && positional.isEmpty()) {
+    window.reopenLastIndexIfAny();
+  }
   if (parser.isSet(snapshot_opt)) {
     const QString png = parser.value(snapshot_opt);
     const int delay_ms =

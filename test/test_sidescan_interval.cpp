@@ -114,4 +114,64 @@ TEST(DistanceInterval, SingleInstantWindowPicksOnePing)
   EXPECT_DOUBLE_EQ(interval->second, 30.0);
 }
 
+// Dense synthetic track for the hover-rate lookup: pings every 0.1 m along
+// x, so decimation to the 1 m stride is observable.
+SessionIndex makeDenseIndex(int ping_count, bool posed = true)
+{
+  SessionIndex index;
+  for (int i = 0; i < ping_count; ++i) {
+    SidescanPing ping;
+    ping.stamp_ns = (100 + i) * kSec / 10;
+    ping.cumulative_distance_m = 0.1 * static_cast<double>(i);
+    ping.geometry.sensor_x = ping.cumulative_distance_m;
+    ping.geometry.sensor_y = 0.0;
+    ping.has_pose = posed;
+    index.pings.push_back(ping);
+  }
+  return index;
+}
+
+TEST(TrackLookup, DecimatesToTheStrideAndKeepsTheTrackEnd)
+{
+  auto index = makeDenseIndex(101);   // 10 m of track at 0.1 m spacing
+  marine_perception_tools::buildTrackLookup(index);
+  ASSERT_FALSE(index.track_lookup.empty());
+  // Samples are >= 1 m apart: ~11 of the 101 pings survive.
+  EXPECT_LE(index.track_lookup.size(), 12u);
+  for (std::size_t i = 1; i < index.track_lookup.size(); ++i) {
+    EXPECT_GE(
+      index.track_lookup[i].cum_dist_m - index.track_lookup[i - 1].cum_dist_m,
+      marine_perception_tools::kTrackLookupStrideM - 1e-9);
+  }
+  EXPECT_DOUBLE_EQ(index.track_lookup.front().cum_dist_m, 0.0);
+  EXPECT_DOUBLE_EQ(index.track_lookup.back().cum_dist_m, 10.0);
+  EXPECT_DOUBLE_EQ(index.track_lookup.back().x, 10.0);
+}
+
+TEST(TrackLookup, ExactEndSurvivesEvenMidStride)
+{
+  // 10.55 m of track: the last posed ping (10.5) is only half a stride past
+  // the last regular sample (10.0) but must still be present.
+  auto index = makeDenseIndex(106);
+  marine_perception_tools::buildTrackLookup(index);
+  ASSERT_FALSE(index.track_lookup.empty());
+  EXPECT_DOUBLE_EQ(index.track_lookup.back().cum_dist_m, 10.5);
+}
+
+TEST(TrackLookup, UnposedPingsYieldNoLookup)
+{
+  auto index = makeDenseIndex(50, false);
+  marine_perception_tools::buildTrackLookup(index);
+  EXPECT_TRUE(index.track_lookup.empty());
+}
+
+TEST(TrackLookup, RebuildClearsThePreviousLookup)
+{
+  auto index = makeDenseIndex(101);
+  marine_perception_tools::buildTrackLookup(index);
+  const auto first_size = index.track_lookup.size();
+  marine_perception_tools::buildTrackLookup(index);   // idempotent, no doubling
+  EXPECT_EQ(index.track_lookup.size(), first_size);
+}
+
 }  // namespace
