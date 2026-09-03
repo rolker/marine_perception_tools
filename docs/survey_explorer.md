@@ -131,14 +131,22 @@ lives (with the store, beside its provenance sidecar), not convenience.
   This document references them; it must never restate them, or it becomes a
   fourth namespace disagreeing about the same data.
 
-### Read-only is no longer one of these
+### Not a store-editing tool
 
-Every stage of uma#258 read. Ingest (umbrella #36, direction 4) makes the
-explorer a **writer** to the world model. That is a deliberate change of premise,
-and it brings obligations the read-only design never had: an import ledger before
-any automated discovery, atomic tile writes before background ingest can run
-under a live view ([cube_bathymetry#135](https://github.com/rolker/cube_bathymetry/issues/135)),
-and a refresh story for tiles that change while composited.
+Ingest (umbrella #36, direction 4) puts a UI on `import_bag`, an existing
+process that already writes to the stores. It gives the operator a way to invoke
+it — discovery, confirmation, progress — rather than asking an agent to run it.
+The explorer does not otherwise modify store contents: the CUBE lab's surfaces
+are in-memory and export to a file the user names, and nothing edits tiles in
+place.
+
+Two obligations follow from the ingest path specifically, and are worth stating
+because they are easy to miss when adding the UI: an import ledger before
+discovery is automated (see the regenerability decision above), and — because
+this is the first time a fold runs *while the operator is exploring the same
+store* — atomic tile writes
+([cube_bathymetry#135](https://github.com/rolker/cube_bathymetry/issues/135))
+plus a refresh story for tiles that change under a composited view.
 
 ## Directions
 
@@ -166,8 +174,9 @@ state, and a promotion path from a tuned box to a batch run.
 *Open question: what a recipe is, and whether it is also what an ingest run
 carries.*
 
-**Ingest and dataset grouping.** Discovery of new bags, confirmation, background
-fold. Prerequisite: the import ledger. The same ledger carries the campaign per
+**Ingest and dataset grouping.** A UI over the existing `import_bag` path:
+discovery of new bags, confirmation, background fold. Prerequisite: the import
+ledger. The same ledger carries the campaign per
 import record, which retires the store-level `survey` scalar that was overwritten
 on 2026-08-25 (`massabesic-jun2026` → `shoals-aug2026`, with both campaigns'
 data present and only one named). Project grouping is then a tag on ledger
