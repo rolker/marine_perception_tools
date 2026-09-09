@@ -1631,4 +1631,57 @@ TEST_F(ExplorerWindowFixture, AWheelZoomClearsTheHighlight)
   EXPECT_TRUE(canvas->highlightedFix().has_value());
 }
 
+// --- the geographic cursor readout (#47) -------------------------------------
+
+// The map's own conversion: the position under the cursor, to the six
+// decimals the readout has always used, tagged with the pane it came from so
+// four panes feeding one label stay tellable apart.
+TEST_F(ExplorerWindowFixture, TheMapReadsOutTheCursorsPositionNamingThePane)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * geo = window.findChild<QLabel *>("hover_geo");
+  ASSERT_NE(geo, nullptr);
+  EXPECT_TRUE(geo->text().isEmpty()) << "a position with nothing hovered";
+
+  hoverAt(*canvas, geoPixel(*canvas, kLat, kLon));
+
+  const QString shown = geo->text();
+  ASSERT_TRUE(shown.startsWith("Map  ")) << shown.toStdString();
+  const QStringList parts = shown.mid(5).split(", ");
+  ASSERT_EQ(parts.size(), 2) << shown.toStdString();
+  EXPECT_NEAR(parts[0].toDouble(), kLat, 1e-5);
+  EXPECT_NEAR(parts[1].toDouble(), kLon, 1e-5);
+  // Six decimals: the format the map readout has always used (~0.1 m).
+  EXPECT_EQ(parts[0].section('.', 1).size(), 6) << shown.toStdString();
+  EXPECT_EQ(parts[1].section('.', 1).size(), 6) << shown.toStdString();
+}
+
+// Nothing rather than zero: with no index and no bag there is no earth
+// reference anywhere, so the map cannot place the cursor — and a readout of
+// "0.000000, 0.000000" would be a position off West Africa.
+TEST_F(ExplorerWindowFixture, AnUnplaceableMapReadsOutNothingRatherThanZero)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  window.show();
+  QCoreApplication::processEvents();
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  ASSERT_NE(canvas, nullptr);
+  auto * geo = window.findChild<QLabel *>("hover_geo");
+  ASSERT_NE(geo, nullptr);
+
+  hoverAt(*canvas, QPoint(canvas->width() / 2, canvas->height() / 2));
+
+  EXPECT_TRUE(geo->text().isEmpty()) << geo->text().toStdString();
+}
+
 }  // namespace

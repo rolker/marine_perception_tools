@@ -2112,6 +2112,10 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // because they answer the same question about the same pointer: where the
   // cursor is, and when the boat was there.
   hover_geo_ = new QLabel(this);
+  hover_geo_->setObjectName("hover_geo");
+  hover_geo_->setToolTip(
+    "Geographic position of the cursor, named by the pane it is over — "
+    "empty whenever the cursor is not over a pane that can place it");
   hover_time_ = new QLabel(this);
   hover_time_->setObjectName("hover_time");
   hover_time_->setToolTip(
@@ -3861,10 +3865,17 @@ void SidescanViewerWindow::onCenterTimeChanged(qlonglong t_ns)
   }
 }
 
-void SidescanViewerWindow::onMapHoverGeo(double lat, double lon)
+void SidescanViewerWindow::onMapHoverGeo(double lat, double lon, bool valid)
 {
-  hover_geo_->setText(
-    QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
+  onPaneHoverGeo(
+    HoverPane::Map,
+    valid ? std::optional<GeoPoint>(GeoPoint{lat, lon}) : std::nullopt);
+  if (!valid) {
+    // No geographic position under the cursor means no fix search either:
+    // the track is placed geographically, so there is nothing to search in.
+    clearFixHighlight();
+    return;
+  }
   // No highlight while a gesture owns the pointer (#46): a region drag past
   // the slop, a pan, a glide, or contact marking. hoverGeo still fires
   // throughout those — the lat/lon readout should keep following the cursor —
@@ -3884,6 +3895,19 @@ void SidescanViewerWindow::onMapHoverGeo(double lat, double lon)
       SidescanCanvas::HighlightedFix{hit->latitude, hit->longitude}) :
     std::nullopt);
   refreshFixHighlightReadout();
+}
+
+void SidescanViewerWindow::onPaneHoverGeo(
+  HoverPane pane, const std::optional<GeoPoint> & pos)
+{
+  hover_readout_.hover(pane, pos);
+  hover_geo_->setText(QString::fromStdString(hover_readout_.text()));
+}
+
+void SidescanViewerWindow::onPaneLeave(HoverPane pane)
+{
+  hover_readout_.leave(pane);
+  hover_geo_->setText(QString::fromStdString(hover_readout_.text()));
 }
 
 void SidescanViewerWindow::clearFixHighlight()

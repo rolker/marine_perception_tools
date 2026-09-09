@@ -1154,9 +1154,18 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
   } else {
     emit hoverWorld(0.0, 0.0, false);
   }
+  // Geographic readout (#47). With a survey index the canvas plane IS
+  // geographic, so the cursor has a position even over a bag that cannot be
+  // placed on it. Without one, canvas metres are the bag's map-ENU, so the
+  // position comes through the bag's own anchor — and a bag with no earth
+  // reference has none, which reads as nothing rather than as the origin.
   if (geo_mode_) {
     const auto geo = canvasToGeo(hov.x(), hov.y());
-    emit hoverGeo(geo.first, geo.second);
+    emit hoverGeo(geo.first, geo.second, true);
+  } else if (const auto geo = geo_from_map(map_anchor_, hov.x(), hov.y())) {
+    emit hoverGeo(geo->lat, geo->lon, true);
+  } else {
+    emit hoverGeo(0.0, 0.0, false);
   }
   // Panning moved to the middle button (#42), because left-drag now draws the
   // region. A middle drag that has travelled past the click threshold is a

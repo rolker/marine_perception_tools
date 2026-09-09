@@ -32,6 +32,7 @@
 
 #include "color_vocabulary.hpp"
 #include "cube_lab.hpp"
+#include "hover_geo_readout.hpp"   // HoverPane/HoverGeoReadout (the lat/lon readout)
 #include "sidescan_drape.hpp"
 #include "marine_contacts/contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
@@ -252,11 +253,19 @@ private:
   // reads out its time, and a plain click cues there. The search is the pure
   // nearestTrackFix over nav_track_points_; the window owns the result
   // because only it holds the timestamps and the cue path.
-  void onMapHoverGeo(double lat, double lon);   // hover readout + fix search
+  void onMapHoverGeo(double lat, double lon, bool valid);   // fix search + readout
   void onMapPlainClicked();                     // cue, but only on a hit
   void clearFixHighlight();                     // no hit: no marker, no readout
   void refreshFixHighlightReadout();            // re-render after a UTC toggle
   std::optional<TrackHit> hovered_fix_;
+
+  // --- the geographic cursor readout (#47) --------------------------------
+  // Every spatial pane feeds ONE lat/lon label, each converting its own frame
+  // at the source; the label names the pane so a position is attributable.
+  // A pane that cannot place the cursor reports nothing.
+  void onPaneHoverGeo(HoverPane pane, const std::optional<GeoPoint> & pos);
+  void onPaneLeave(HoverPane pane);   // the cursor left: a shown position must be live
+  HoverGeoReadout hover_readout_;
 
   // Load the vendored world coastline into the map's bottom layer (#41), once
   // per session and never over the network — the operator station and the
@@ -415,7 +424,7 @@ private:
   std::vector<IndexedTile> indexed_tiles_;      // canvas selection indices map here
   QTreeWidget * cloud_legend_ = nullptr;        // per-pass colours + counts
   QSplitter * cloud_split_ = nullptr;           // [cloud | legend]
-  QLabel * hover_geo_ = nullptr;                // lat/lon readout (geo mode)
+  QLabel * hover_geo_ = nullptr;                // lat/lon readout, any pane (#47)
   QLabel * hover_time_ = nullptr;               // time of the hovered fix (#46)
   QFutureWatcher<CloudLoadTicket> cloud_watcher_;
   std::uint64_t cloud_gen_ = 0;                 // bumped per selection change

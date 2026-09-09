@@ -39,6 +39,7 @@ class QMenu;
 #include <vector>
 
 #include "coastline_data.hpp"
+#include "hover_geo_readout.hpp"
 #include "map_geo_anchor.hpp"
 #include "tile_selection.hpp"
 #include "view_animation.hpp"
@@ -109,6 +110,9 @@ public:
   // The bag's map-ENU -> geo anchor (nullopt: bag has no earth reference).
   void setMapAnchor(const std::optional<MapGeoAffine> & anchor);
   bool mapPlaceable() const {return !geo_mode_ || map_anchor_.has_value();}
+  // The anchor itself, for panes that hover in the bag's map-ENU frame and
+  // need the same conversion the map uses (#47).
+  const std::optional<MapGeoAffine> & mapAnchor() const {return map_anchor_;}
 
   // Store-tile basemap (geo bounds per tile).
   void setStoreTiles(std::vector<OverviewTile> tiles);
@@ -316,8 +320,11 @@ signals:
   // Hovered map position (metres), for a cross-pane linked cursor (always valid).
   void hoverWorld(double map_x, double map_y, bool valid);
 
-  // Hovered geographic position (only in geo mode), for a status readout.
-  void hoverGeo(double lat, double lon);
+  // Hovered geographic position, for the status readout (#47). Emitted on
+  // every move, with valid=false when the cursor's position cannot be placed
+  // on the earth at all — a bag-only view of a recording with no earth
+  // reference. lat/lon are meaningless then and must not be shown.
+  void hoverGeo(double lat, double lon, bool valid);
 
   // Middle-click map position (metres), for click-to-seek.
   void seekWorld(double map_x, double map_y);
