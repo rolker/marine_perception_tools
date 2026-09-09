@@ -391,15 +391,20 @@ public:
 private:
   std::string current_bag_uri_;    // open bag; a same-bag timeline cue skips the re-open
 
-  // Basemap controls (#24 follow-up from desk verify): store layer + colormap,
-  // and declutter toggles for the overlays that otherwise blanket the basemap.
+  // Basemap controls (#24 follow-up from desk verify): store layer + colormap.
   QComboBox * basemap_layer_ = nullptr;
   QComboBox * basemap_cmap_ = nullptr;
-  QCheckBox * show_track_check_ = nullptr;
-  QCheckBox * show_grid_check_ = nullptr;
-  QCheckBox * show_coast_check_ = nullptr;
-  QCheckBox * show_metric_grid_check_ = nullptr;
   QCheckBox * utc_check_ = nullptr;
+
+  // Map overlay toggles, in the View menu (#42): four checkboxes crowding the
+  // map pane header read as clutter and their one-word labels only worked
+  // because they sat in a row. As a vertical list they can say what they are.
+  // Disabled until an index opens, the moment the overlays have anything to
+  // draw. A proper layer list is later, deliberate work (#36).
+  QAction * show_track_action_ = nullptr;
+  QAction * show_grid_action_ = nullptr;
+  QAction * show_coast_action_ = nullptr;
+  QAction * show_metric_grid_action_ = nullptr;
 
   // Per-pane colour-range controls (#26): auto (default) or a manual lo/hi
   // in the pane's native units. The sidescan range also drives the map's

@@ -37,6 +37,7 @@
 #include <QHeaderView>
 #include <QImage>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -1694,49 +1695,6 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   basemap_cmap_ = make_cmap_combo();
   basemap_cmap_->setToolTip("Basemap colormap (percentile-scaled per layer)");
   basemap_cmap_->setVisible(false);
-  show_track_check_ = new QCheckBox("track", this);
-  show_track_check_->setChecked(true);
-  show_track_check_->setToolTip("Show the campaign nav track");
-  show_track_check_->setVisible(false);
-  show_grid_check_ = new QCheckBox("grid", this);
-  show_grid_check_->setChecked(true);
-  show_grid_check_->setToolTip(
-    "Show the index-tile grid (selected tiles stay visible)");
-  show_grid_check_->setVisible(false);
-  // Built-in world coastline (#41): orientation at collection zoom, where the
-  // store tiles are specks and nothing else says where you are. It fades out
-  // with zoom and is gone before survey scale — see coastline_data.hpp. Its
-  // state persists (written on toggle) because an operator who switched it
-  // off does not want it back at every launch.
-  show_coast_check_ = new QCheckBox("coast", this);
-  show_coast_check_->setToolTip(
-    "Show the built-in world coastline (Natural Earth 1:50m, offline).\n"
-    "Orientation only: generalised to the kilometre, drawn under every data "
-    "layer, and faded out before survey zoom. Never navigate by it.");
-  show_coast_check_->setVisible(false);
-  {
-    const QSettings settings("UNH-CCOM", "survey_explorer");
-    const bool on = settings.value("show_coastline", true).toBool();
-    show_coast_check_->setChecked(on);
-    canvas_->setCoastlineVisible(on);
-  }
-  // Metric measuring grid (#42): the slate Cartesian lines and their metre
-  // labels, a ruler inherited from the target viewer. Distinct from the
-  // "grid" box above, which toggles the cyan survey index tiles — the two
-  // were indistinguishable while only one of them could be switched off.
-  // Checked here for the bag case (the target-viewer window, where the grid
-  // IS the measuring tool); openSurveyIndex overrides it for index mode,
-  // where the remembered state wins and the default is off.
-  show_metric_grid_check_ = new QCheckBox("metric grid", this);
-  show_metric_grid_check_->setObjectName("show_metric_grid_check");
-  show_metric_grid_check_->setChecked(true);
-  show_metric_grid_check_->setToolTip(
-    "Show the metric measuring grid: Cartesian lines at the spacing set by "
-    "the Grid box in the bottom row, labelled in metres from the map "
-    "origin.\nA ruler for sizing a target, not navigation chrome — over a "
-    "whole collection the origin is arbitrary. This is NOT the index-tile "
-    "grid ('grid').");
-  show_metric_grid_check_->setVisible(false);
 
   // Times display in the system local zone by default (#26); this switches
   // the time bar, tooltips, status messages and pass labels to UTC — the
@@ -1834,13 +1792,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   auto * contacts_pane = make_pane("Contacts", contact_list_, {});
 
   // Left-to-right: contacts | map | 2x2 grid, all resizable. The map pane
-  // header carries the basemap layer/colormap combos (survey mode only).
+  // header carries the basemap layer/colormap combos and the contrast
+  // controls (survey mode only); the overlay toggles live in the View menu.
   auto * map_pane = make_pane(
     "Map", canvas_,
     {basemap_layer_, basemap_cmap_,
-      map_range_.auto_check, map_range_.lo, map_range_.hi,
-      show_track_check_, show_grid_check_, show_coast_check_,
-      show_metric_grid_check_});
+      map_range_.auto_check, map_range_.lo, map_range_.hi});
   outer_split_ = new QSplitter(Qt::Horizontal, this);
   outer_split_->addWidget(contacts_pane);
   outer_split_->addWidget(map_pane);
@@ -1899,6 +1856,69 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     &SidescanViewerWindow::onExportSurfaceRgba);
   file_menu->addSeparator();
   file_menu->addAction("E&xit", this, &QWidget::close);
+
+  // View menu (#42): the map overlay toggles, moved off the map pane header
+  // where four checkboxes had crowded out the basemap and contrast controls.
+  // Read as a vertical list the labels have to stand on their own, so each
+  // one names its overlay in full — above all the two grids, which an
+  // operator has already mistaken for each other.
+  auto * view_menu = menuBar()->addMenu("&View");
+  view_menu->setToolTipsVisible(true);
+  const auto add_overlay_action =
+    [this, view_menu](const QString & text, const QKeySequence & key,
+    const QString & tip) {
+      QAction * action = view_menu->addAction(text);
+      action->setCheckable(true);
+      action->setShortcut(key);
+      action->setToolTip(tip);
+      // The overlays have nothing to draw until an index opens; each action
+      // is enabled there, where its checkbox used to become visible.
+      action->setEnabled(false);
+      return action;
+    };
+  show_track_action_ = add_overlay_action(
+    "Nav &Track", QKeySequence("Ctrl+1"), "Show the campaign nav track");
+  show_track_action_->setObjectName("show_track_action");
+  show_track_action_->setChecked(true);
+  show_grid_action_ = add_overlay_action(
+    "Survey &Index Tile Grid", QKeySequence("Ctrl+2"),
+    "Show the index-tile grid (selected tiles stay visible)");
+  show_grid_action_->setObjectName("show_grid_action");
+  show_grid_action_->setChecked(true);
+  // Built-in world coastline (#41): orientation at collection zoom, where the
+  // store tiles are specks and nothing else says where you are. It fades out
+  // with zoom and is gone before survey scale — see coastline_data.hpp. Its
+  // state persists (written on toggle) because an operator who switched it
+  // off does not want it back at every launch.
+  show_coast_action_ = add_overlay_action(
+    "World &Coastline", QKeySequence("Ctrl+3"),
+    "Show the built-in world coastline (Natural Earth 1:50m, offline).\n"
+    "Orientation only: generalised to the kilometre, drawn under every data "
+    "layer, and faded out before survey zoom. Never navigate by it.");
+  show_coast_action_->setObjectName("show_coast_action");
+  {
+    const QSettings settings("UNH-CCOM", "survey_explorer");
+    const bool on = settings.value("show_coastline", true).toBool();
+    show_coast_action_->setChecked(on);
+    canvas_->setCoastlineVisible(on);
+  }
+  // Metric measuring grid (#42): the slate Cartesian lines and their metre
+  // labels, a ruler inherited from the target viewer. Distinct from the tile
+  // grid above, which draws the cyan survey index tiles — the two were
+  // indistinguishable while only one of them could be switched off, and the
+  // header's "grid" / "metric grid" pair barely helped.
+  // Checked here for the bag case (the target-viewer window, where the grid
+  // IS the measuring tool); openSurveyIndex overrides it for index mode,
+  // where the remembered state wins and the default is off.
+  show_metric_grid_action_ = add_overlay_action(
+    "&Measuring Grid (metres)", QKeySequence("Ctrl+4"),
+    "Show the metric measuring grid: Cartesian lines at the spacing set by "
+    "the Grid box in the bottom row, labelled in metres from the map "
+    "origin.\nA ruler for sizing a target, not navigation chrome — over a "
+    "whole collection the origin is arbitrary. This is NOT the survey index "
+    "tile grid.");
+  show_metric_grid_action_->setObjectName("show_metric_grid_action");
+  show_metric_grid_action_->setChecked(true);
 
   connect(this, &SidescanViewerWindow::indexProgress,
     this, &SidescanViewerWindow::onIndexProgress);
@@ -1989,16 +2009,16 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, [this](int) {requestBasemapLoad();});
   connect(basemap_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {requestBasemapLoad();});
-  connect(show_track_check_, &QCheckBox::toggled,
+  connect(show_track_action_, &QAction::toggled,
     this, [this](bool on) {canvas_->setNavTrackVisible(on);});
-  connect(show_grid_check_, &QCheckBox::toggled,
+  connect(show_grid_action_, &QAction::toggled,
     this, [this](bool on) {canvas_->setIndexTilesVisible(on);});
-  connect(show_coast_check_, &QCheckBox::toggled, this, [this](bool on) {
+  connect(show_coast_action_, &QAction::toggled, this, [this](bool on) {
       canvas_->setCoastlineVisible(on);
       QSettings settings("UNH-CCOM", "survey_explorer");
       settings.setValue("show_coastline", on);
     });
-  connect(show_metric_grid_check_, &QCheckBox::toggled, this, [this](bool on) {
+  connect(show_metric_grid_action_, &QAction::toggled, this, [this](bool on) {
       canvas_->setMetricGridVisible(on);
       // The spacing spinbox belongs to this grid; grey it out while there is
       // no grid for it to space.
@@ -3014,20 +3034,20 @@ void SidescanViewerWindow::openSurveyIndex(
   discoverBasemapLayers(
     std::filesystem::path(index_path).parent_path().string(), stores_dir);
   requestBasemapLoad();
-  show_track_check_->setVisible(true);
-  show_grid_check_->setVisible(true);
-  show_coast_check_->setVisible(true);
+  show_track_action_->setEnabled(true);
+  show_grid_action_->setEnabled(true);
+  show_coast_action_->setEnabled(true);
   // Index mode: the measuring grid is off unless the operator asked for it
   // back. Applied here rather than in the constructor because this is the
   // moment the window learns which mode it is in.
   {
     const QSettings settings("UNH-CCOM", "survey_explorer");
     const bool on = settings.value("show_metric_grid", false).toBool();
-    show_metric_grid_check_->setChecked(on);
+    show_metric_grid_action_->setChecked(on);
     canvas_->setMetricGridVisible(on);
     grid_spin_->setEnabled(on);
   }
-  show_metric_grid_check_->setVisible(true);
+  show_metric_grid_action_->setEnabled(true);
   loadCoastlineLayer();
 }
 

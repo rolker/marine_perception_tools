@@ -22,8 +22,8 @@
 
 #include <gtest/gtest.h>
 
+#include <QAction>
 #include <QApplication>
-#include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QImage>
 #include <QLabel>
@@ -339,9 +339,9 @@ TEST_F(ExplorerWindowFixture, MetricGridDefaultsOffInIndexModeAndOnForABag)
   }
 
   SidescanViewerWindow bag_window;
-  auto * bag_check = bag_window.findChild<QCheckBox *>("show_metric_grid_check");
-  ASSERT_NE(bag_check, nullptr);
-  EXPECT_TRUE(bag_check->isChecked()) << "a bag lost its measuring grid";
+  auto * bag_action = bag_window.findChild<QAction *>("show_metric_grid_action");
+  ASSERT_NE(bag_action, nullptr);
+  EXPECT_TRUE(bag_action->isChecked()) << "a bag lost its measuring grid";
   auto * bag_canvas = bag_window.findChild<SidescanCanvas *>();
   ASSERT_NE(bag_canvas, nullptr);
   EXPECT_TRUE(bag_canvas->metricGridVisible());
@@ -351,10 +351,12 @@ TEST_F(ExplorerWindowFixture, MetricGridDefaultsOffInIndexModeAndOnForABag)
   window.show();
   QCoreApplication::processEvents();
 
-  auto * check = window.findChild<QCheckBox *>("show_metric_grid_check");
-  ASSERT_NE(check, nullptr);
-  EXPECT_TRUE(check->isVisible());
-  EXPECT_FALSE(check->isChecked()) << "the index map opened with the measuring grid on";
+  auto * action = window.findChild<QAction *>("show_metric_grid_action");
+  ASSERT_NE(action, nullptr);
+  // The View-menu action takes over the enable-on-index-open moment that used
+  // to make the header checkbox visible (#42).
+  EXPECT_TRUE(action->isEnabled());
+  EXPECT_FALSE(action->isChecked()) << "the index map opened with the measuring grid on";
   auto * canvas = window.findChild<SidescanCanvas *>();
   ASSERT_NE(canvas, nullptr);
   EXPECT_FALSE(canvas->metricGridVisible());
@@ -364,7 +366,7 @@ TEST_F(ExplorerWindowFixture, MetricGridDefaultsOffInIndexModeAndOnForABag)
   ASSERT_NE(spin, nullptr);
   EXPECT_FALSE(spin->isEnabled());
 
-  check->setChecked(true);
+  action->setChecked(true);
   QCoreApplication::processEvents();
   EXPECT_TRUE(canvas->metricGridVisible());
   EXPECT_TRUE(spin->isEnabled());
