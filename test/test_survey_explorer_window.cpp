@@ -42,10 +42,17 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
+#include <memory>
 #include <set>
 #include <utility>
 #include <stdexcept>
 #include <string>
+
+#include "marine_acoustic_msgs/msg/sonar_detections.hpp"
+#include "rclcpp/time.hpp"
+#include "rosbag2_cpp/writer.hpp"
+#include "tf2_msgs/msg/tf_message.hpp"
 
 #include "coastline_data.hpp"
 #include "marine_autonomy/gggs.h"
@@ -230,6 +237,198 @@ TEST_F(ExplorerWindowFixture, IndexModeSurvivesTileSelectionAndClear)
   EXPECT_EQ(legend->topLevelItemCount(), 0);
   EXPECT_TRUE(timeline->isVisible());
   EXPECT_EQ(timeline->passCount(), 0);
+}
+
+// --- bounded teardown while a background job runs (#44) ---------------------
+
+// The explorer's four heavy workers all read bags, so the only honest way to
+// start a long one in a test is to give it a real bag. This writes a small
+// synthetic recording whose window read is deliberately expensive — dense
+// /tf plus many multi-beam detections — so an uncancelled cloud load takes
+// long enough for "the close returned promptly" to mean something.
+struct SyntheticBagSpec
+{
+  std::int64_t t0_ns = 1700000000000000000LL;
+  std::int64_t t1_ns = 0;      // filled in by writeSyntheticBag
+  int tf_messages = 12000;     // dynamic /tf samples across the window
+  int pings = 4000;            // detection pings across the window
+  int beams = 512;             // beams per ping
+};
+
+void writeSyntheticBag(const std::string & uri, SyntheticBagSpec & spec)
+{
+  constexpr std::int64_t kSpanNs = 60000000000LL;   // 60 s of recording
+  spec.t1_ns = spec.t0_ns + kSpanNs;
+
+  rosbag2_cpp::Writer writer;
+  writer.open(uri);
+
+  // Static mount: the sensor frame the detections are stamped in.
+  {
+    tf2_msgs::msg::TFMessage tfm;
+    geometry_msgs::msg::TransformStamped t;
+    t.header.frame_id = "bizzy/base_link";
+    t.child_frame_id = "bizzy/m3";
+    t.transform.translation.z = -0.5;
+    t.transform.rotation.w = 1.0;
+    t.header.stamp.sec = static_cast<std::int32_t>(spec.t0_ns / 1000000000LL);
+    tfm.transforms.push_back(t);
+    writer.write(tfm, "/tf_static", rclcpp::Time(spec.t0_ns));
+  }
+
+  // Dynamic chain: the boat under the map frame, and the earth<-map geo
+  // anchor read_mbes_window looks up for cross-bag reprojection.
+  for (int i = 0; i < spec.tf_messages; ++i) {
+    const std::int64_t t =
+      spec.t0_ns + kSpanNs * i / std::max(1, spec.tf_messages);
+    tf2_msgs::msg::TFMessage tfm;
+    geometry_msgs::msg::TransformStamped pose;
+    pose.header.frame_id = "bizzy/map";
+    pose.child_frame_id = "bizzy/base_link";
+    pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
+    pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
+    pose.transform.translation.x = 0.5 * i;
+    pose.transform.rotation.w = 1.0;
+    tfm.transforms.push_back(pose);
+
+    geometry_msgs::msg::TransformStamped anchor = pose;
+    anchor.header.frame_id = "earth";
+    anchor.child_frame_id = "bizzy/map";
+    anchor.transform.translation.x = 1917000.0;
+    anchor.transform.translation.y = -4470000.0;
+    anchor.transform.translation.z = 4325000.0;
+    tfm.transforms.push_back(anchor);
+
+    writer.write(tfm, "/tf", rclcpp::Time(t));
+  }
+
+  // Detections: every beam a real bottom detection, so the load does the
+  // projection and the world-frame lift for each one.
+  marine_acoustic_msgs::msg::SonarDetections det;
+  det.header.frame_id = "bizzy/m3";
+  det.ping_info.sound_speed = 1500.0f;
+  det.two_way_travel_times.resize(static_cast<std::size_t>(spec.beams));
+  det.tx_angles.assign(static_cast<std::size_t>(spec.beams), 0.0f);
+  det.rx_angles.resize(static_cast<std::size_t>(spec.beams));
+  det.intensities.assign(static_cast<std::size_t>(spec.beams), -30.0f);
+  for (int b = 0; b < spec.beams; ++b) {
+    const double angle = -1.0 + 2.0 * b / std::max(1, spec.beams - 1);
+    det.rx_angles[static_cast<std::size_t>(b)] = static_cast<float>(angle);
+    det.two_way_travel_times[static_cast<std::size_t>(b)] =
+      static_cast<float>(2.0 * 12.0 / (1500.0 * std::cos(angle)));
+  }
+  for (int i = 0; i < spec.pings; ++i) {
+    const std::int64_t t = spec.t0_ns + kSpanNs * i / std::max(1, spec.pings);
+    det.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
+    det.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
+    writer.write(det, "/bizzy/sensors/m3/detections", rclcpp::Time(t));
+  }
+}
+
+// Closing the window while the cloud loader is reading bags must return the
+// operator's prompt, not wait the load out (#44). The measurement is relative
+// to the same load run to completion, so the assertion means the same thing
+// on any machine: a teardown that took a meaningful fraction of the job it
+// interrupted did not cancel it.
+//
+// This is also the granularity gate. The heavy pass is ONE pass over ONE bag,
+// so a flag checked once per pass — or once before read_mbes_window's loops —
+// bounds nothing here: the job runs to the end and the teardown takes as long
+// as the baseline. Only a check inside the read loops passes.
+TEST_F(ExplorerWindowFixture, ClosingDuringACloudLoadReturnsPromptly)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+
+  const std::string bag_uri = std::string(::testing::TempDir()) + "/explorer_slow_bag";
+  // ~35 MB of synthetic recording: erased on the way in and on every way
+  // out, including a failed assertion (the temp dir is shared, and this is a
+  // machine whose disk fills).
+  struct BagCleanup
+  {
+    std::string uri;
+    ~BagCleanup() {std::filesystem::remove_all(uri);}
+  } cleanup{bag_uri};
+  std::filesystem::remove_all(bag_uri);
+  SyntheticBagSpec spec;
+  writeSyntheticBag(bag_uri, spec);
+
+  // Swap the fixture's missing-bag mbes pass for one over the real (slow)
+  // bag, so the tile selection below drives exactly ONE long pass. That is
+  // deliberate: with a second pass in the list, a flag checked only between
+  // passes would bound the wait and this test would pass without ever
+  // proving the check inside the bag read.
+  sqlite3 * db = marine_survey_index::openIndexDb(db_path_);
+  exec(db, "DELETE FROM passes WHERE sensor_type = 'mbes-bathy';");
+  exec(db, ("INSERT INTO bags (id, path, size_bytes, mtime_ns, indexed_at_ns)"
+    " VALUES (2, '" + bag_uri + "', 100, 200, 300);").c_str());
+  const auto tile = gggs::Level(14).gridIndex(kLat, kLon);
+  exec(db, ("INSERT INTO passes (bag_id, level, tile_row, tile_col, sensor_type,"
+    " topic, t_start_ns, t_end_ns, ping_count) VALUES (2, 14, " +
+    std::to_string(tile.row()) + ", " + std::to_string(tile.column()) +
+    ", 'mbes-bathy', '/bizzy/sensors/m3/detections', " +
+    std::to_string(spec.t0_ns) + ", " + std::to_string(spec.t1_ns) + ", " +
+    std::to_string(spec.pings) + ");").c_str());
+  sqlite3_close(db);
+
+  qint64 baseline_ms = 0;
+  {
+    // Baseline: the same load, run to completion, so the bound below is
+    // expressed against real work rather than a guessed millisecond count.
+    auto window = std::make_unique<SidescanViewerWindow>();
+    window->openSurveyIndex(db_path_, std::string(::testing::TempDir()));
+    window->show();
+    QCoreApplication::processEvents();
+    auto * canvas = window->findChild<SidescanCanvas *>();
+    ASSERT_NE(canvas, nullptr);
+    auto * legend = window->findChild<QTreeWidget *>("cloud_legend");
+    ASSERT_NE(legend, nullptr);
+
+    QElapsedTimer timer;
+    timer.start();
+    canvas->selectTiles({0, 1});
+    ASSERT_TRUE(
+      process_until([legend]() {return legend->topLevelItemCount() > 0;}))
+      << "the baseline cloud load never completed";
+    baseline_ms = timer.elapsed();
+  }
+  // If the fixture stopped being a long job, the bound below would pass
+  // vacuously. Fail loudly and say what to do instead of quietly asserting
+  // nothing.
+  ASSERT_GT(baseline_ms, 300)
+    << "the synthetic bag is no longer slow enough for this test to mean "
+       "anything (" << baseline_ms << " ms) — enlarge SyntheticBagSpec";
+
+  // The real thing: start the same load and close mid-flight.
+  auto window = std::make_unique<SidescanViewerWindow>();
+  window->openSurveyIndex(db_path_, std::string(::testing::TempDir()));
+  window->show();
+  QCoreApplication::processEvents();
+  auto * canvas = window->findChild<SidescanCanvas *>();
+  ASSERT_NE(canvas, nullptr);
+  canvas->selectTiles({0, 1});
+  // Give the worker a head start so the close lands INSIDE the bag read.
+  // Without it the cancel could arrive before the first message is read,
+  // where even a once-per-pass check would look bounded — and the test would
+  // stop being the granularity gate it is here to be. Spinning the event
+  // loop, not sleeping: the worker is on a pool thread either way.
+  QElapsedTimer head_start;
+  head_start.start();
+  while (head_start.elapsed() < 150) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+  }
+
+  QElapsedTimer timer;
+  timer.start();
+  window->close();
+  window.reset();   // ~SidescanViewerWindow waits on the workers
+  const qint64 teardown_ms = timer.elapsed();
+
+  EXPECT_LT(teardown_ms * 4, baseline_ms)
+    << "closing took " << teardown_ms << " ms against a " << baseline_ms
+    << " ms load: the cloud worker was waited out, not cancelled";
 }
 
 // Render the canvas over a geographic box with the coastline layer on or off.

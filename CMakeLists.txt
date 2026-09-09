@@ -371,9 +371,13 @@ if(BUILD_TESTING)
     src/sidescan_drape_loader.cpp
     src/cube_export.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
+  # rosbag2_cpp + the message packages are used directly by the test itself:
+  # the bounded-teardown test (#44) writes a synthetic bag to start a real
+  # long job for the close to interrupt.
   ament_target_dependencies(test_survey_explorer_window
-    ament_index_cpp cube_bathymetry marine_autonomy marine_colormap
-    marine_sonar_widgets marine_tiled_raster_store)
+    ament_index_cpp cube_bathymetry marine_acoustic_msgs marine_autonomy
+    marine_colormap marine_sonar_widgets marine_tiled_raster_store
+    rclcpp rosbag2_cpp tf2_msgs)
   target_include_directories(test_survey_explorer_window SYSTEM PRIVATE
     ${CUBE_BATHYMETRY_INCLUDE_ROOT})
   target_link_libraries(test_survey_explorer_window
