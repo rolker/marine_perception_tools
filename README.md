@@ -165,6 +165,19 @@ One window, two modes that compose:
   region drag, a pan, a recentre glide, a zoom, or contact marking. With no
   highlighted fix the click is still the complete no-op #42 made it.
 
+  The **geographic readout** in the status row follows the cursor over *every*
+  spatial pane (#47), not just the map: the 3D cloud, both waterfalls and the
+  echogram each convert the position in their own frame — the waterfalls and
+  the echogram through the open bag's earth anchor, the 3D pane through the
+  frame its points were loaded in, which for a selection or CUBE run may be
+  another recording's. Each position is shown with the name of the pane that
+  produced it (`MBES 3D  43.020305, -71.360000`), because with four panes
+  feeding one label a number nobody can attribute is a number you cannot act
+  on. A pane that cannot place the cursor — a recording with no earth
+  reference, a waterfall pixel with no pose behind it — shows *nothing* rather
+  than a zero that reads like a position, and the readout clears when the
+  cursor leaves a pane, so a position on screen is always a live one.
+
   Cueing to an instant in a recording that is not open reopens and re-indexes
   that whole bag, and the status line says so while it happens. In a revisited
   area most clicks land in another recording and pay it: underneath, the
