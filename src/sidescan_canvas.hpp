@@ -28,7 +28,11 @@
 #include <QVector>
 #include <QWidget>
 
+class QContextMenuEvent;
+class QMenu;
+
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <set>
 #include <utility>
@@ -230,6 +234,50 @@ public:
   // Transient cross-pane linked cursor at a map point (metres); nullopt clears it.
   void setCursorWorld(const std::optional<QPointF> & map_point);
 
+  // --- map context menu (#42) ---------------------------------------------
+  // Right-click on the map opens a menu of map actions. Entries are
+  // registered rather than hard-coded in the event handler, so the menu the
+  // operator expects to grow (Run CUBE here, export this area, load these
+  // passes) grows by adding one entry instead of by restructuring.
+  //
+  // The canvas registers `Clear selection` itself, because clearing the
+  // region is purely canvas state and reports through the existing
+  // cubeBoxCleared / tileSelectionChanged signals. Everything that is the
+  // window's business the window adds through addContextMenuEntry, which
+  // keeps the canvas from ever reaching into the window.
+  struct ContextMenuEntry
+  {
+    QString text;
+    // What the entry does. An entry without one is inert and is not added.
+    std::function<void()> invoke;
+    // Whether the entry applies to the current state; null means always. A
+    // false predicate greys the entry out (rather than hiding it) so the menu
+    // keeps one stable shape and never offers an action that would do
+    // nothing.
+    std::function<bool()> enabled;
+  };
+
+  // Append an entry. Entries appear in registration order; the canvas's own
+  // `Clear selection` is registered at construction, so window entries follow
+  // it.
+  void addContextMenuEntry(ContextMenuEntry entry);
+
+  // The menu for the current state, parented to `parent` (which owns it).
+  // contextMenuEvent pops this up; tests drive the same actions through it
+  // without a modal exec.
+  QMenu * buildContextMenu(QWidget * parent);
+
+  // Whether there is a region to act on: selected index tiles, a CUBE box, or
+  // both. Decides whether `Clear selection` is offered as available.
+  bool hasRegion() const {return !selected_tiles_.empty() || cube_box_geo_.has_value();}
+
+  // Drop the region — the selected index tiles and the CUBE box overlay —
+  // emitting the same signals the region gestures do. This was the
+  // left-click-with-no-drag gesture until #42 moved it into the context menu:
+  // a bare click on the map reads as "select what I clicked on", and the one
+  // thing it did was destroy the operator's region.
+  void clearRegion();
+
 signals:
   // A contact box was drawn, in map coordinates (metres).
   void boxMarked(const QRectF & map_rect);
@@ -250,8 +298,9 @@ signals:
   // LOD basemap re-evaluates its level + visible-tile demand load (#26).
   void viewChanged();
 
-  // Shift-drag CUBE box (#27): a geographic box was drawn / cleared (a
-  // shift-click without a drag clears). The box stays as a map overlay.
+  // The region's geographic box (#27, #42): drawn by a left-drag, or cleared
+  // (clearRegion, reached from the right-click menu). The box stays as a map
+  // overlay.
   void cubeBoxSelected(double south, double west, double north, double east);
   void cubeBoxCleared();
 
@@ -262,8 +311,12 @@ protected:
   void mousePressEvent(QMouseEvent * event) override;
   void mouseMoveEvent(QMouseEvent * event) override;
   void mouseReleaseEvent(QMouseEvent * event) override;
+  void contextMenuEvent(QContextMenuEvent * event) override;
 
 private:
+  // Registered context-menu entries, in the order they are offered.
+  std::vector<ContextMenuEntry> context_menu_entries_;
+
   // Static-layer cache (#24 desk finding: full repaints at mouse-move rate
   // made everything sluggish). The basemap tiles, measuring grid, decimated
   // nav track, and unselected tile-grid outlines render ONCE per view into a

@@ -28,6 +28,7 @@
 #include <QImage>
 #include <QLabel>
 #include <QElapsedTimer>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
@@ -788,6 +789,163 @@ TEST_F(ExplorerWindowFixture, TheGlideRebuildsTheLayerCacheOnceNotPerFrame)
   EXPECT_EQ(canvas.layerCacheRebuildCount() - rebuilds_before, 1u)
     << "the layer cache was rebuilt " << canvas.layerCacheRebuildCount() - rebuilds_before
     << " times across " << frames << " animation frames";
+}
+
+// --- region clearing: left-click vs. the context menu (#42) -----------------
+
+void leftDrag(SidescanCanvas & canvas, const QPoint & from, const QPoint & to)
+{
+  QMouseEvent press(
+    QEvent::MouseButtonPress, QPointF(from), QPointF(canvas.mapToGlobal(from)),
+    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(&canvas, &press);
+  QMouseEvent move(
+    QEvent::MouseMove, QPointF(to), QPointF(canvas.mapToGlobal(to)),
+    Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(&canvas, &move);
+  QMouseEvent release(
+    QEvent::MouseButtonRelease, QPointF(to), QPointF(canvas.mapToGlobal(to)),
+    Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(&canvas, &release);
+}
+
+// Press and release at the same point: a click, well inside the slop.
+void leftClick(SidescanCanvas & canvas, const QPoint & pos)
+{
+  leftDrag(canvas, pos, pos);
+}
+
+// A fitted canvas whose index grid holds one tile around the fixture
+// position, dragged over so a region exists to be cleared.
+void selectARegion(SidescanCanvas & canvas)
+{
+  prepareFittedCanvas(canvas);
+  canvas.setIndexTiles({GeoRect{kLat - 0.002, kLon - 0.002, kLat + 0.002, kLon + 0.002}});
+  leftDrag(canvas, QPoint(40, 40), QPoint(360, 260));
+  ASSERT_TRUE(canvas.hasRegion()) << "the drag never produced a region to clear";
+}
+
+QAction * findMenuAction(QMenu & menu, const QString & text)
+{
+  for (QAction * action : menu.actions()) {
+    if (action->text() == text) {
+      return action;
+    }
+  }
+  return nullptr;
+}
+
+// The regression the operator hit: he clicked the map meaning to pick out a
+// nav-track line and the click threw his region away. A bare left click must
+// now leave the region exactly as it was, and must report nothing.
+TEST_F(ExplorerWindowFixture, ALeftClickNoLongerClearsTheRegion)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  ASSERT_NO_FATAL_FAILURE(selectARegion(canvas));
+  const std::set<std::size_t> selected_before = canvas.selectedTiles();
+  ASSERT_FALSE(selected_before.empty());
+
+  int cleared = 0;
+  int selection_changed = 0;
+  QObject::connect(
+    &canvas, &SidescanCanvas::cubeBoxCleared, &canvas, [&cleared]() {++cleared;});
+  QObject::connect(
+    &canvas, &SidescanCanvas::tileSelectionChanged, &canvas,
+    [&selection_changed]() {++selection_changed;});
+
+  leftClick(canvas, QPoint(200, 150));
+
+  EXPECT_TRUE(canvas.hasRegion());
+  EXPECT_EQ(canvas.selectedTiles(), selected_before);
+  EXPECT_EQ(cleared, 0);
+  EXPECT_EQ(selection_changed, 0);
+}
+
+// Clearing is still available — it just has to be asked for by name.
+TEST_F(ExplorerWindowFixture, TheContextMenuClearSelectionEntryClearsTheRegion)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  ASSERT_NO_FATAL_FAILURE(selectARegion(canvas));
+
+  int cleared = 0;
+  int selection_changed = 0;
+  QObject::connect(
+    &canvas, &SidescanCanvas::cubeBoxCleared, &canvas, [&cleared]() {++cleared;});
+  QObject::connect(
+    &canvas, &SidescanCanvas::tileSelectionChanged, &canvas,
+    [&selection_changed]() {++selection_changed;});
+
+  QMenu menu;
+  std::unique_ptr<QMenu> built(canvas.buildContextMenu(&menu));
+  QAction * clear = findMenuAction(*built, "Clear Selection");
+  ASSERT_NE(clear, nullptr) << "the map menu offers no Clear Selection entry";
+  EXPECT_TRUE(clear->isEnabled()) << "the entry was greyed out with a region selected";
+
+  clear->trigger();
+
+  EXPECT_FALSE(canvas.hasRegion());
+  EXPECT_TRUE(canvas.selectedTiles().empty());
+  EXPECT_EQ(cleared, 1);
+  EXPECT_EQ(selection_changed, 1);
+}
+
+// With nothing selected the entry is still there (the menu keeps one shape)
+// but greyed out, so it never reads as an action that would do something.
+TEST_F(ExplorerWindowFixture, ClearSelectionIsDisabledWithNothingSelected)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  prepareFittedCanvas(canvas);
+  ASSERT_FALSE(canvas.hasRegion());
+
+  QMenu menu;
+  std::unique_ptr<QMenu> built(canvas.buildContextMenu(&menu));
+  QAction * clear = findMenuAction(*built, "Clear Selection");
+  ASSERT_NE(clear, nullptr);
+  EXPECT_FALSE(clear->isEnabled());
+}
+
+// The menu grows by adding an entry: a registered entry is offered in order,
+// takes its enabled state from its own predicate, and runs on trigger.
+TEST_F(ExplorerWindowFixture, RegisteredContextMenuEntriesAreOffered)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  prepareFittedCanvas(canvas);
+  int runs = 0;
+  bool applies = false;
+  canvas.addContextMenuEntry(
+    SidescanCanvas::ContextMenuEntry{
+      "Test Entry", [&runs]() {++runs;}, [&applies]() {return applies;}});
+
+  QMenu menu;
+  {
+    std::unique_ptr<QMenu> built(canvas.buildContextMenu(&menu));
+    QAction * entry = findMenuAction(*built, "Test Entry");
+    ASSERT_NE(entry, nullptr);
+    EXPECT_FALSE(entry->isEnabled());
+  }
+  applies = true;
+  std::unique_ptr<QMenu> built(canvas.buildContextMenu(&menu));
+  QAction * entry = findMenuAction(*built, "Test Entry");
+  ASSERT_NE(entry, nullptr);
+  EXPECT_TRUE(entry->isEnabled());
+  entry->trigger();
+  EXPECT_EQ(runs, 1);
 }
 
 }  // namespace

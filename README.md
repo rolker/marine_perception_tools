@@ -140,10 +140,17 @@ One window, two modes that compose:
   cross-bag reprojection through the `earth` anchor), and the **time bar**
   under the scrub controls fills with the selection's passes.
   Map gestures (#42) are one region and one navigation button, with no
-  modifiers: **left-drag** draws or replaces the region, **left-click** clears
-  it, **middle-click** centres the view on the point (and seeks the time cursor
-  there when a bag is open), **middle-drag** pans, and the wheel zooms. While
-  *Mark contact* is on, that visible mode takes left-drag for marking.
+  modifiers: **left-drag** draws or replaces the region, **middle-click**
+  centres the view on the point (and seeks the time cursor there when a bag is
+  open), **middle-drag** pans, and the wheel zooms. A **left-click** with no
+  drag does nothing: clicking the map to pick out a nav-track line is not a
+  gesture this map has (passes are chosen from the time bar or the pass list),
+  and a click that silently threw the region away was the one destructive thing
+  it could do. Clearing is now asked for by name — **right-click** the map for
+  its context menu and choose **Clear Selection**, which is greyed out when
+  there is nothing selected. That menu is where further map actions will
+  appear. While *Mark contact* is on, that visible mode takes left-drag for
+  marking.
   The recentre **glides** to the point over about three quarters of a second,
   easing in and out, so the eye can follow the map across instead of having to
   re-find the survey after a jump. The seek is not delayed by it — the time

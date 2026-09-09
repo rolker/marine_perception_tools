@@ -14,9 +14,12 @@
 
 #include "sidescan_canvas.hpp"
 
+#include <QAction>
 #include <QColor>
+#include <QContextMenuEvent>
 #include <QGuiApplication>
 #include <QFont>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
@@ -64,6 +67,64 @@ SidescanCanvas::SidescanCanvas(QWidget * parent)
   // frame costs smoothness and never the duration.
   recenter_timer_.setInterval(16);
   connect(&recenter_timer_, &QTimer::timeout, this, [this]() {stepRecenter();});
+  // The map's own context-menu entry (#42). Clearing the region is canvas
+  // state, so the canvas carries this one; anything that is the window's
+  // business is added by the window through addContextMenuEntry.
+  addContextMenuEntry(
+    ContextMenuEntry{
+      tr("Clear Selection"),
+      [this]() {clearRegion();},
+      [this]() {return hasRegion();}});
+}
+
+void SidescanCanvas::addContextMenuEntry(ContextMenuEntry entry)
+{
+  if (!entry.invoke) {return;}   // an inert entry would read as a broken action
+  context_menu_entries_.push_back(std::move(entry));
+}
+
+QMenu * SidescanCanvas::buildContextMenu(QWidget * parent)
+{
+  auto * menu = new QMenu(parent);
+  for (const auto & entry : context_menu_entries_) {
+    QAction * action = menu->addAction(entry.text);
+    // Greyed out, not hidden: the menu keeps one shape, and an entry that
+    // would do nothing never reads as an available action.
+    action->setEnabled(!entry.enabled || entry.enabled());
+    const auto invoke = entry.invoke;
+    connect(action, &QAction::triggered, this, [invoke]() {invoke();});
+  }
+  return menu;
+}
+
+void SidescanCanvas::contextMenuEvent(QContextMenuEvent * event)
+{
+  if (context_menu_entries_.empty()) {
+    QWidget::contextMenuEvent(event);
+    return;
+  }
+  QMenu * menu = buildContextMenu(this);
+  // popup(), not exec(): the menu must not run a nested event loop inside the
+  // event handler, and it deletes itself when it closes.
+  menu->setAttribute(Qt::WA_DeleteOnClose);
+  menu->popup(event->globalPos());
+  event->accept();
+}
+
+void SidescanCanvas::clearRegion()
+{
+  const bool had_tiles = !selected_tiles_.empty();
+  const bool had_box = cube_box_geo_.has_value();
+  if (!had_tiles && !had_box) {return;}
+  selected_tiles_.clear();
+  cube_box_geo_.reset();
+  update();
+  if (had_box) {
+    emit cubeBoxCleared();
+  }
+  if (had_tiles) {
+    emit tileSelectionChanged();
+  }
 }
 
 // --- middle-click recentre glide (#42) --------------------------------------
@@ -1001,6 +1062,10 @@ void SidescanCanvas::mousePressEvent(QMouseEvent * event)
   // Any new press ends a recentre glide in flight (#42): a middle press is
   // about to pan or retarget, and a left press draws a region whose corners
   // are read in screen pixels — the map must not slide out from under it.
+  // The right button takes no part in the drag gestures — it opens the map
+  // context menu (contextMenuEvent) — so it must not abandon a glide either:
+  // opening a menu neither pans the view nor draws a region.
+  if (event->button() != Qt::LeftButton && event->button() != Qt::MiddleButton) {return;}
   abandonRecenter();
   if (event->button() == Qt::MiddleButton) {
     middle_start_ = event->pos();
@@ -1108,20 +1173,16 @@ void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
     const bool was_click =
       (event->pos() - region_start_).manhattanLength() <= kClickSlopPx;
     // One rectangle, both consequences: the exact bounds are the processing
-    // extent, and the index tiles it covers are the pass query. A click with
-    // no drag clears both, which is also the clear-selection affordance the
-    // tile rubber band never had.
-    const bool had_tiles = !selected_tiles_.empty();
+    // extent, and the index tiles it covers are the pass query.
+    //
+    // A click with no drag does NOTHING to the region (#42). It used to clear
+    // it, and that is the one destructive thing a bare click could do: the
+    // operator clicked the map meaning "select this nav-track line" — which
+    // is not a gesture this map has, passes being chosen from the time bar or
+    // the pass list — and lost his region. Clearing now lives in the
+    // right-click menu, where it has to be asked for by name.
     if (was_click) {
-      selected_tiles_.clear();
-      if (cube_box_geo_) {
-        cube_box_geo_.reset();
-        emit cubeBoxCleared();
-      }
-      update();
-      if (had_tiles) {
-        emit tileSelectionChanged();
-      }
+      update();   // erase the zero-size rubber band the press started
       return;
     }
     const QPointF a = screenToMap(region_start_.x(), region_start_.y());
