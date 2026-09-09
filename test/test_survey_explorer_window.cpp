@@ -25,7 +25,9 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QDoubleSpinBox>
 #include <QImage>
 #include <QLabel>
@@ -1687,6 +1689,126 @@ TEST_F(ExplorerWindowFixture, AnUnplaceableMapReadsOutNothingRatherThanZero)
   hoverAt(*canvas, QPoint(canvas->width() / 2, canvas->height() / 2));
 
   EXPECT_TRUE(geo->text().isEmpty()) << geo->text().toStdString();
+}
+
+// --- Copy Position (#42) ----------------------------------------------------
+
+// Right-click the map and take the menu it popped up. The real event path,
+// because the position the entry acts on is captured IN that event — driving
+// buildContextMenu directly would skip the very thing under test.
+QMenu * openContextMenu(SidescanCanvas & canvas, const QPoint & pos)
+{
+  QContextMenuEvent event(
+    QContextMenuEvent::Mouse, pos, canvas.mapToGlobal(pos), Qt::NoModifier);
+  QApplication::sendEvent(&canvas, &event);
+  const auto menus = canvas.findChildren<QMenu *>();
+  return menus.isEmpty() ? nullptr : menus.last();
+}
+
+// The semantic the operator asked for and the one most likely to rot: he
+// right-clicks a feature, reads down the menu — the pointer travelling the
+// whole way — and picks Copy Position. What lands on the clipboard is the
+// place he right-clicked, not the place the pointer had got to.
+TEST_F(ExplorerWindowFixture, CopyPositionCopiesWhereTheMenuWasOpenedNotTheLaterCursor)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  QApplication::clipboard()->clear();
+
+  const QPoint clicked(90, 70);
+  const QPoint drifted(300, 220);
+  const auto clicked_geo = pixelGeo(*canvas, clicked);
+  const auto drifted_geo = pixelGeo(*canvas, drifted);
+  ASSERT_GT(std::abs(clicked_geo.first - drifted_geo.first), 1e-5)
+    << "the two pixels must be tellable apart at six decimals";
+
+  QMenu * menu = openContextMenu(*canvas, clicked);
+  ASSERT_NE(menu, nullptr) << "right-clicking the map opened no menu";
+  QAction * copy = findMenuAction(*menu, "Copy Position");
+  ASSERT_NE(copy, nullptr) << "the map menu offers no Copy Position entry";
+  ASSERT_TRUE(copy->isEnabled()) << "greyed out over a placeable map";
+
+  // The pointer travels down the menu before the entry is picked.
+  hoverAt(*canvas, drifted);
+  copy->trigger();
+  menu->close();
+
+  const QStringList parts = QApplication::clipboard()->text().split(", ");
+  ASSERT_EQ(parts.size(), 2) << QApplication::clipboard()->text().toStdString();
+  EXPECT_NEAR(parts[0].toDouble(), clicked_geo.first, 1e-5);
+  EXPECT_NEAR(parts[1].toDouble(), clicked_geo.second, 1e-5);
+  EXPECT_GT(std::abs(parts[0].toDouble() - drifted_geo.first), 1e-5)
+    << "the clipboard followed the cursor instead of the right-click";
+}
+
+// What he pastes has to be what he saw: the same six decimals as the status
+// row's geographic readout, with only the readout's pane tag taken off.
+TEST_F(ExplorerWindowFixture, CopyPositionMatchesTheStatusRowsReadout)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * geo = window.findChild<QLabel *>("hover_geo");
+  auto * status = window.findChild<QLabel *>("status");
+  ASSERT_NE(geo, nullptr);
+  ASSERT_NE(status, nullptr);
+  QApplication::clipboard()->clear();
+
+  const QPoint target = geoPixel(*canvas, kLat, kLon);
+  hoverAt(*canvas, target);
+  const QString shown = geo->text();
+  ASSERT_TRUE(shown.startsWith("Map  ")) << shown.toStdString();
+
+  QMenu * menu = openContextMenu(*canvas, target);
+  ASSERT_NE(menu, nullptr);
+  QAction * copy = findMenuAction(*menu, "Copy Position");
+  ASSERT_NE(copy, nullptr);
+  copy->trigger();
+  menu->close();
+
+  EXPECT_EQ(QApplication::clipboard()->text(), shown.mid(5))
+    << "the clipboard and the readout disagree: " << shown.toStdString();
+  // Copying changes nothing on screen, so the status row is the only proof it
+  // happened — and it shows what landed, so it can be checked without pasting.
+  EXPECT_TRUE(status->text().contains(shown.mid(5))) << status->text().toStdString();
+}
+
+// No survey index and no placeable bag: the clicked pixel has no position at
+// all. The entry stays in the menu, greyed — the menu keeps one shape — and
+// above all it does not copy the origin, which is a place in the Gulf of
+// Guinea and not where he clicked.
+TEST_F(ExplorerWindowFixture, CopyPositionIsDisabledWithNoResolvablePosition)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  window.show();
+  QCoreApplication::processEvents();
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  ASSERT_NE(canvas, nullptr);
+  QApplication::clipboard()->setText("untouched");
+
+  QMenu * menu = openContextMenu(
+    *canvas, QPoint(canvas->width() / 2, canvas->height() / 2));
+  ASSERT_NE(menu, nullptr);
+  QAction * copy = findMenuAction(*menu, "Copy Position");
+  ASSERT_NE(copy, nullptr) << "the entry was hidden rather than greyed out";
+  EXPECT_FALSE(copy->isEnabled());
+
+  copy->trigger();   // even asked directly, it must not invent a position
+  menu->close();
+  EXPECT_EQ(QApplication::clipboard()->text(), QString("untouched"));
 }
 
 // Hovering a pane that cannot place the cursor must BLANK the readout, not

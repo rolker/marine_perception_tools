@@ -277,6 +277,15 @@ private:
   std::optional<MapGeoAffine> cloudFrameAnchor() const;
   void onPaneLeave(HoverPane pane);   // the cursor left: a shown position must be live
   void connectHoverReadout();        // wire the panes that hover in a map frame
+
+  // The map context-menu entries that are the WINDOW's business (#42). The
+  // canvas registers only `Clear Selection`, because the region is its own
+  // state; these reach outside the map — to the clipboard and the status row
+  // — which is exactly what the canvas must never do.
+  void registerMapContextMenuEntries();
+  // Put the position the menu was opened at on the clipboard, in the status
+  // row's own format, and say so.
+  void copyMapContextMenuPosition();
   // Which pane (if any) an event's receiver is, for the QEvent::Leave path.
   std::optional<HoverPane> paneOf(const QObject * obj) const;
   HoverGeoReadout hover_readout_;

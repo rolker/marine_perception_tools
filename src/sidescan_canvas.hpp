@@ -302,6 +302,28 @@ public:
   // without a modal exec.
   QMenu * buildContextMenu(QWidget * parent);
 
+  // Where the menu was opened, geographically — the map's own conversion of
+  // the right-clicked pixel, taken IN contextMenuEvent and held while the
+  // menu stands. An entry that acts on "the point I clicked" reads this, and
+  // must not re-derive it from the cursor: by the time the operator has
+  // picked an entry the pointer has travelled down the menu, and a position
+  // sampled then is not the one he asked about. It is the canvas that owns
+  // the geometry, so the canvas captures it; what to DO with the position is
+  // the window's business (#42).
+  //
+  // nullopt when that pixel has no resolvable position at all — no survey
+  // index and a bag with no earth reference — which is the same condition
+  // under which the hover readout shows nothing (#47). Entries that need a
+  // position grey themselves out on it rather than acting on a zero.
+  const std::optional<GeoPoint> & contextMenuGeo() const {return context_menu_geo_;}
+
+  // The map's conversion of a widget pixel to geographic, by whichever frame
+  // the canvas is in: the geographic canvas plane in survey mode, and the
+  // open bag's map-ENU anchor otherwise. This is the one path both the hover
+  // readout and the context menu take, so they can never disagree about
+  // where a pixel is.
+  std::optional<GeoPoint> screenToGeo(const QPoint & pos) const;
+
   // Whether there is a region to act on: selected index tiles, a CUBE box, or
   // both. Decides whether `Clear selection` is offered as available.
   bool hasRegion() const {return !selected_tiles_.empty() || cube_box_geo_.has_value();}
@@ -367,6 +389,9 @@ protected:
 private:
   // Registered context-menu entries, in the order they are offered.
   std::vector<ContextMenuEntry> context_menu_entries_;
+
+  // The position the last context menu was opened at (see contextMenuGeo).
+  std::optional<GeoPoint> context_menu_geo_;
 
   // Static-layer cache (#24 desk finding: full repaints at mouse-move rate
   // made everything sluggish). The basemap tiles, measuring grid, decimated

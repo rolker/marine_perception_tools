@@ -2411,6 +2411,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     });
   connect(canvas_, &SidescanCanvas::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
+  registerMapContextMenuEntries();   // the map menu's window-side entries (#42)
   connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
   connect(mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::boxMarked,
@@ -2438,8 +2439,11 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       QAction * remove = menu.addAction("Delete contact");
       QAction * chosen = menu.exec(contact_list_->viewport()->mapToGlobal(pos));
       if (chosen == copy_ll && has_geo) {
+        // The one number format, shared with the status readout and the map
+        // menu's Copy Position (#42) — same six decimals, one code path.
         QApplication::clipboard()->setText(
-          QString("%1, %2").arg(g.latitude, 0, 'f', 6).arg(g.longitude, 0, 'f', 6));
+          QString::fromStdString(
+            format_geo_coords(GeoPoint{g.latitude, g.longitude})));
       } else if (chosen == copy_row) {
         QApplication::clipboard()->setText(item->text());
       } else if (chosen == remove) {
@@ -2575,6 +2579,45 @@ void SidescanViewerWindow::closeEvent(QCloseEvent * event)
   if (grid_bot_split_) {settings.setValue("split_grid_bot", grid_bot_split_->saveState());}
   if (cloud_split_) {settings.setValue("split_cloud", cloud_split_->saveState());}
   QMainWindow::closeEvent(event);
+}
+
+void SidescanViewerWindow::registerMapContextMenuEntries()
+{
+  // Copy Position (#42): the operator's reason for it is handing a place to
+  // someone else — "generate a surface around here" — so the text has to be
+  // pasteable and has to name the same spot he was looking at.
+  //
+  // Registered by the WINDOW, not the canvas, on the split #42 established:
+  // the canvas owns the geometry (and supplies it through contextMenuGeo),
+  // while the clipboard and the status row are application state the canvas
+  // has no business reaching into.
+  canvas_->addContextMenuEntry(
+    SidescanCanvas::ContextMenuEntry{
+      tr("Copy Position"),
+      [this]() {copyMapContextMenuPosition();},
+      // Greyed, never hidden and never a zero: with no survey index and no
+      // placeable bag the clicked pixel has no position, which is the same
+      // condition under which the readout shows nothing (#47).
+      [this]() {return canvas_->contextMenuGeo().has_value();}});
+}
+
+void SidescanViewerWindow::copyMapContextMenuPosition()
+{
+  // The position the MENU was opened at, not the cursor's: by now the pointer
+  // has travelled down the menu to this entry. The canvas captured it in the
+  // context-menu event and has held it since.
+  const auto & geo = canvas_->contextMenuGeo();
+  if (!geo) {
+    // Unreachable through the menu (the entry is greyed out without one), but
+    // an action that is asked to copy nothing must copy nothing, not "0, 0".
+    return;
+  }
+  const QString text = QString::fromStdString(format_geo_coords(*geo));
+  QApplication::clipboard()->setText(text);
+  // Copying is silent otherwise — nothing on screen changes — so the status
+  // row is the only thing that can tell him it happened, and it shows what
+  // landed on the clipboard so he can check it without pasting.
+  status_->setText(tr("Copied %1 to the clipboard.").arg(text));
 }
 
 void SidescanViewerWindow::connectHoverReadout()

@@ -97,8 +97,26 @@ QMenu * SidescanCanvas::buildContextMenu(QWidget * parent)
   return menu;
 }
 
+std::optional<GeoPoint> SidescanCanvas::screenToGeo(const QPoint & pos) const
+{
+  const QPointF map = screenToMap(pos.x(), pos.y());
+  if (geo_mode_) {
+    // With a survey index the canvas plane IS geographic, so every pixel of
+    // it has a position — even over a bag that cannot be placed on it.
+    const auto geo = canvasToGeo(map.x(), map.y());
+    return GeoPoint{geo.first, geo.second};
+  }
+  // Bag-only: canvas metres are the bag's map-ENU, so the position comes
+  // through the bag's own anchor — and a bag with no earth reference has
+  // none, which is nothing rather than the origin.
+  return geo_from_map(map_anchor_, map.x(), map.y());
+}
+
 void SidescanCanvas::contextMenuEvent(QContextMenuEvent * event)
 {
+  // Captured here, before the menu exists, because this is the last moment
+  // the pointer is still on the point the operator meant (see contextMenuGeo).
+  context_menu_geo_ = screenToGeo(event->pos());
   if (context_menu_entries_.empty()) {
     QWidget::contextMenuEvent(event);
     return;
@@ -1154,15 +1172,9 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
   } else {
     emit hoverWorld(0.0, 0.0, false);
   }
-  // Geographic readout (#47). With a survey index the canvas plane IS
-  // geographic, so the cursor has a position even over a bag that cannot be
-  // placed on it. Without one, canvas metres are the bag's map-ENU, so the
-  // position comes through the bag's own anchor — and a bag with no earth
-  // reference has none, which reads as nothing rather than as the origin.
-  if (geo_mode_) {
-    const auto geo = canvasToGeo(hov.x(), hov.y());
-    emit hoverGeo(geo.first, geo.second, true);
-  } else if (const auto geo = geo_from_map(map_anchor_, hov.x(), hov.y())) {
+  // Geographic readout (#47), through the same screenToGeo the context menu's
+  // captured position takes — so what the operator copies is what he read.
+  if (const auto geo = screenToGeo(event->pos())) {
     emit hoverGeo(geo->lat, geo->lon, true);
   } else {
     emit hoverGeo(0.0, 0.0, false);

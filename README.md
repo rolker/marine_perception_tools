@@ -146,9 +146,15 @@ One window, two modes that compose:
   drag never touches the region — a click that silently threw the region away
   was the one destructive thing it could do, so clearing is asked for by name:
   **right-click** the map for its context menu and choose **Clear Selection**,
-  which is greyed out when there is nothing selected. That menu is where
-  further map actions will appear. While *Mark contact* is on, that visible
-  mode takes left-drag for marking.
+  which is greyed out when there is nothing selected. The same menu also
+  offers **Copy Position**, which puts the latitude and longitude of the point
+  you right-clicked on the clipboard — the point the menu was opened at, not
+  wherever the pointer ended up on its way down the menu — in the status row's
+  own format, so what you paste is what you read. It is greyed out wherever
+  the map cannot place that point at all (no survey index and a bag with no
+  earth reference), rather than copying a zero. That menu is where further map
+  actions will appear. While *Mark contact* is on, that visible mode takes
+  left-drag for marking.
 
   What a bare left-click *does* do is **cue the time bar from the map** (#46).
   **Hover** within a few pixels of a nav track and the nearest fix on it is
