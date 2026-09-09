@@ -303,9 +303,9 @@ TEST_F(ExplorerWindowFixture, PointAndSurfaceSelectorsShareOneColourVocabulary)
     EXPECT_EQ(surface->itemText(i), expected[i]);
   }
 
-  // A sounding carries no uncertainty (run_cube derives its own placeholder
-  // from depth) and no sidescan amplitude (that is a drape onto CUBE nodes),
-  // so both are greyed for the points — and each says why.
+  // A sounding carries no uncertainty (run_cube computes its own placeholder
+  // from the beam's angle and slant range, #49) and no sidescan (that is a
+  // drape onto CUBE nodes), so both are greyed — and each says why.
   for (const QString & name : {QString("Uncertainty"), QString("Sidescan")}) {
     const int row = comboRowOf(*points, name);
     ASSERT_GE(row, 0);

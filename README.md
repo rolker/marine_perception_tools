@@ -248,10 +248,38 @@ loading a multi-pass region defaults to it, but you can leave it for a scalar
 ramp and come back; it is not a mode that takes the selector away. An entry a
 layer cannot carry stays in the list, greyed, with the reason on the entry
 rather than silently missing: the points offer no **Uncertainty** (a sounding
-carries none — the per-beam errors CUBE consumes are a placeholder derived from
-depth inside the estimator, and uncertainty is a property of the surface) and no
+carries none — the per-beam errors CUBE consumes are a placeholder computed
+inside the estimator, and uncertainty is a property of the surface) and no
 **Sidescan** (that is a drape painted onto CUBE nodes by marching the terrain),
 and the surface offers no **Pass** (a node merges every pass that touched it).
+
+### Per-sounding uncertainty in the lab
+
+CUBE weights every sounding by its own uncertainty, and the lab has to supply
+one: the real `cube::ErrorModel` needs the raw detections, the platform
+attitude and the vessel offsets, none of which the explorer's cloud path
+carries. The stand-in is **angle-aware** (#49). For a beam at angle *t* from
+nadir at slant range *R*, with a range error σ_R and an angular error σ_θ:
+
+    σ_z² = (σ_R·cos t)² + (R·σ_θ·sin t)²
+    σ_y² = (σ_R·sin t)² + (R·σ_θ·cos t)²
+
+σ_R is 0.5% of the slant range and σ_θ is a 2° beamwidth over twelve — both
+taken from `cube::Device`'s own documented defaults, and the beamwidth-to-σ
+divisor is the one `cube::ErrorModel` already uses, so the codebase turns a
+beamwidth into a σ exactly one way. Each component is floored at 0.05 m so no
+beam claims zero error. The effect over one depth is that a 60° beam carries
+about twice the variance of a nadir beam, so where two passes overlap the
+estimator prefers the clean near-nadir data — which is the point: an outer beam
+used to be trusted exactly as much as a nadir one. A sounding that arrives
+without beam geometry is skipped rather than given an invented error, and the
+run's note says how many were.
+
+This is still a **placeholder** (mpt#27 follow-up), and it does **not** correct
+the refraction smile: that is a *systematic* error, which no uncertainty model
+removes — see #28. Compared at a fixed *slant range* rather than a fixed depth,
+σ_z falls with angle, because an outer beam at the same range is over shallower
+water; the model's claim is about beams over the same seabed.
 
 A **Run CUBE** *adds* its surface over the soundings already loaded instead of
 replacing them: after a run you are still looking at your selection, now with a

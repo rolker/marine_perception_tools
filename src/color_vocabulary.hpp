@@ -64,10 +64,11 @@ inline const char * color_channel_name(ColorChannel channel)
 //
 // Uncertainty is the load-bearing one: MbesSounding carries x/y/z, intensity,
 // beam angle and slant range — no uncertainty. The per-sounding vertical and
-// horizontal errors CUBE consumes are a placeholder depth-dependent model
-// computed inside run_cube, never a measured field of the sounding, so
-// colouring points by "uncertainty" would be colouring them by depth under
-// another name. Uncertainty is a property of the CUBE estimate, not of a beam.
+// horizontal errors CUBE consumes are a placeholder model computed inside
+// run_cube from that beam angle and slant range (#49), never a measured field
+// of the sounding, so colouring points by "uncertainty" would be colouring
+// them by the model rather than by anything the sonar reported. Uncertainty is
+// a property of the CUBE estimate, not of a beam.
 //
 // `has_pass_identity` is false for a cloud loaded as one set of points (the
 // scrub window, a CUBE run's own gather) — there are no passes to tell apart.
@@ -77,7 +78,8 @@ inline const char * point_channel_unavailable_reason(
   switch (channel) {
     case ColorChannel::Uncertainty:
       return "A sounding carries no uncertainty — the per-beam errors CUBE "
-             "uses are a placeholder derived from depth inside the estimator. "
+             "uses are a placeholder computed inside the estimator from the "
+             "beam's angle and slant range, not something the sonar reported. "
              "Uncertainty is a property of the CUBE surface; colour the "
              "surface by it instead.";
     case ColorChannel::Sidescan:

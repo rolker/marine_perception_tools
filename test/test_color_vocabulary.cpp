@@ -72,8 +72,9 @@ TEST(ColorVocabulary, PassIsUnavailableWithoutPassIdentityAndSaysWhy)
 
 // The verified gap (#36): MbesSounding carries x/y/z, intensity, beam angle
 // and slant range — no uncertainty. The per-beam errors CUBE consumes are a
-// placeholder derived from depth INSIDE run_cube, so colouring points by
-// "uncertainty" would be colouring them by depth under another name. The
+// placeholder computed INSIDE run_cube from the beam's angle and slant range
+// (#49), so colouring points by "uncertainty" would be colouring them by that
+// model rather than by anything the sonar reported. The
 // entry stays listed and greyed; it must never be filled with an invented
 // value. Sidescan is likewise a drape onto CUBE nodes, not a sounding field.
 TEST(ColorVocabulary, PointsCannotCarryUncertaintyOrSidescanButStillExplainWhy)

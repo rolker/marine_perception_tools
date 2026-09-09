@@ -107,6 +107,7 @@
 #include "session_index_io.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
+#include "sounding_uncertainty.hpp"
 
 namespace marine_perception_tools
 {
@@ -703,7 +704,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "this to custom. S-44 order 1a and 1b share one budget (they differ in "
     "the seafloor-search requirement, which CUBE does not model), so they are "
     "one entry here. NOTE: the budget is compared against a PLACEHOLDER "
-    "per-sounding error — see params….");
+    "per-sounding error — angle-aware since mpt#49, but still a stand-in; "
+    "see params….");
   cube_run_btn_ = new QPushButton("Run CUBE", this);
   cube_run_btn_->setObjectName("cube_run_btn");
   cube_run_btn_->setEnabled(false);   // until a region has been drawn
@@ -901,11 +903,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       // The caveat belongs where the numbers are set, not only in a header
       // comment (#45): the budget is being compared against a stand-in.
       auto * iho_note = new QLabel(
-        "Compared against a PLACEHOLDER per-sounding error — vertical "
-        "0.1 m + 0.7% of depth, horizontal 0.2 m + 1% of depth. The "
-        "explorer's cloud path does not carry the raw detections the real "
-        "CUBE error model needs, so these thresholds are applied against "
-        "synthetic uncertainty (mpt#27 follow-up).", &dialog);
+        QString::fromUtf8(sounding_uncertainty_caveat()), &dialog);
       iho_note->setWordWrap(true);
       iho_note->setMaximumWidth(420);
       {
