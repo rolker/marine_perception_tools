@@ -165,10 +165,14 @@ std::string derive_box_curve(
 //
 // Per-sounding errors: the full cube_bathymetry ErrorModel needs the raw
 // detections + vessel/device config, which the explorer's cloud path does
-// not retain — so this uses a documented depth-dependent PLACEHOLDER
-// (vertical std 0.1 m + 0.7% of depth, horizontal std 0.2 m + 1% of depth,
-// stored as variances per the Sounding contract) until detections are
-// carried through (follow-up on #27).
+// not retain — so this uses a documented PLACEHOLDER, angle-aware since #49:
+// each beam's own angle and slant range propagated through
+// sounding_uncertainty.hpp (stored as variances per the Sounding contract),
+// seeded from cube::Device's defaults, until detections are carried through
+// (follow-up on #27). It replaced a depth-only formula that gave a swath-edge
+// beam the same confidence as a nadir one; it does NOT model refraction,
+// which is systematic (#28). A sounding carrying no beam geometry is skipped
+// rather than given a fabricated error, and the note says how many were.
 //
 // `cancel` (optional) is polled per sounding while the soundings are spread
 // over the node grid, and per node while the estimates are extracted (#44) —

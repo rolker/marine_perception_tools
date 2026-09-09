@@ -31,6 +31,7 @@
 #include "cube_bathymetry/parameters.h"
 #include "cube_bathymetry/sizes.h"
 #include "cube_bathymetry/sounding.h"
+#include "sounding_uncertainty.hpp"
 
 namespace marine_perception_tools
 {
@@ -300,17 +301,25 @@ CubeSurface run_cube(
   // spread mirrors Grid::insert's effect square exactly (influence radius,
   // node-centre distance test).
   std::vector<std::unique_ptr<cube::Node>> nodes(n_nodes);
+  std::size_t dropped_no_geometry = 0;   // beams with no usable angle/range
   for (const auto & s : soundings) {
     if (stop()) {return abandon();}
+    // Angle-aware placeholder errors (#49, see sounding_uncertainty.hpp):
+    // first-order propagation through this beam's own angle and slant range,
+    // so the estimator can prefer a pass's near-nadir coverage over another
+    // pass's outer beams. Already variances — the contract cube::Sounding
+    // carries — so they are stored as computed, not squared again.
+    // A beam whose geometry is missing or non-finite is DROPPED: no sounding
+    // is better than one carrying a fabricated confidence.
+    SoundingUncertainty u;
+    if (!sounding_uncertainty(s.beam_angle, s.slant_range, &u)) {
+      ++dropped_no_geometry;
+      continue;
+    }
     // World z is up (seabed negative) — the cube depth convention directly.
     cube::Sounding cs(static_cast<float>(s.z));
-    // Placeholder depth-dependent errors (see header): stds squared into the
-    // variances the Sounding contract carries.
-    const double d = std::abs(s.z);
-    const double v_std = 0.1 + 0.007 * d;
-    const double h_std = 0.2 + 0.01 * d;
-    cs.vertical_error = static_cast<float>(v_std * v_std);
-    cs.horizontal_error = static_cast<float>(h_std * h_std);
+    cs.vertical_error = static_cast<float>(u.vertical_variance);
+    cs.horizontal_error = static_cast<float>(u.horizontal_variance);
     // CUBE-settled backscatter (ADR-0007): the intensity rides the
     // hypothesis queue bound to its depth and comes back per node, with
     // its beam angle + slant range so the ARA/TL corrections can act.
@@ -368,6 +377,12 @@ CubeSurface run_cube(
   }
   out.note = std::to_string(estimated) + " of " +
     std::to_string(n_nodes) + " nodes estimated" + ara_note;
+  if (dropped_no_geometry > 0) {
+    // Never silent: a beam without angle/slant range gets no uncertainty and
+    // so is not inserted at all (#49).
+    out.note += "; " + std::to_string(dropped_no_geometry) +
+      " sounding(s) skipped — no beam geometry";
+  }
   return out;
 }
 

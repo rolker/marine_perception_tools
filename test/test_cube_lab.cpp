@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -36,7 +37,9 @@ using marine_perception_tools::MbesSounding;
 using marine_perception_tools::build_cube_mesh;
 using marine_perception_tools::run_cube;
 
-// A dense flat patch at z = -10 m: 0.25 m sounding spacing over 5x5 m.
+// A dense flat patch at z = -10 m: 0.25 m sounding spacing over 5x5 m. Every
+// beam is nadir over its own depth — geometry run_cube now requires to give a
+// sounding an uncertainty at all (#49); a beam with none is dropped.
 std::vector<MbesSounding> flatPatch(float z = -10.0f, float intensity = -30.0f)
 {
   std::vector<MbesSounding> out;
@@ -47,10 +50,27 @@ std::vector<MbesSounding> flatPatch(float z = -10.0f, float intensity = -30.0f)
       s.y = 200.0 + 0.25 * j;
       s.z = z;
       s.intensity = intensity;
+      s.beam_angle = 0.0f;
+      s.slant_range = std::abs(z);
       out.push_back(s);
     }
   }
   return out;
+}
+
+// A sounding with no beam geometry cannot be given an angle-aware uncertainty
+// (#49), so it is dropped rather than inserted with a fabricated one — and the
+// run says so instead of quietly estimating from fewer beams than it was given.
+TEST(RunCube, SoundingsWithoutBeamGeometryAreSkippedAndNoted)
+{
+  auto soundings = flatPatch();
+  soundings[0].beam_angle = std::numeric_limits<float>::quiet_NaN();
+  soundings[1].slant_range = std::numeric_limits<float>::quiet_NaN();
+  const auto surface = run_cube(soundings, 0.5);
+  ASSERT_TRUE(surface.ok()) << surface.note;
+  EXPECT_EQ(surface.soundings_in, soundings.size());   // what it was handed
+  EXPECT_NE(surface.note.find("2 sounding(s) skipped"), std::string::npos)
+    << surface.note;
 }
 
 TEST(RunCube, FlatPatchEstimatesThePlane)
@@ -311,6 +331,8 @@ TEST(RunCube, UsesTheBudgetInTheTuningNotAPresetName)
       s.y = 200.0 + 1.0 * j;
       s.z = -5.0;
       s.intensity = -30.0f;
+      s.beam_angle = 0.0f;      // nadir beams (#49: geometry or no sounding)
+      s.slant_range = 5.0f;
       sparse.push_back(s);
     }
   }
@@ -496,3 +518,145 @@ TEST(BuildCubeMesh, EmptySurfaceYieldsEmptyMesh)
 }
 
 }  // namespace
+
+
+// The operator's report, as a CHARACTERISATION test (#49): a clean near-nadir
+// pass and a noisy outer-beam pass over the same seabed. "The smile across a
+// ping from the refraction is causing a ping's outer beams to ingest too much
+// noise and uncertainty in an otherwise clean, smooth surface from another
+// pass's near-nadir beams."
+//
+// This pins the two-pass behaviour and REPORTS the number rather than claiming
+// the angle-aware model wins here. Measured over this case (2026-09-09):
+//
+//   depth-only placeholder : RMS 0.0079 m over 121 estimated nodes
+//   angle-aware (#49)      : RMS 0.0414 m over 165 estimated nodes
+//
+// The angle-aware model reaches more nodes and tracks the noisy pass more
+// closely, and the reason is worth knowing: it makes every sounding's absolute
+// uncertainty SMALLER (5 cm at 10 m nadir, against 17 cm before), so CUBE's
+// gate for "is this the same seabed?" tightens and a scattered pass splits into
+// hypotheses instead of averaging into one. Node depth is then decided by
+// Node::chooseHypothesis, which takes the hypothesis with the MOST SAMPLES —
+// not the smallest variance. So on zero-mean scatter with equal sample counts,
+// plain averaging (the old, looser model) is hard to beat, and the angular
+// weighting shows up inside a hypothesis rather than in which one wins.
+//
+// The weighting itself is real and unit-tested (test_sounding_uncertainty):
+// a 65 deg beam carries about twice the vertical variance of a nadir beam over
+// the same depth. What this test records is that a variance ratio is not by
+// itself a surface improvement on unbiased noise.
+//
+// It also does NOT correct a refraction SMILE: that bias is systematic, and
+// only re-projection removes it (#28).
+TEST(RunCube, TwoPassSurfaceOverACleanAndANoisyPassIsCharacterised)
+{
+  const double truth = -10.0;
+  std::vector<MbesSounding> both;
+  int k = 0;
+  for (int i = 0; i <= 40; ++i) {
+    for (int j = 0; j <= 40; ++j) {
+      const double x = 100.0 + 0.125 * i;
+      const double y = 200.0 + 0.125 * j;
+      // Pass A: near-nadir beams, on the true depth.
+      MbesSounding a;
+      a.x = x;
+      a.y = y;
+      a.z = truth;
+      a.intensity = -30.0f;
+      a.beam_angle = static_cast<float>(5.0 * M_PI / 180.0);
+      a.slant_range = static_cast<float>(-truth / std::cos(a.beam_angle));
+      both.push_back(a);
+      // Pass B: the same ground at the swath edge, scattered. Deterministic
+      // (a fixed sawtooth), so the number this test reports is reproducible.
+      const double noise = 0.4 * ((k % 7) - 3) / 3.0;
+      ++k;
+      MbesSounding b;
+      b.x = x;
+      b.y = y;
+      b.z = truth + noise;
+      b.intensity = -30.0f;
+      b.beam_angle = static_cast<float>(65.0 * M_PI / 180.0);
+      b.slant_range = static_cast<float>(-truth / std::cos(b.beam_angle));
+      both.push_back(b);
+    }
+  }
+  const auto surface = run_cube(both, 0.5);
+  ASSERT_TRUE(surface.ok()) << surface.note;
+  double sq = 0.0;
+  std::size_t n = 0;
+  for (const float d : surface.depth) {
+    if (std::isfinite(d)) {
+      sq += (d - truth) * (d - truth);
+      ++n;
+    }
+  }
+  ASSERT_GT(n, 0u);
+  const double rms = std::sqrt(sq / static_cast<double>(n));
+  // The bound both models clear, and the one that matters operationally: the
+  // surface must stay far inside the noisy pass's own 0.23 m RMS scatter — the
+  // estimator must never simply follow the outer beams.
+  EXPECT_LT(rms, 0.10) << "the noisy outer-beam pass is carrying the surface";
+  // Printed, not merely asserted: this is the number quoted above, so a future
+  // change to the model shows up here in the open rather than silently.
+  std::printf("[#49] two-pass surface RMS error %.4f m over %zu nodes\n", rms, n);
+}
+
+
+// The before/after this change is claimed on (#49), as a test. Two overlapping
+// swaths over the same 12 m bottom with a 0.15 m ripple, each 80 pings x 64
+// beams over +/-34 deg, with the scatter ANGLE-CORRELATED: near-nadir beams
+// clean, outer beams noisy — the operator's case, where one pass's swath edge
+// falls on ground another pass covered near nadir.
+//
+// Measured over this region (2026-09-09, cell 0.5 m):
+//
+//   depth-only placeholder : RMS 0.0407 m, 2542 of 2752 nodes estimated
+//   angle-aware (#49)      : RMS 0.0347 m, 2685 of 2752 nodes estimated
+//
+// A 15% better surface against truth, over 143 more nodes. The bound below is
+// set between the two, so the depth-only model would fail this test: it is the
+// improvement, not a restatement of it.
+TEST(RunCube, AngleCorrelatedNoiseIsSuppressedWhereSwathsOverlap)
+{
+  const auto truth_at = [](double y) {return -12.0 + 0.15 * std::sin(y * 0.4);};
+  std::vector<MbesSounding> v;
+  for (int pass = 0; pass < 2; ++pass) {
+    const double track_y = (pass == 0) ? 0.0 : 14.0;   // swaths overlap mid-way
+    for (int p = 0; p < 80; ++p) {
+      for (int b = 0; b < 64; ++b) {
+        const double angle = -0.6 + 1.2 * b / 63.0;
+        const double range = 12.0 / std::cos(angle);
+        MbesSounding s;
+        s.x = 0.25 * p;
+        s.y = track_y + range * std::sin(angle);
+        // Deterministic sawtooth scatter, scaled by |sin(angle)|: zero at
+        // nadir, worst at the swath edge.
+        const double scatter = 0.35 * std::abs(std::sin(angle)) *
+          (((p * 64 + b) % 7) - 3) / 3.0;
+        s.z = truth_at(s.y) + scatter;
+        s.intensity = -30.0f;
+        s.beam_angle = static_cast<float>(angle);
+        s.slant_range = static_cast<float>(range);
+        v.push_back(s);
+      }
+    }
+  }
+  const auto surface = run_cube(v, 0.5);
+  ASSERT_TRUE(surface.ok()) << surface.note;
+  double sq = 0.0;
+  std::size_t n = 0;
+  for (int y = 0; y < surface.ny; ++y) {
+    for (int x = 0; x < surface.nx; ++x) {
+      const float d = surface.depth[static_cast<std::size_t>(y) * surface.nx + x];
+      if (!std::isfinite(d)) {continue;}
+      const double dy = d - truth_at(surface.origin_y + y * surface.cell_m);
+      sq += dy * dy;
+      ++n;
+    }
+  }
+  ASSERT_GT(n, 2000u) << surface.note;
+  const double rms = std::sqrt(sq / static_cast<double>(n));
+  EXPECT_LT(rms, 0.038) << "no better than the depth-only model it replaced";
+  std::printf("[#49] angle-correlated case: RMS %.4f m over %zu nodes\n", rms, n);
+}
