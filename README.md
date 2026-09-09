@@ -190,7 +190,11 @@ One window, two modes that compose:
   cursor the trackline views follow is a distance along the open bag's track,
   not an absolute time, and only the time bar spans every recording. Promoting
   that cursor to absolute time is the larger piece of work, tracked against
-  #36.
+  #36. What the reopen does **not** do is move the map: a recording opened as
+  a side effect of cueing a time leaves the zoom and centre you were working
+  at exactly where they were, in both the 3D pane and the map. The view is
+  fitted to a new recording only when you asked for that recording by name —
+  *File → Open Bag…* or a bag on the command line.
   The recentre **glides** to the point over about three quarters of a second,
   easing in and out, so the eye can follow the map across instead of having to
   re-find the survey after a jump. The seek is not delayed by it — the time

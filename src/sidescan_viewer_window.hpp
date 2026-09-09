@@ -170,13 +170,29 @@ public:
   // incompatible index (the bridge's regenerate hint propagates).
   void openSurveyIndex(const std::string & index_path, const std::string & stores_dir);
 
+  // Why a bag is being opened — the map and 3D views are fitted to the new bag
+  // only for an Explicit one (#46).
+  //   Explicit: the operator asked for THIS recording (File → Open Bag, a
+  //     command-line bag argument). Framing it is what he asked for.
+  //   Cue: the recording is opened as a SIDE EFFECT of cueing a time he picked
+  //     on the map or the time bar. The zoom and centre he was working at are
+  //     his, and a revisited area's passes span several recordings, so most
+  //     cues reopen — refitting threw the view away on nearly every click.
+  // Deliberately not inferred from the window's mode: both readings agree
+  // today, but the distinction that matters is why the bag is being opened,
+  // not whether an index happens to be loaded. No default value — a new call
+  // site has to say which kind of open it is.
+  enum class OpenReason { Explicit, Cue };
+
   // Open a bag directly (e.g. from a CLI argument). Non-zero cue bounds
   // (UNIX ns) jump the scrub to the along-track window those stamps cover once
   // indexing completes — the survey-index (jump-to-pass) bridge. The whole bag
   // is still metadata-indexed first (TF + cumulative distance need the full
   // recording); only sample data is window-read, so the cue costs one normal
   // index pass, not a whole-bag sample read.
-  void openBag(const std::string & bag_uri, int64_t cue_start_ns = 0, int64_t cue_end_ns = 0);
+  void openBag(
+    const std::string & bag_uri, OpenReason reason,
+    int64_t cue_start_ns = 0, int64_t cue_end_ns = 0);
 
   // Startup convenience: open the remembered last index (QSettings), falling
   // back to the conventional world collection (#40). Called by main when the
@@ -428,6 +444,11 @@ private:
   quint64 pending_open_epoch_ = 0;
   // Debounce for scrub-driven opens (time-bar commits): rapid fine-tune
   // commits collapse into one openBag once the hand settles.
+  // Whether the open in flight may fit the views to the new bag: true for an
+  // Explicit open, false for a Cue one (#46). Held as state because the fit
+  // happens twice — once here and once when the first resolved data arrives —
+  // and both belong to the same open.
+  bool open_fits_view_ = true;
   QTimer open_debounce_;
   std::string debounce_uri_;
   int64_t debounce_t0_ns_ = 0;

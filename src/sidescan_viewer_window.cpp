@@ -2293,7 +2293,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       if (!debounce_uri_.empty()) {
         const std::string uri = debounce_uri_;
         debounce_uri_.clear();
-        openBag(uri, debounce_t0_ns_, debounce_t1_ns_);
+        openBag(uri, OpenReason::Cue, debounce_t0_ns_, debounce_t1_ns_);
       }
     });
   connect(&render_watcher_, &QFutureWatcher<SidescanRenderResult>::finished,
@@ -2726,7 +2726,7 @@ bool SidescanViewerWindow::eventFilter(QObject * obj, QEvent * event)
 void SidescanViewerWindow::onOpenBag()
 {
   const QString dir = QFileDialog::getExistingDirectory(this, "Open ROS 2 bag directory");
-  if (!dir.isEmpty()) {openBag(dir.toStdString());}
+  if (!dir.isEmpty()) {openBag(dir.toStdString(), OpenReason::Explicit);}
 }
 
 void SidescanViewerWindow::onOpenIndex()
@@ -2827,8 +2827,13 @@ void SidescanViewerWindow::scheduleOpen(
 }
 
 void SidescanViewerWindow::openBag(
-  const std::string & bag_uri, int64_t cue_start_ns, int64_t cue_end_ns)
+  const std::string & bag_uri, OpenReason reason,
+  int64_t cue_start_ns, int64_t cue_end_ns)
 {
+  // An explicit open frames the bag the operator asked for; a cued one leaves
+  // his map zoom/centre and 3D camera exactly where they were (#46). Both fit
+  // points below read this, so the deferred one belongs to the same open.
+  open_fits_view_ = reason == OpenReason::Explicit;
   // A direct open (menu, pass click) outranks a pending debounced one.
   open_debounce_.stop();
   debounce_uri_.clear();
@@ -2875,8 +2880,16 @@ void SidescanViewerWindow::openBag(
   // draw as before in bag-only mode.
   canvas_->setMapAnchor(std::nullopt);
   canvas_->setTrack({});
-  canvas_->resetView();
-  cloud_->resetView();
+  if (open_fits_view_) {
+    canvas_->resetView();
+    // The 3D camera gets the same treatment: it is operator state too, and it
+    // is already frame-independent — the pane recentres every cloud on its own
+    // centroid and keeps the orbit and zoom across a scrub, which is exactly
+    // what a cued reopen is from the operator's side (a new window of
+    // soundings, same viewing angle). Fitting it is only right when he asked
+    // for this bag.
+    cloud_->resetView();
+  }
   scrub_->setEnabled(false);
   scrub_->blockSignals(true);
   scrub_->setRange(0, 1);
@@ -3006,7 +3019,7 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
     track.emplace_back(pts.back().first, pts.back().second);
   }
   canvas_->setTrack(track);
-  if (first) {
+  if (first && open_fits_view_) {
     canvas_->resetView();   // fit once when the first resolved data arrives
     cloud_->resetView();
   }
@@ -3915,7 +3928,9 @@ void SidescanViewerWindow::onTimelinePassActivated(
     }
     return;
   }
-  openBag(bag, static_cast<int64_t>(t_start_ns), static_cast<int64_t>(t_end_ns));
+  openBag(
+    bag, OpenReason::Cue,
+    static_cast<int64_t>(t_start_ns), static_cast<int64_t>(t_end_ns));
 }
 
 void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)

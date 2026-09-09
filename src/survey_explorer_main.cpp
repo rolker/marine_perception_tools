@@ -234,7 +234,12 @@ int main(int argc, char ** argv)
   }
   window.show();
   if (!positional.isEmpty()) {
-    window.openBag(positional.first().toStdString(), cue_start_ns, cue_end_ns);
+    // A bag named on the command line is what the operator asked to see:
+    // frame it (#46).
+    window.openBag(
+      positional.first().toStdString(),
+      marine_perception_tools::SidescanViewerWindow::OpenReason::Explicit,
+      cue_start_ns, cue_end_ns);
   }
   // A plain start (no --index, no bag) comes back where the operator left
   // off: the remembered last index auto-reopens (#27 follow-up — starting

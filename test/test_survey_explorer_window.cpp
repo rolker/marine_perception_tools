@@ -1356,6 +1356,79 @@ SidescanCanvas * prepareHoverWindow(
   return canvas;
 }
 
+// Where the nav track of the second, REAL recording runs: clear of both
+// fixture fixes so a click there can only be resolved to that recording.
+constexpr double kNavLat = kLat + 5e-4;
+
+// Give the fixture index a second bag that actually exists on disk — one
+// mbes-bathy pass over the fixture tile and a two-fix nav track — so a cue
+// into it opens and resolves for real instead of failing (#46).
+void addRealBagPassAndTrack(
+  const std::string & db_path, const std::string & bag_uri,
+  std::int64_t t0_ns, std::int64_t t1_ns)
+{
+  sqlite3 * db = marine_survey_index::openIndexDb(db_path);
+  const auto run = [db](const std::string & sql) {
+      char * err = nullptr;
+      const int rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err);
+      const std::string msg = err ? err : "unknown sqlite error";
+      sqlite3_free(err);
+      ASSERT_EQ(rc, SQLITE_OK) << msg;
+    };
+  run("INSERT INTO bags (id, path, size_bytes, mtime_ns, indexed_at_ns)"
+    " VALUES (2, '" + bag_uri + "', 100, 200, 300);");
+  const auto tile = gggs::Level(14).gridIndex(kLat, kLon);
+  run("INSERT INTO passes (bag_id, level, tile_row, tile_col, sensor_type,"
+    " topic, t_start_ns, t_end_ns, ping_count) VALUES (2, 14, " +
+    std::to_string(tile.row()) + ", " + std::to_string(tile.column()) +
+    ", 'mbes-bathy', '/bizzy/sensors/m3/detections', " +
+    std::to_string(t0_ns) + ", " + std::to_string(t1_ns) + ", 80);");
+  run("INSERT INTO nav_track (bag_id, t_ns, latitude, longitude) VALUES (2, " +
+    std::to_string(t0_ns) + ", " + std::to_string(kNavLat) + ", " +
+    std::to_string(kLon) + "), (2, " + std::to_string(t1_ns) + ", " +
+    std::to_string(kNavLat + 1e-4) + ", " + std::to_string(kLon) + ");");
+  sqlite3_close(db);
+}
+
+// The operator's map view: how far he is zoomed in and what he is centred on.
+struct ViewState
+{
+  double metres_per_pixel;
+  double centre_lat;
+  double centre_lon;
+};
+
+ViewState viewOf(const SidescanCanvas & canvas)
+{
+  const GeoRect r = canvas.visibleGeoRegion().value();
+  return ViewState{
+    canvas.groundMetresPerPixel(),
+    0.5 * (r.north + r.south),
+    0.5 * (r.east + r.west)};
+}
+
+// Unchanged to well inside a pixel: the view is not merely close, it was
+// never touched.
+void expectSameView(const ViewState & before, const ViewState & after, const char * what)
+{
+  EXPECT_NEAR(after.metres_per_pixel, before.metres_per_pixel, 1e-9) << what;
+  EXPECT_NEAR(after.centre_lat, before.centre_lat, 1e-9) << what;
+  EXPECT_NEAR(after.centre_lon, before.centre_lon, 1e-9) << what;
+}
+
+// An operator zoom about the widget centre. Deliberately a real gesture and
+// not another fitGeo: a fit leaves the canvas's remembered survey bounds
+// equal to what is on screen, so a refit would be invisible and a view test
+// built on one could not fail (#46).
+void wheelZoomIn(SidescanCanvas & canvas)
+{
+  const QPointF centre_px(canvas.width() / 2.0, canvas.height() / 2.0);
+  QWheelEvent wheel(
+    centre_px, QPointF(canvas.mapToGlobal(centre_px.toPoint())), QPoint(0, 0),
+    QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(&canvas, &wheel);
+}
+
 // The question the map can answer and the time bar cannot: when did THAT pass
 // happen. Hovering near the drawn track marks the nearest fix and reads out
 // its time; moving away takes both back.
@@ -1968,7 +2041,7 @@ TEST_F(ExplorerWindowFixture, EverySpatialPaneReadsOutItsOwnFramesPosition)
   SidescanViewerWindow window;
   window.setCacheDir(std::string(::testing::TempDir()) + "/pane_geo_cache");
   window.resize(1200, 800);
-  window.openBag(bag_uri);
+  window.openBag(bag_uri, SidescanViewerWindow::OpenReason::Explicit);
   window.show();
 
   auto * geo = window.findChild<QLabel *>("hover_geo");
@@ -2080,7 +2153,7 @@ TEST_F(ExplorerWindowFixture, ALateLeaveDoesNotBlankThePaneTheCursorMovedTo)
   SidescanViewerWindow window;
   window.setCacheDir(std::string(::testing::TempDir()) + "/leave_cache");
   window.resize(1200, 800);
-  window.openBag(bag_uri);
+  window.openBag(bag_uri, SidescanViewerWindow::OpenReason::Explicit);
   window.show();
 
   auto * geo = window.findChild<QLabel *>("hover_geo");
@@ -2259,6 +2332,192 @@ TEST_F(ExplorerWindowFixture, TheCellSizeRangeReachesMillimetres)
   // from 0.01 m is five times the value.
   EXPECT_LE(cell->singleStep(), 0.01);
   EXPECT_GT(cell->singleStep(), 0.0);
+}
+
+// #46: clicking a fix on the nav track cues that instant, and when the
+// instant lives in a recording that is not open the viewer reopens that
+// recording to get there. That reopen is a SIDE EFFECT of the cue — the
+// operator asked to go to a time, not to look at a bag — so the zoom and
+// centre he was working at on the survey map are his and must survive it.
+// Both fit points are exercised: the one inside openBag and the deferred
+// "fit once when the first resolved data arrives" one, which is why the test
+// drives the open all the way to a resolved index rather than stopping at
+// the click.
+TEST_F(ExplorerWindowFixture, CueingIntoAnotherRecordingLeavesTheMapViewAlone)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  const std::string bag_uri = std::string(::testing::TempDir()) + "/explorer_cue_view_bag";
+  struct BagCleanup
+  {
+    std::string uri;
+    ~BagCleanup() {std::filesystem::remove_all(uri);}
+  } cleanup{bag_uri};
+  std::filesystem::remove_all(bag_uri);
+  constexpr std::int64_t kT0 = 1700000000000000000LL;
+  constexpr std::int64_t kT1 = kT0 + 20000000000LL;
+  writeSidescanBag(bag_uri, kT0, kT1);
+  addRealBagPassAndTrack(db_path_, bag_uri, kT0, kT1);
+
+  SidescanViewerWindow window;
+  window.setCacheDir(std::string(::testing::TempDir()) + "/cue_view_cache");
+  window.resize(1200, 800);
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * scrub = window.findChild<QSlider *>();
+  auto * status = window.findChild<QLabel *>("status");
+  ASSERT_NE(scrub, nullptr);
+  ASSERT_NE(status, nullptr);
+
+  // The view the operator is working at: a deliberate zoom onto the piece of
+  // track he is interested in, not the whole-campaign fit.
+  canvas->fitGeo(kLat - 0.0002, kLon - 0.0004, kLat + 0.0008, kLon + 0.0004);
+  canvas->grab();   // the fit only lands on a laid-out paint
+  wheelZoomIn(*canvas);
+  canvas->grab();
+  const ViewState before = viewOf(*canvas);
+
+  // Click the fix that belongs to the OTHER (real) recording.
+  hoverAt(*canvas, geoPixel(*canvas, kNavLat, kLon));
+  ASSERT_TRUE(canvas->highlightedFix().has_value()) << "nothing highlighted on the track";
+  ASSERT_NEAR(canvas->highlightedFix()->lat, kNavLat, 1e-9);
+  leftClick(*canvas, geoPixel(*canvas, kNavLat, kLon));
+  ASSERT_TRUE(status->text().contains("Cueing")) << status->text().toStdString();
+
+  // The open's own fit point, reached synchronously inside openBag. Checked
+  // while the recording is still indexing — if the index has not resolved yet
+  // this run, which is a race the worker can win, and not one worth forcing:
+  // the resolved-index check below is unconditional.
+  ASSERT_TRUE(
+    process_until(
+      [status]() {
+        return status->text().startsWith("Opening") ||
+               status->text().startsWith("Indexing") ||
+               status->text().contains("pings");
+      }))
+    << "the cued recording never started opening";
+  if (!scrub->isEnabled()) {
+    expectSameView(before, viewOf(*canvas), "the open threw the map view away");
+  }
+
+  ASSERT_TRUE(process_until([scrub]() {return scrub->isEnabled() && scrub->maximum() > 1;}))
+    << "the cued recording never opened";
+  expectSameView(before, viewOf(*canvas), "the opened recording threw the map view away");
+
+  // And through the resolved index (the deferred fit point). Fixing only the
+  // first would leave the view surviving the open and then jumping a moment
+  // later, which reads as a delayed bug rather than a fixed one.
+  ASSERT_TRUE(process_until([canvas]() {return canvas->mapAnchor().has_value();}))
+    << "the cued recording never resolved a geographic anchor";
+  canvas->grab();
+  expectSameView(
+    before, viewOf(*canvas), "the resolved index threw the map view away a moment later");
+}
+
+// The same rule for the other cue that reaches openBag: activating a pass bar
+// on the time bar. It is a "take me to this pass", not "open this recording".
+TEST_F(ExplorerWindowFixture, ActivatingATimelinePassLeavesTheMapViewAlone)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  const std::string bag_uri = std::string(::testing::TempDir()) + "/explorer_pass_view_bag";
+  struct BagCleanup
+  {
+    std::string uri;
+    ~BagCleanup() {std::filesystem::remove_all(uri);}
+  } cleanup{bag_uri};
+  std::filesystem::remove_all(bag_uri);
+  constexpr std::int64_t kT0 = 1700000000000000000LL;
+  constexpr std::int64_t kT1 = kT0 + 20000000000LL;
+  writeSidescanBag(bag_uri, kT0, kT1);
+  addRealBagPassAndTrack(db_path_, bag_uri, kT0, kT1);
+
+  SidescanViewerWindow window;
+  window.setCacheDir(std::string(::testing::TempDir()) + "/pass_view_cache");
+  window.resize(1200, 800);
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * timeline = window.findChild<TimeBarWidget *>("time_bar");
+  auto * scrub = window.findChild<QSlider *>();
+  ASSERT_NE(timeline, nullptr);
+  ASSERT_NE(scrub, nullptr);
+
+  canvas->fitGeo(kLat - 0.0002, kLon - 0.0004, kLat + 0.0008, kLon + 0.0004);
+  canvas->grab();
+  wheelZoomIn(*canvas);
+  canvas->grab();
+  const ViewState before = viewOf(*canvas);
+
+  // The signal a pass-bar click emits, driving the same connection.
+  Q_EMIT timeline->passActivated(QString::fromStdString(bag_uri), kT0, kT1);
+  ASSERT_TRUE(process_until([scrub]() {return scrub->isEnabled() && scrub->maximum() > 1;}))
+    << "the pass's recording never opened";
+  ASSERT_TRUE(process_until([canvas]() {return canvas->mapAnchor().has_value();}))
+    << "the pass's recording never resolved a geographic anchor";
+  canvas->grab();
+  expectSameView(before, viewOf(*canvas), "activating a pass threw the map view away");
+}
+
+// The other half of the rule: when the operator asks for a recording BY NAME
+// (File → Open Bag, a command-line bag argument), framing it is exactly what
+// he asked for, and that must keep working — the fix narrows which opens fit,
+// it does not stop fitting.
+TEST_F(ExplorerWindowFixture, AnExplicitOpenStillFitsToTheNewBag)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  const std::string bag_uri =
+    std::string(::testing::TempDir()) + "/explorer_explicit_view_bag";
+  struct BagCleanup
+  {
+    std::string uri;
+    ~BagCleanup() {std::filesystem::remove_all(uri);}
+  } cleanup{bag_uri};
+  std::filesystem::remove_all(bag_uri);
+  constexpr std::int64_t kT0 = 1700000000000000000LL;
+  constexpr std::int64_t kT1 = kT0 + 20000000000LL;
+  writeSidescanBag(bag_uri, kT0, kT1);
+
+  // No index: the plain target-viewer window these two fits were written for.
+  SidescanViewerWindow window;
+  window.setCacheDir(std::string(::testing::TempDir()) + "/explicit_view_cache");
+  window.resize(1200, 800);
+  window.openBag(bag_uri, SidescanViewerWindow::OpenReason::Explicit);
+  window.show();
+
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  auto * scrub = window.findChild<QSlider *>();
+  ASSERT_NE(canvas, nullptr);
+  ASSERT_NE(scrub, nullptr);
+  const auto opened = [canvas, scrub]() {
+      return scrub->isEnabled() && scrub->maximum() > 1 && canvas->mapAnchor().has_value();
+    };
+  ASSERT_TRUE(process_until(opened)) << "the bag never opened";
+  canvas->grab();
+  // A bag-only window has no geographic view to read out, so the zoom the fit
+  // chose is the measure: it is set from the extent of the bag's own track.
+  const double fitted_mpp = canvas->groundMetresPerPixel();
+
+  // The operator zooms somewhere of his own.
+  wheelZoomIn(*canvas);
+  canvas->grab();
+  ASSERT_GT(std::abs(canvas->groundMetresPerPixel() - fitted_mpp), 1e-6)
+    << "the test never moved the view, so it could not detect a refit";
+
+  // Asking for the recording by name frames it, as it always has.
+  window.openBag(bag_uri, SidescanViewerWindow::OpenReason::Explicit);
+  ASSERT_TRUE(process_until([canvas]() {return !canvas->mapAnchor().has_value();}))
+    << "the re-open never started";
+  ASSERT_TRUE(process_until(opened)) << "the bag never re-opened";
+  canvas->grab();
+  EXPECT_NEAR(canvas->groundMetresPerPixel(), fitted_mpp, 1e-9)
+    << "an explicit open no longer fits the map to the bag it was asked to show";
 }
 
 }  // namespace
