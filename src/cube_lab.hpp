@@ -22,8 +22,10 @@
 // intensity (ADR-0007: intensity rides the hypothesis queue bound to its
 // depth). Qt-free and bag-free — unit-testable with synthetic soundings.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -125,10 +127,18 @@ std::string derive_box_curve(
 // (vertical std 0.1 m + 0.7% of depth, horizontal std 0.2 m + 1% of depth,
 // stored as variances per the Sounding contract) until detections are
 // carried through (follow-up on #27).
+//
+// `cancel` (optional) is polled per sounding while the soundings are spread
+// over the node grid, and per node while the estimates are extracted (#44) —
+// the two loops a box-sized run spends its minutes in. cube::Node exposes no
+// finer unit than one insert / one extraction, and neither is itself long, so
+// these are the useful granularity. A cancelled run returns a surface that is
+// not ok(), noted "cancelled": never a partial grid dressed as an estimate.
 CubeSurface run_cube(
   const std::vector<MbesSounding> & soundings, double cell_m,
   const std::string & iho_order = "order1a",
-  const CubeTuning & tuning = CubeTuning{});
+  const CubeTuning & tuning = CubeTuning{},
+  const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
 // A renderable triangulation of a CubeSurface: positions in the surface's
 // world frame (xyz triples), per-vertex colours (rgb triples in [0,1]),

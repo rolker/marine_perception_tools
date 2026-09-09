@@ -122,8 +122,21 @@ std::string derive_box_curve(
 
 CubeSurface run_cube(
   const std::vector<MbesSounding> & soundings, double cell_m,
-  const std::string & iho_order, const CubeTuning & tuning)
+  const std::string & iho_order, const CubeTuning & tuning,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
 {
+  const auto stop = [&cancel]() {
+      return cancel && cancel->load(std::memory_order_relaxed);
+    };
+  // A cancelled run yields no surface at all (#44): half a grid of hypotheses
+  // is not a coarser estimate, it is an unfinished one.
+  const auto abandon = [&soundings]() {
+      CubeSurface c;
+      c.soundings_in = soundings.size();
+      c.note = "cancelled";
+      return c;
+    };
+  if (stop()) {return abandon();}
   CubeSurface out;
   out.cell_m = cell_m;
   out.soundings_in = soundings.size();
@@ -216,6 +229,7 @@ CubeSurface run_cube(
   // node-centre distance test).
   std::vector<std::unique_ptr<cube::Node>> nodes(n_nodes);
   for (const auto & s : soundings) {
+    if (stop()) {return abandon();}
     // World z is up (seabed negative) — the cube depth convention directly.
     cube::Sounding cs(static_cast<float>(s.z));
     // Placeholder depth-dependent errors (see header): stds squared into the
@@ -264,6 +278,7 @@ CubeSurface run_cube(
   out.intensity.reserve(n_nodes);
   std::size_t estimated = 0;
   for (auto & node : nodes) {
+    if (stop()) {return abandon();}
     if (!node) {
       out.depth.push_back(std::nanf(""));
       out.uncertainty.push_back(std::nanf(""));

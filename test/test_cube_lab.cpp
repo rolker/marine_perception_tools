@@ -14,10 +14,12 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -328,6 +330,33 @@ TEST(BuildCubeMesh, ManualRangeOverridesTheAutoRamp)
   ASSERT_FALSE(mesh.positions.empty());
   EXPECT_EQ(mesh.scalar_lo, -20.0f);
   EXPECT_EQ(mesh.scalar_hi, -5.0f);
+}
+
+// Cancellation (#44): a cancelled run must not hand back a grid. The same
+// soundings that estimate a plane above produce no surface at all once the
+// token is set, and the reason is legible in the note rather than looking
+// like an empty box.
+TEST(RunCube, CancelledRunYieldsNoSurface)
+{
+  const auto cancel = std::make_shared<std::atomic<bool>>(true);
+  const auto surface = run_cube(flatPatch(), 0.5, "order1a",
+    marine_perception_tools::CubeTuning{}, cancel);
+  EXPECT_FALSE(surface.ok());
+  EXPECT_EQ(surface.note, "cancelled");
+  EXPECT_TRUE(surface.depth.empty());
+  EXPECT_EQ(surface.nx, 0);
+  EXPECT_EQ(surface.ny, 0);
+}
+
+// The token is a cancellation signal, not a switch that refuses work: an
+// un-set token must estimate exactly as no token at all.
+TEST(RunCube, UnsetCancelTokenEstimatesNormally)
+{
+  const auto cancel = std::make_shared<std::atomic<bool>>(false);
+  const auto surface = run_cube(flatPatch(), 0.5, "order1a",
+    marine_perception_tools::CubeTuning{}, cancel);
+  ASSERT_TRUE(surface.ok()) << surface.note;
+  EXPECT_EQ(surface.depth.size(), run_cube(flatPatch(), 0.5).depth.size());
 }
 
 TEST(BuildCubeMesh, EmptySurfaceYieldsEmptyMesh)

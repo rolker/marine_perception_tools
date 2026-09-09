@@ -905,6 +905,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     });
   connect(&cube_watcher_, &QFutureWatcher<CubeLabTicket>::finished, this, [this]() {
       CubeLabTicket ticket = cube_watcher_.result();
+      if (ticket.cancelled) {
+        return;   // the window is closing (#44): the widgets below are going away
+      }
       if (ticket.generation != cube_gen_) {
         return;   // a newer run superseded this one
       }
@@ -1085,14 +1088,19 @@ void SidescanViewerWindow::runCubeLab()
   cube_run_btn_->setEnabled(false);
   status_->setText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
     .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
+  const auto cancel = worker_cancel_;
   cube_watcher_.setFuture(
-    QtConcurrent::run([passes, clip, cell_m, order, tuning, gen]() {
+    QtConcurrent::run([passes, clip, cell_m, order, tuning, gen, cancel]() {
       CubeLabTicket ticket;
       ticket.generation = gen;
       QElapsedTimer timer;
       timer.start();
       try {
-        auto outcome = load_cloud_passes(passes, clip);
+        auto outcome = load_cloud_passes(passes, clip, cancel);
+        if (outcome.cancelled) {
+          ticket.cancelled = true;
+          return ticket;   // the window is closing: nothing to estimate for
+        }
         ticket.notes = std::move(outcome.notes);
         ticket.ref_bag = outcome.ref_bag;
         ticket.ref_has_geo = outcome.ref_has_geo;
@@ -1105,7 +1113,12 @@ void SidescanViewerWindow::runCubeLab()
         for (auto & pc : outcome.pass_clouds) {
           ticket.soundings.insert(ticket.soundings.end(), pc.begin(), pc.end());
         }
-        ticket.surface = run_cube(ticket.soundings, cell_m, order, tuning);
+        ticket.surface = run_cube(ticket.soundings, cell_m, order, tuning, cancel);
+        if (cancel->load(std::memory_order_relaxed)) {
+          ticket.cancelled = true;
+          ticket.soundings.clear();
+          return ticket;
+        }
       } catch (const std::exception & e) {
         ticket.surface = CubeSurface{};
         ticket.surface.note = e.what();
