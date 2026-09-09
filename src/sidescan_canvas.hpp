@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "coastline_data.hpp"
 #include "map_geo_anchor.hpp"
 #include "tile_selection.hpp"
 
@@ -113,6 +114,15 @@ public:
 
   // Decimated nav track, pre-segmented per bag, as (lat, lon) polylines.
   void setNavTrack(std::vector<std::vector<std::pair<double, double>>> segments);
+
+  // Built-in world coastline (#41): the bottom layer of the map, drawn under
+  // the store basemap and everything else. ORIENTATION, NOT NAVIGATION — a
+  // generalised world coastline is wrong by hundreds of metres at survey
+  // scale, so the canvas fades it out with zoom (coastlineFadeAlpha) and it
+  // is gone entirely before the scales where the real layers answer the
+  // question. Nothing else about the layer may make it read as chart detail.
+  void setCoastline(Coastline coastline);
+  void setCoastlineVisible(bool on);
 
   // Overlay visibility (#24 desk-verify follow-up): a whole campaign's track
   // and tile grid blanket the surveyed area at overview zoom, hiding the
@@ -250,6 +260,7 @@ private:
   void rebuildGeoLayerGeometry();   // re-derive canvas-metre rects/polylines
   void applyPendingFit();
   void drawGrid(QPainter & painter) const;
+  void drawCoastline(QPainter & painter) const;     // bottom layer; cache only
   void drawNavTrack(QPainter & painter) const;      // decimated; cache only
   void drawIndexTileGrid(QPainter & painter) const;   // unselected; cache only
   void drawSelectedTiles(QPainter & painter) const;   // dynamic overlay
@@ -266,6 +277,11 @@ private:
 
   std::vector<std::vector<std::pair<double, double>>> nav_segments_geo_;
   std::vector<QPolygonF> nav_segments_;    // canvas metres
+
+  Coastline coastline_geo_;
+  std::vector<QPolygonF> coastline_;        // canvas metres
+  std::vector<QRectF> coastline_bounds_;    // canvas metres, per polyline (culling)
+  bool show_coastline_ = true;
 
   std::vector<GeoRect> index_tiles_geo_;
   std::vector<SelectableRect> index_tiles_;   // canvas metres

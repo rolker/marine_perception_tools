@@ -95,6 +95,23 @@ void SidescanCanvas::setNavTrack(
   update();
 }
 
+void SidescanCanvas::setCoastline(Coastline coastline)
+{
+  coastline_geo_ = std::move(coastline);
+  layer_cache_valid_ = false;
+  rebuildGeoLayerGeometry();
+  update();
+}
+
+void SidescanCanvas::setCoastlineVisible(bool on)
+{
+  if (show_coastline_ != on) {
+    show_coastline_ = on;
+    layer_cache_valid_ = false;
+    update();
+  }
+}
+
 void SidescanCanvas::setIndexTiles(const std::vector<GeoRect> & tiles)
 {
   index_tiles_geo_ = tiles;
@@ -230,6 +247,8 @@ void SidescanCanvas::rebuildGeoLayerGeometry()
   store_tile_rects_.clear();
   nav_segments_.clear();
   index_tiles_.clear();
+  coastline_.clear();
+  coastline_bounds_.clear();
   if (!geo_mode_) {
     return;
   }
@@ -239,6 +258,22 @@ void SidescanCanvas::rebuildGeoLayerGeometry()
     const QPointF ne = geoToCanvas(tile.north, tile.east);
     store_tile_rects_.emplace_back(
       sw.x(), sw.y(), ne.x() - sw.x(), ne.y() - sw.y());
+  }
+  coastline_.clear();
+  coastline_bounds_.clear();
+  coastline_.reserve(coastline_geo_.lines.size());
+  coastline_bounds_.reserve(coastline_geo_.lines.size());
+  for (const auto & line : coastline_geo_.lines) {
+    QPolygonF poly;
+    poly.reserve(static_cast<int>(line.points.size()));
+    for (const auto & [lat, lon] : line.points) {
+      poly << geoToCanvas(lat, lon);
+    }
+    const QPointF sw = geoToCanvas(line.south, line.west);
+    const QPointF ne = geoToCanvas(line.north, line.east);
+    coastline_bounds_.emplace_back(
+      sw.x(), sw.y(), ne.x() - sw.x(), ne.y() - sw.y());
+    coastline_.push_back(std::move(poly));
   }
   nav_segments_.reserve(nav_segments_geo_.size());
   for (const auto & seg : nav_segments_geo_) {
@@ -439,6 +474,59 @@ void SidescanCanvas::drawGrid(QPainter & painter) const
   }
 }
 
+void SidescanCanvas::drawCoastline(QPainter & painter) const
+{
+  if (coastline_.empty() || !show_coastline_) {
+    return;
+  }
+  // The scale rule (coastline_data.hpp): full strength where nothing else
+  // tells the operator where they are, gone before survey zoom. This is the
+  // whole reason the layer is safe to ship — a generalised coastline that
+  // stayed visible while the operator zoomed into a survey would read as
+  // chart detail and be wrong by hundreds of metres.
+  const double fade = coastlineFadeAlpha(groundMetresPerPixel());
+  if (fade <= 0.0) {
+    return;
+  }
+  // Desaturated slate, kept off the blue-green end the depth colormaps own,
+  // and never brighter than the nav track's veil.
+  QPen pen(QColor(150, 165, 180, static_cast<int>(std::lround(150.0 * fade))));
+  pen.setWidthF(1.0);
+  painter.setPen(pen);
+  painter.setBrush(Qt::NoBrush);
+  const QRectF viewport(0, 0, width(), height());
+  for (std::size_t i = 0; i < coastline_.size(); ++i) {
+    // Cull by the polyline's own bounds first: most of the world is off
+    // screen at every zoom the layer is drawn at.
+    const auto & b = coastline_bounds_[i];
+    const QPointF nw = mapToScreen(b.left(), b.top() + b.height());
+    const QPointF se = mapToScreen(b.left() + b.width(), b.top());
+    if (!QRectF(nw, se).normalized().adjusted(-2, -2, 2, 2).intersects(viewport)) {
+      continue;
+    }
+    // Sparse, as for the nav track: skip points that advance the polyline by
+    // less than ~2 screen px (60k world points collapse to a few thousand).
+    const auto & seg = coastline_[i];
+    if (seg.size() < 2) {
+      continue;
+    }
+    QPolygonF screen;
+    screen.reserve(seg.size());
+    QPointF last = mapToScreen(seg.front().x(), seg.front().y());
+    screen << last;
+    for (int j = 1; j < seg.size(); ++j) {
+      const QPointF pt = mapToScreen(seg[j].x(), seg[j].y());
+      if (j == seg.size() - 1 ||
+        std::abs(pt.x() - last.x()) + std::abs(pt.y() - last.y()) >= 2.0)
+      {
+        screen << pt;
+        last = pt;
+      }
+    }
+    painter.drawPolyline(screen);
+  }
+}
+
 void SidescanCanvas::drawNavTrack(QPainter & painter) const
 {
   if (nav_segments_.empty() || !show_nav_track_) {
@@ -529,6 +617,12 @@ void SidescanCanvas::rebuildLayerCache()
   layer_cache_ = QPixmap(size());
   QPainter painter(&layer_cache_);
   painter.fillRect(layer_cache_.rect(), QColor(20, 24, 28));
+
+  // Bottom of the stack, under the store basemap: an orientation layer must
+  // never occlude real data (#41).
+  if (geo_mode_) {
+    drawCoastline(painter);
+  }
 
   if (geo_mode_ && !store_tile_rects_.empty()) {
     // Nearest-neighbour on purpose: store cells must stay crisp pixels so
