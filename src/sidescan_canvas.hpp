@@ -241,7 +241,7 @@ private:
   double cache_px_per_m_ = 0.0;
   QPointF cache_center_;
   QSize cache_size_;
-  bool panning_ = false;
+  bool panning_ = false;   // mid middle-drag pan (#42)
   // Zoom snappiness (#26): a zoom step blits the stale cache scaled (like the
   // pan blit) and the expensive rebuild waits for the wheel to settle.
   QTimer cache_settle_;
@@ -294,12 +294,16 @@ private:
   bool user_adjusted_ = false;
   double fit_south_ = 0.0, fit_west_ = 0.0, fit_north_ = 0.0, fit_east_ = 0.0;
 
-  bool band_selecting_ = false;   // mid ctrl-drag rubber band
-  QPoint band_start_;
-  QPoint band_cur_;
-  bool cube_box_selecting_ = false;   // mid shift-drag CUBE box (#27)
-  QPoint cube_box_start_;
-  QPoint cube_box_cur_;
+  // The map's one geographic selection (#42): left-drag draws it, its exact
+  // bounds are the processing extent (cube_box_geo_) and the index tiles it
+  // covers are the pass query (selected_tiles_).
+  bool region_selecting_ = false;
+  QPoint region_start_;
+  QPoint region_cur_;
+  // Middle button: a click centres, a drag pans, decided at release (#42).
+  bool middle_dragging_ = false;
+  bool middle_moved_ = false;
+  QPoint middle_start_;
   std::optional<GeoRect> cube_box_geo_;   // the persistent box overlay
 
   // --- per-bag layers ---

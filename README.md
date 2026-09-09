@@ -132,11 +132,19 @@ One window, two modes that compose:
 - **Explorer mode** — `survey_explorer --index survey_index.db [--stores DIR]`:
   the map becomes the survey index — store-tile basemap (GGGS GeoTIFFs;
   `--stores` defaults to `<index dir>/bathymetry/survey`), per-bag nav track
-  with direction arrows, and the selectable index-tile grid. Ctrl-click /
-  ctrl-drag selects tiles: every `mbes-bathy` pass of the selection loads into
+  with direction arrows, and the selectable index-tile grid. Left-drag on the
+  map draws the **region** (#42), the map's one geographic selection: its exact
+  bounds are the processing extent for CUBE, and every `mbes-bathy` pass of the
+  index tiles it covers loads into
   the 3D cloud (one golden-angle colour per pass, legend beside the pane,
   cross-bag reprojection through the `earth` anchor), and the **time bar**
   under the scrub controls fills with the selection's passes.
+  Map gestures (#42) are one region and one navigation button, with no
+  modifiers: **left-drag** draws or replaces the region, **left-click** clears
+  it, **middle-click** centres the view on the point (and seeks the time cursor
+  there when a bag is open), **middle-drag** pans, and the wheel zooms. While
+  *Mark contact* is on, that visible mode takes left-drag for marking.
+
   Underneath all of it is a built-in **world coastline** so a collection-wide
   view is navigable at all: Natural Earth 1:50m, public domain, vendored into
   the package (`data/coastline/`) and never fetched — the build and the

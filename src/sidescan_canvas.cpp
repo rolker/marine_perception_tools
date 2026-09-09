@@ -26,8 +26,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <utility>
 #include <vector>
+
+#include "map_gesture.hpp"
 
 namespace marine_perception_tools
 {
@@ -660,9 +663,10 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
   // Static layers from the cache (see rebuildLayerCache): a same-view repaint
   // is a blit; a mid-pan repaint blits the stale cache translated and rebuilds
   // on release; anything else (zoom, resize, data change) rebuilds now.
-  // A lost left-button release (modal mid-drag, grab stolen) must not pin us
-  // on the translated-blit branch forever (review round-2 finding).
-  if (panning_ && !(QGuiApplication::mouseButtons() & Qt::LeftButton)) {
+  // A lost middle-button release (modal mid-drag, grab stolen) must not pin
+  // us on the translated-blit branch forever (review round-2 finding). The
+  // button is the middle one since #42 moved panning off left-drag.
+  if (panning_ && !(QGuiApplication::mouseButtons() & Qt::MiddleButton)) {
     panning_ = false;
   }
   const bool view_matches = layer_cache_valid_ && cache_size_ == size() &&
@@ -822,17 +826,8 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     painter.drawRect(QRectF(mark_start_, mark_cur_).normalized());
   }
 
-  // Rubber band while selecting tiles (ctrl-drag).
-  if (band_selecting_) {
-    QPen pen(QColor(0, 255, 255));
-    pen.setStyle(Qt::DashLine);
-    painter.setPen(pen);
-    painter.setBrush(QColor(0, 255, 255, 30));
-    painter.drawRect(QRectF(band_start_, band_cur_).normalized());
-  }
-
-  // CUBE box (#27): the persistent geographic box, plus the live shift-drag
-  // rubber band. Orange like the time arrow — the "lab focus" accents.
+  // The region (#42): the persistent geographic rectangle every action reads.
+  // Orange like the time arrow — the "lab focus" accents.
   if (geo_mode_ && cube_box_geo_) {
     const QPointF sw = geoToCanvas(cube_box_geo_->south, cube_box_geo_->west);
     const QPointF ne = geoToCanvas(cube_box_geo_->north, cube_box_geo_->east);
@@ -844,12 +839,14 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     painter.setBrush(QColor(255, 140, 0, 25));
     painter.drawRect(QRectF(s_sw, s_ne).normalized());
   }
-  if (cube_box_selecting_) {
+  // Live rubber band while the region is being dragged. Dashed, so a drag in
+  // progress never looks like a settled selection.
+  if (region_selecting_) {
     QPen pen(QColor(255, 140, 0));
     pen.setStyle(Qt::DashLine);
     painter.setPen(pen);
     painter.setBrush(QColor(255, 140, 0, 30));
-    painter.drawRect(QRectF(cube_box_start_, cube_box_cur_).normalized());
+    painter.drawRect(QRectF(region_start_, region_cur_).normalized());
   }
 }
 
@@ -883,38 +880,34 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
 
 void SidescanCanvas::mousePressEvent(QMouseEvent * event)
 {
+  // The middle button carries both halves of "go to here" (#42, the GeoZui
+  // idiom): press-and-release centres the view on the point, press-and-drag
+  // pans. Which one it was is only known at release, so the decision waits
+  // there and nothing is committed on press.
   if (event->button() == Qt::MiddleButton) {
-    const QPointF m = screenToMap(event->pos().x(), event->pos().y());
-    const auto bag = canvasToBag(m.x(), m.y());
-    if (bag) {
-      emit seekWorld(bag->x(), bag->y());   // middle-click: seek to this map position
-    }
+    middle_start_ = event->pos();
+    last_drag_pos_ = event->pos();
+    middle_dragging_ = true;
+    middle_moved_ = false;
     return;
   }
   if (event->button() != Qt::LeftButton) {return;}
-  if ((event->modifiers() & Qt::ControlModifier) && !index_tiles_.empty()) {
-    band_selecting_ = true;
-    band_start_ = event->pos();
-    band_cur_ = event->pos();
-    update();
-    return;
-  }
-  if ((event->modifiers() & Qt::ShiftModifier) && geo_mode_) {
-    cube_box_selecting_ = true;   // shift-drag CUBE box (#27)
-    cube_box_start_ = event->pos();
-    cube_box_cur_ = event->pos();
-    update();
-    return;
-  }
+  // Contact marking is an explicitly chosen, visible mode, so it outranks the
+  // default left-drag gesture while it is on.
   if (mark_mode_) {
     marking_ = true;
     mark_start_ = event->pos();
     mark_cur_ = event->pos();
     update();
-  } else {
-    last_drag_pos_ = event->pos();
-    panning_ = true;   // repaint via the translated cache until release
+    return;
   }
+  // Left drag draws the map's one region (#42). Ctrl and Shift no longer mean
+  // anything here: the region replaced both the index-tile rubber band and the
+  // separate CUBE box, so one rectangle feeds every action.
+  region_selecting_ = true;
+  region_start_ = event->pos();
+  region_cur_ = event->pos();
+  update();
 }
 
 void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
@@ -932,14 +925,29 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
     const auto geo = canvasToGeo(hov.x(), hov.y());
     emit hoverGeo(geo.first, geo.second);
   }
-  if (!(event->buttons() & Qt::LeftButton)) {return;}
-  if (band_selecting_) {
-    band_cur_ = event->pos();
-    update();
+  // Panning moved to the middle button (#42), because left-drag now draws the
+  // region. A middle drag that has travelled past the click threshold is a
+  // pan, and having moved at all is what stops the release from centring.
+  if ((event->buttons() & Qt::MiddleButton) && middle_dragging_) {
+    if (!middle_moved_ &&
+      (event->pos() - middle_start_).manhattanLength() > kClickSlopPx)
+    {
+      middle_moved_ = true;
+    }
+    if (middle_moved_) {
+      panning_ = true;   // repaint via the translated cache until release
+      const QPoint delta = event->pos() - last_drag_pos_;
+      last_drag_pos_ = event->pos();
+      center_map_ += QPointF(-delta.x() / px_per_m_, delta.y() / px_per_m_);
+      user_adjusted_ = true;
+      fit_pending_ = false;
+      update();
+    }
     return;
   }
-  if (cube_box_selecting_) {
-    cube_box_cur_ = event->pos();
+  if (!(event->buttons() & Qt::LeftButton)) {return;}
+  if (region_selecting_) {
+    region_cur_ = event->pos();
     update();
     return;
   }
@@ -948,68 +956,79 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
     update();
     return;
   }
-  const QPoint delta = event->pos() - last_drag_pos_;
-  last_drag_pos_ = event->pos();
-  center_map_ += QPointF(-delta.x() / px_per_m_, delta.y() / px_per_m_);
-  user_adjusted_ = true;
-  fit_pending_ = false;
-  update();
 }
 
 void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
 {
-  if (event->button() != Qt::LeftButton) {return;}
-  if (panning_) {
-    panning_ = false;
-    update();   // rebuild the layer cache at the settled view
-    emit viewChanged();
-  }
-  if (band_selecting_) {
-    band_selecting_ = false;
-    bool changed = false;
-    if ((event->pos() - band_start_).manhattanLength() <= 4) {
-      // A ctrl-click, not a drag: toggle the tile under the cursor.
-      const QPointF m = screenToMap(event->pos().x(), event->pos().y());
-      const int hit = hitRect(index_tiles_, m.x(), m.y());
-      if (hit >= 0) {
-        toggleSelection(selected_tiles_, static_cast<std::size_t>(hit));
-        changed = true;
-      }
-    } else {
-      // Rubber band: add every intersecting tile to the selection.
-      const QPointF a = screenToMap(band_start_.x(), band_start_.y());
-      const QPointF b = screenToMap(event->pos().x(), event->pos().y());
-      for (const auto idx : rectsInBox(index_tiles_, a.x(), a.y(), b.x(), b.y())) {
-        changed = selected_tiles_.insert(idx).second || changed;
-      }
+  // Middle release: a pan settles, a click centres. Centring keeps the seek
+  // that this gesture already performed in every other pane (#42) — the two
+  // compose as "go to here", spatially and, with a bag open, in time.
+  if (event->button() == Qt::MiddleButton && middle_dragging_) {
+    middle_dragging_ = false;
+    if (middle_moved_) {
+      panning_ = false;
+      update();   // rebuild the layer cache at the settled view
+      emit viewChanged();
+      return;
     }
+    const QPointF m = screenToMap(event->pos().x(), event->pos().y());
+    center_map_ = m;
+    user_adjusted_ = true;
+    fit_pending_ = false;
     update();
-    if (changed) {
-      emit tileSelectionChanged();
+    emit viewChanged();
+    const auto bag = canvasToBag(m.x(), m.y());
+    if (bag) {
+      emit seekWorld(bag->x(), bag->y());
     }
     return;
   }
-  if (cube_box_selecting_) {
-    cube_box_selecting_ = false;
-    if ((event->pos() - cube_box_start_).manhattanLength() <= 4) {
-      // A shift-click, not a drag: clear the box.
+  if (event->button() != Qt::LeftButton) {return;}
+  if (region_selecting_) {
+    region_selecting_ = false;
+    const bool was_click =
+      (event->pos() - region_start_).manhattanLength() <= kClickSlopPx;
+    // One rectangle, both consequences: the exact bounds are the processing
+    // extent, and the index tiles it covers are the pass query. A click with
+    // no drag clears both, which is also the clear-selection affordance the
+    // tile rubber band never had.
+    const bool had_tiles = !selected_tiles_.empty();
+    if (was_click) {
+      selected_tiles_.clear();
       if (cube_box_geo_) {
         cube_box_geo_.reset();
         emit cubeBoxCleared();
       }
-    } else {
-      const QPointF a = screenToMap(cube_box_start_.x(), cube_box_start_.y());
-      const QPointF b = screenToMap(event->pos().x(), event->pos().y());
+      update();
+      if (had_tiles) {
+        emit tileSelectionChanged();
+      }
+      return;
+    }
+    const QPointF a = screenToMap(region_start_.x(), region_start_.y());
+    const QPointF b = screenToMap(event->pos().x(), event->pos().y());
+    std::set<std::size_t> hit;
+    for (const auto idx : rectsInBox(index_tiles_, a.x(), a.y(), b.x(), b.y())) {
+      hit.insert(idx);
+    }
+    const bool tiles_changed = hit != selected_tiles_;
+    selected_tiles_ = std::move(hit);
+    if (geo_mode_) {
       const auto [lat_a, lon_a] = canvasToGeo(a.x(), a.y());
       const auto [lat_b, lon_b] = canvasToGeo(b.x(), b.y());
       cube_box_geo_ = GeoRect{
         std::min(lat_a, lat_b), std::min(lon_a, lon_b),
         std::max(lat_a, lat_b), std::max(lon_a, lon_b)};
+    }
+    update();
+    if (tiles_changed) {
+      emit tileSelectionChanged();
+    }
+    if (cube_box_geo_) {
       emit cubeBoxSelected(
         cube_box_geo_->south, cube_box_geo_->west,
         cube_box_geo_->north, cube_box_geo_->east);
     }
-    update();
     return;
   }
   if (!marking_) {return;}

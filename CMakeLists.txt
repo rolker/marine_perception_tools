@@ -233,6 +233,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_survey_index_bridge test/test_survey_index_bridge.cpp)
   target_link_libraries(test_survey_index_bridge survey_index_bridge SQLite::SQLite3)
 
+  # Click-versus-drag on the index map (map_gesture.hpp, #42) — header-only.
+  ament_add_gtest(test_map_gesture test/test_map_gesture.cpp)
+  target_include_directories(test_map_gesture PRIVATE src)
+
   # Pure tile-selection math (tile_selection.hpp, #24) — header-only.
   ament_add_gtest(test_tile_selection test/test_tile_selection.cpp)
   target_include_directories(test_tile_selection PRIVATE src)

@@ -594,9 +594,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_order_combo_->setCurrentText("order1a");
   cube_order_combo_->setToolTip("IHO order (CUBE capture/hypothesis limits)");
   cube_run_btn_ = new QPushButton("Run CUBE", this);
-  cube_run_btn_->setEnabled(false);   // until a shift-drag box exists
+  cube_run_btn_->setEnabled(false);   // until a region has been drawn
   cube_run_btn_->setToolTip(
-    "Gather every MBES sounding in the shift-drag map box and CUBE it "
+    "Gather every MBES sounding in the map region and CUBE it "
     "at the chosen cell size");
   cube_tuning_ = default_cube_tuning();
   {
@@ -2965,8 +2965,8 @@ void SidescanViewerWindow::openSurveyIndex(
   if (box) {
     canvas_->fitGeo(box->south, box->west, box->north, box->east);
     status_->setText(
-      QString("Survey index: %1 tiles indexed — ctrl-click or ctrl-drag "
-        "tiles to load their passes into the 3D cloud.")
+      QString("Survey index: %1 tiles indexed — drag on the map to select a "
+        "region and load its passes; click to clear.")
       .arg(indexed_tiles_.size()));
   } else {
     status_->setText("Survey index holds no passes — nothing to explore.");
