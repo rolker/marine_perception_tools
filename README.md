@@ -144,6 +144,12 @@ One window, two modes that compose:
   it, **middle-click** centres the view on the point (and seeks the time cursor
   there when a bag is open), **middle-drag** pans, and the wheel zooms. While
   *Mark contact* is on, that visible mode takes left-drag for marking.
+  The recentre **glides** to the point over about three quarters of a second,
+  easing in and out, so the eye can follow the map across instead of having to
+  re-find the survey after a jump. The seek is not delayed by it — the time
+  cursor moves at the click. Any gesture that touches the view takes over at
+  once: a pan or a wheel zoom leaves the glide where it stands, and a second
+  middle-click retargets it from there rather than cancelling.
 
   Underneath all of it is a built-in **world coastline** so a collection-wide
   view is navigable at all: Natural Earth 1:50m, public domain, vendored into
