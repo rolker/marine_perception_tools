@@ -377,8 +377,17 @@ void BasemapLod::viewChanged(
 
 std::vector<OverviewTile> BasemapLod::renderTiles() const
 {
-  // Paint order (camp ADR-0013 progressive refinement): non-selected levels
-  // coarse->fine as the backdrop, the selected level last (on top).
+  // Paint order (uma-ADR-0013 D3 corollary): a consumer composites every
+  // resident level FINER OVER COARSER, always. `resident_` is keyed by level
+  // and lower level numbers are coarser (level 0 is the apex), so ascending
+  // iteration IS the paint order and the selected level takes no special
+  // place: the selection decides what to LOAD, never what to overlay.
+  //
+  // Painting the selection last was right only while it was the finest
+  // resident level — true zooming in, false zooming out, where
+  // selectLodLevel() picks a coarser level while the finer tiles are still
+  // resident. The coarse selection then painted over detail the operator
+  // could see a moment earlier (#43).
   std::vector<OverviewTile> out;
   std::size_t total = 0;
   for (const auto & [level, tiles] : resident_) {
@@ -387,22 +396,21 @@ std::vector<OverviewTile> BasemapLod::renderTiles() const
   }
   out.reserve(total);
   for (const auto & [level, tiles] : resident_) {
-    if (level == selected_level_) {
-      continue;
-    }
+    (void)level;
     for (const auto & [key, tile] : tiles) {
       (void)key;
       out.push_back(tile);
     }
   }
-  const auto sel = resident_.find(selected_level_);
-  if (sel != resident_.end()) {
-    for (const auto & [key, tile] : sel->second) {
-      (void)key;
-      out.push_back(tile);
-    }
-  }
   return out;
+}
+
+void BasemapLod::setResidentForTest(
+  std::map<int, std::map<BasemapTileKey, OverviewTile>> resident,
+  int selected_level)
+{
+  resident_ = std::move(resident);
+  selected_level_ = selected_level;
 }
 
 std::vector<std::pair<BasemapLod::TileKey, BasemapLod::TileRef>>
