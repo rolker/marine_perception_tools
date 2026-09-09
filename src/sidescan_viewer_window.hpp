@@ -264,6 +264,17 @@ private:
   // at the source; the label names the pane so a position is attributable.
   // A pane that cannot place the cursor reports nothing.
   void onPaneHoverGeo(HoverPane pane, const std::optional<GeoPoint> & pos);
+  // A pane hovering in a map-ENU frame (the three sonar panes and the 3D
+  // view): convert through that frame's anchor and report. valid=false, or a
+  // frame with no earth reference, reports nothing.
+  void onPaneHoverWorld(HoverPane pane, double map_x, double map_y, bool valid);
+  // Which frame the 3D pane's points are in right now, and its anchor. The
+  // scrub cloud is the open bag's map-ENU; a selection or CUBE load lives in
+  // its own load's reference frame, which may be another bag's entirely.
+  enum class CloudFrame { None, OpenBag, Reference };
+  CloudFrame cloud_frame_ = CloudFrame::None;
+  std::optional<MapGeoAffine> cloud_ref_anchor_;   // valid when cloud_frame_ == Reference
+  std::optional<MapGeoAffine> cloudFrameAnchor() const;
   void onPaneLeave(HoverPane pane);   // the cursor left: a shown position must be live
   HoverGeoReadout hover_readout_;
 
@@ -321,6 +332,12 @@ private:
   // The CUBE frame's world->geo affine, probed through the reference
   // earth anchor; nullopt without a geo reference (export refuses then).
   std::optional<MapGeoAffine> cubeSurfaceAnchor() const;
+  // A reference world frame's world->geo affine, probed through its earth
+  // anchor at height `z0`. nullopt when the load resolved no earth reference
+  // — the frame is unplaceable and everything downstream must say so.
+  static std::optional<MapGeoAffine> earthAnchorAffine(
+    const geometry_msgs::msg::TransformStamped & earth_from_world,
+    bool has_geo, double z0);
   // Fill the drape pass combo with the sidescan passes crossing the box
   // (port + starboard of the same bag interval merged into one entry).
   void populateDrapePasses();

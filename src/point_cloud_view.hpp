@@ -26,6 +26,7 @@
 #include <QVector3D>
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -98,6 +99,10 @@ public:
   // vocabulary reads this to say whether ColorMode::Pass has anything to
   // distinguish (#36).
   int passCount() const {return pass_count_;}
+
+  // How many points are loaded. Lets a test wait for a load to land in the
+  // pane rather than for a duration.
+  std::size_t pointCount() const {return pts_.size();}
 
   // Re-frame the camera (default orbit + auto distance) on the next setPoints. Call
   // on a new bag or from a "Fit View" action; scrubbing does not call this, so the

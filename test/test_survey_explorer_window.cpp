@@ -36,6 +36,7 @@
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QSettings>
+#include <QSlider>
 #include <QSurfaceFormat>
 #include <QThread>
 #include <QTreeWidget>
@@ -46,6 +47,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <set>
@@ -53,6 +55,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "marine_acoustic_msgs/msg/raw_sonar_image.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "rclcpp/time.hpp"
 #include "rosbag2_cpp/writer.hpp"
@@ -61,6 +64,8 @@
 #include "coastline_data.hpp"
 #include "cube_lab.hpp"
 #include "marine_autonomy/gggs.h"
+#include "marine_sonar_widgets/echogram_widget.hpp"
+#include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "marine_survey_index/schema.hpp"
 #include "color_vocabulary.hpp"
 #include "point_cloud_view.hpp"
@@ -1682,6 +1687,222 @@ TEST_F(ExplorerWindowFixture, AnUnplaceableMapReadsOutNothingRatherThanZero)
   hoverAt(*canvas, QPoint(canvas->width() / 2, canvas->height() / 2));
 
   EXPECT_TRUE(geo->text().isEmpty()) << geo->text().toStdString();
+}
+
+// Hovering a pane that cannot place the cursor must BLANK the readout, not
+// leave the map's last position standing where it reads as live. That stale
+// number — indistinguishable from a live one — is the reason this exists.
+TEST_F(ExplorerWindowFixture, HoveringAPaneThatCannotPlaceTheCursorBlanksTheReadout)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * geo = window.findChild<QLabel *>("hover_geo");
+  auto * waterfall =
+    window.findChild<marine_sonar_widgets::WaterfallWidget *>("sidescan_waterfall");
+  ASSERT_NE(geo, nullptr);
+  ASSERT_NE(waterfall, nullptr);
+
+  hoverAt(*canvas, geoPixel(*canvas, kLat, kLon));
+  ASSERT_FALSE(geo->text().isEmpty()) << "the map never reported a position";
+
+  // No bag is open, so the waterfall has no pose to project a pixel through.
+  const QPoint p(waterfall->width() / 2, waterfall->height() / 2);
+  QMouseEvent move(
+    QEvent::MouseMove, QPointF(p), QPointF(waterfall->mapToGlobal(p)),
+    Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(waterfall, &move);
+
+  EXPECT_TRUE(geo->text().isEmpty()) << geo->text().toStdString();
+}
+
+// A small openable recording at the fixture position: the Garmin sidescan
+// ping topics a session requires, MBES detections for the 3D pane and the
+// backscatter waterfall, and the /tf chain (including the earth<-map anchor)
+// that places all of it geographically.
+void writeSidescanBag(const std::string & uri, std::int64_t t0_ns, std::int64_t t1_ns)
+{
+  double ax = 0.0;
+  double ay = 0.0;
+  double az = 0.0;
+  marine_perception_tools::geodetic_to_ecef(kLat, kLon, 0.0, ax, ay, az);
+  const std::int64_t span = t1_ns - t0_ns;
+
+  rosbag2_cpp::Writer writer;
+  writer.open(uri);
+  {
+    tf2_msgs::msg::TFMessage tfm;
+    geometry_msgs::msg::TransformStamped t;
+    t.header.frame_id = "bizzy/base_link";
+    t.child_frame_id = "bizzy/m3";
+    t.transform.translation.z = -0.5;
+    t.transform.rotation.w = 1.0;
+    t.header.stamp.sec = static_cast<std::int32_t>(t0_ns / 1000000000LL);
+    tfm.transforms.push_back(t);
+    writer.write(tfm, "/tf_static", rclcpp::Time(t0_ns));
+  }
+  constexpr int kTfSamples = 120;
+  for (int i = 0; i <= kTfSamples; ++i) {
+    const std::int64_t t = t0_ns + span * i / kTfSamples;
+    tf2_msgs::msg::TFMessage tfm;
+    geometry_msgs::msg::TransformStamped pose;
+    pose.header.frame_id = "bizzy/map";
+    pose.child_frame_id = "bizzy/base_link";
+    pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
+    pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
+    pose.transform.translation.x = 0.2 * i;   // ~24 m of line
+    pose.transform.rotation.w = 1.0;
+    tfm.transforms.push_back(pose);
+
+    geometry_msgs::msg::TransformStamped anchor = pose;
+    anchor.header.frame_id = "earth";
+    anchor.child_frame_id = "bizzy/map";
+    anchor.transform.translation.x = ax;
+    anchor.transform.translation.y = ay;
+    anchor.transform.translation.z = az;
+    tfm.transforms.push_back(anchor);
+    writer.write(tfm, "/tf", rclcpp::Time(t));
+  }
+
+  // Sidescan pings: one beam of amplitudes per channel per ping, bottom
+  // return roughly a third of the way out so the row has structure.
+  constexpr std::uint32_t kSamples = 256;
+  constexpr int kPings = 120;
+  marine_acoustic_msgs::msg::RawSonarImage img;
+  img.header.frame_id = "bizzy/garmin_sidescan";
+  img.ping_info.sound_speed = 1500.0f;
+  img.sample_rate = 20000.0f;
+  img.samples_per_beam = kSamples;
+  img.sample0 = 0;
+  img.image.dtype = marine_acoustic_msgs::msg::SonarImageData::DTYPE_UINT8;
+  img.image.beam_count = 1;
+  img.image.data.resize(kSamples);
+  for (std::uint32_t k = 0; k < kSamples; ++k) {
+    img.image.data[k] = static_cast<std::uint8_t>(k > kSamples / 3 ? 200 : 20);
+  }
+  for (int i = 0; i < kPings; ++i) {
+    const std::int64_t t = t0_ns + span * i / kPings;
+    img.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
+    img.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
+    writer.write(
+      img, "/bizzy/sensors/sidescan/garmin_sidescan/sonar_image_port",
+      rclcpp::Time(t));
+    writer.write(
+      img, "/bizzy/sensors/sidescan/garmin_sidescan/sonar_image_starboard",
+      rclcpp::Time(t));
+  }
+
+  constexpr int kBeams = 32;
+  marine_acoustic_msgs::msg::SonarDetections det;
+  det.header.frame_id = "bizzy/m3";
+  det.ping_info.sound_speed = 1500.0f;
+  det.two_way_travel_times.resize(kBeams);
+  det.tx_angles.assign(kBeams, 0.0f);
+  det.rx_angles.resize(kBeams);
+  det.intensities.assign(kBeams, -30.0f);
+  for (int b = 0; b < kBeams; ++b) {
+    const double angle = -0.6 + 1.2 * b / (kBeams - 1);
+    det.rx_angles[static_cast<std::size_t>(b)] = static_cast<float>(angle);
+    det.two_way_travel_times[static_cast<std::size_t>(b)] =
+      static_cast<float>(2.0 * 12.0 / (1500.0 * std::cos(angle)));
+  }
+  for (int i = 0; i < kPings; ++i) {
+    const std::int64_t t = t0_ns + span * i / kPings;
+    det.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
+    det.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
+    writer.write(det, "/bizzy/sensors/m3/detections", rclcpp::Time(t));
+  }
+}
+
+// The three panes that hover in a bag's map-ENU frame, each converting at its
+// own source: the 3D cloud through its load's frame, the MBES waterfall
+// through the open bag's, and the echogram through the track position at the
+// along-track distance under the cursor. All three read out the recording's
+// own position, and say which pane said so.
+TEST_F(ExplorerWindowFixture, EverySpatialPaneReadsOutItsOwnFramesPosition)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  const std::string bag_uri = std::string(::testing::TempDir()) + "/explorer_pane_geo_bag";
+  struct BagCleanup
+  {
+    std::string uri;
+    ~BagCleanup() {std::filesystem::remove_all(uri);}
+  } cleanup{bag_uri};
+  std::filesystem::remove_all(bag_uri);
+  constexpr std::int64_t kT0 = 1700000000000000000LL;
+  constexpr std::int64_t kT1 = kT0 + 20000000000LL;
+  writeSidescanBag(bag_uri, kT0, kT1);
+
+  SidescanViewerWindow window;
+  window.setCacheDir(std::string(::testing::TempDir()) + "/pane_geo_cache");
+  window.resize(1200, 800);
+  window.openBag(bag_uri);
+  window.show();
+
+  auto * geo = window.findChild<QLabel *>("hover_geo");
+  auto * cloud = window.findChild<PointCloudView *>("cloud_view");
+  auto * waterfall =
+    window.findChild<marine_sonar_widgets::WaterfallWidget *>("sidescan_waterfall");
+  auto * echogram = window.findChild<marine_sonar_widgets::EchogramWidget *>("echogram");
+  ASSERT_NE(geo, nullptr);
+  ASSERT_NE(cloud, nullptr);
+  ASSERT_NE(waterfall, nullptr);
+  ASSERT_NE(echogram, nullptr);
+  // The scrub window trails the head, so at distance 0 it is empty: drive to
+  // the end of the line, where the window covers the recording.
+  auto * scrub = window.findChild<QSlider *>();
+  ASSERT_NE(scrub, nullptr);
+  ASSERT_TRUE(process_until([scrub]() {return scrub->isEnabled() && scrub->maximum() > 1;}))
+    << "the bag never opened";
+  scrub->setValue(scrub->maximum());
+  ASSERT_TRUE(process_until([cloud]() {return cloud->pointCount() > 0;}))
+    << "the bag's soundings never reached the 3D pane";
+
+  // Read a position out of a pane and check it is the recording's own, to the
+  // ~20 m the synthetic line covers.
+  const auto reads_position = [geo](const char * pane) {
+      const QString shown = geo->text();
+      EXPECT_TRUE(shown.startsWith(QString(pane) + "  ")) << shown.toStdString();
+      const QStringList parts =
+        shown.mid(static_cast<int>(std::strlen(pane)) + 2).split(", ");
+      if (parts.size() != 2) {
+        ADD_FAILURE() << "not a lat/lon: " << shown.toStdString();
+        return;
+      }
+      EXPECT_NEAR(parts[0].toDouble(), kLat, 1e-3);
+      EXPECT_NEAR(parts[1].toDouble(), kLon, 1e-3);
+    };
+  const auto hover_widget = [](QWidget * w) {
+      const QPoint p(w->width() / 2, w->height() / 2);
+      QMouseEvent move(
+        QEvent::MouseMove, QPointF(p), QPointF(w->mapToGlobal(p)),
+        Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+      QApplication::sendEvent(w, &move);
+    };
+
+  // The 3D view's ground-plane pick needs a painted camera to unproject through.
+  cloud->grabFramebuffer();
+  hover_widget(cloud);
+  reads_position("MBES 3D");
+
+  hover_widget(waterfall);
+  reads_position("Sidescan");
+
+  auto * mbes =
+    window.findChild<marine_sonar_widgets::WaterfallWidget *>("mbes_waterfall");
+  ASSERT_NE(mbes, nullptr);
+  hover_widget(mbes);
+  reads_position("MBES Backscatter");
+
+  hover_widget(echogram);
+  reads_position("Water Column");
 }
 
 }  // namespace

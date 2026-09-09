@@ -1150,6 +1150,11 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         selection_ref_bag_ = ticket.ref_bag;
         selection_ref_frame_ = ticket.ref_frame;
         cloud_->setPoints(ticket.soundings);
+        // The pane now shows the RUN's soundings, in the run's reference
+        // frame — which may be another bag's than the one open (#47).
+        cloud_frame_ = CloudFrame::Reference;
+        cloud_ref_anchor_ =
+          earthAnchorAffine(ticket.ref_earth_from_world, ticket.ref_has_geo, 0.0);
         refreshCloudColorChannels();   // one set of points: Pass greys out
       }
       cube_soundings_ = std::move(ticket.soundings);   // self-cal input
@@ -1566,7 +1571,20 @@ std::optional<MapGeoAffine> SidescanViewerWindow::cubeSurfaceAnchor() const
     }
   }
   const double z0 = (z_cnt > 0) ? z_sum / static_cast<double>(z_cnt) : 0.0;
-  const auto & t = cube_ref_anchor_.transform;
+  return earthAnchorAffine(cube_ref_anchor_, cube_ref_has_geo_, z0);
+}
+
+std::optional<MapGeoAffine> SidescanViewerWindow::earthAnchorAffine(
+  const geometry_msgs::msg::TransformStamped & earth_from_world,
+  bool has_geo, double z0)
+{
+  if (!has_geo) {
+    return std::nullopt;
+  }
+  // Probe world->geo through the reference earth anchor at height z0 (the
+  // vertical offset moves lat/lon by ~nothing but keeps the ECEF conversion
+  // honest).
+  const auto & t = earth_from_world.transform;
   return probe_map_anchor(
     [&t, z0](double x, double y, double & lat, double & lon, double & alt) {
       double ex = 0.0;
@@ -1961,11 +1979,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // marked pixel to map coordinates from each row's pose; slant range (water column
   // kept) matches the raw display analysts read, with across-track range gridlines.
   waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
+  waterfall_->setObjectName("sidescan_waterfall");
   waterfall_->set_ground_range(false);   // raw slant range, not slant->ground (palette set below)
 
   // MBES backscatter waterfall: one row per detection ping, the beam dB fan
   // across-track (beam-index axis, no metric range lines), newest at top.
   mbes_waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
+  mbes_waterfall_->setObjectName("mbes_waterfall");
   // Across-track-projected: keep slant range (we already supply ground/across-track
   // distances, so no further conversion) and draw across-track range lines.
   mbes_waterfall_->set_ground_range(false);
@@ -1973,10 +1993,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   // Water-column echogram: the down-channel pings as a depth-vs-distance curtain.
   echogram_ = new marine_sonar_widgets::EchogramWidget(this);
+  echogram_->setObjectName("echogram");
 
   // MBES 3D point cloud: orbit view of the window's soundings (colour mode +
   // Z-exaggeration live).
   cloud_ = new PointCloudView(this);
+  cloud_->setObjectName("cloud_view");
   setupCloudControls();
 
   // Per-pane colormap selectors. Every pane offers the SAME full marine_colormap
@@ -2461,8 +2483,25 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(canvas_, &SidescanCanvas::seekWorld, this, &SidescanViewerWindow::onCursorSeek);
   connect(cloud_, &PointCloudView::hoverWorld, this, &SidescanViewerWindow::onCursorHover);
   connect(cloud_, &PointCloudView::seekWorld, this, &SidescanViewerWindow::onCursorSeek);
+  // ...and the same hovers again as the geographic readout (#47), tagged with
+  // the pane they came from. Separate from the linked cursor on purpose: the
+  // cursor is a map-frame broadcast to every pane, the readout is one pane's
+  // position converted at its source.
   const auto wf_hover = [this](QPointF p, bool v) {onCursorHover(p.x(), p.y(), v);};
   const auto wf_seek = [this](QPointF p) {onCursorSeek(p.x(), p.y());};
+  connect(
+    cloud_, &PointCloudView::hoverWorld, this,
+    [this](double x, double y, bool v) {onPaneHoverWorld(HoverPane::Cloud, x, y, v);});
+  connect(
+    waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this,
+    [this](QPointF p, bool v) {
+      onPaneHoverWorld(HoverPane::Sidescan, p.x(), p.y(), v);
+    });
+  connect(
+    mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this,
+    [this](QPointF p, bool v) {
+      onPaneHoverWorld(HoverPane::Mbes, p.x(), p.y(), v);
+    });
   connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this, wf_hover);
   connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::seekRequested, this, wf_seek);
   connect(mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this, wf_hover);
@@ -3079,16 +3118,16 @@ void SidescanViewerWindow::onCursorSeek(double map_x, double map_y)
 
 void SidescanViewerWindow::onEchogramHover(double frac, bool valid)
 {
+  // The echogram's own frame is along-track distance: a column is where the
+  // boat was, so its position is the track position at that distance. With no
+  // open bag, or a distance the track cannot answer for, it is nothing.
   const double span = last_win_hi_ - last_win_lo_;
   double x = 0.0;
   double y = 0.0;
-  if (valid && session_ && span > 0.0 &&
-    session_->positionAtDistance(last_win_lo_ + frac * span, x, y))
-  {
-    onCursorHover(x, y, true);
-  } else {
-    onCursorHover(0.0, 0.0, false);
-  }
+  const bool placed = valid && session_ && span > 0.0 &&
+    session_->positionAtDistance(last_win_lo_ + frac * span, x, y);
+  onCursorHover(x, y, placed);
+  onPaneHoverWorld(HoverPane::Echogram, x, y, placed);
 }
 
 void SidescanViewerWindow::onEchogramSeek(double frac)
@@ -3255,6 +3294,7 @@ void SidescanViewerWindow::onRenderFinished()
   // pane alone — the selection cloud spans bags and would be clobbered.
   if (!selection_cloud_) {
     cloud_->setPoints(r.mbes_soundings);
+    cloud_frame_ = CloudFrame::OpenBag;   // the open bag's map-ENU (#47)
     refreshCloudColorChannels();   // one set of points: no pass identity
     cloud_->setBoat(r.boat_x, r.boat_y, r.boat_z, r.boat_heading, r.boat_valid);
   }
@@ -3634,6 +3674,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
   if (cloud_passes.empty()) {
     cloud_->resetView();
     cloud_->setMultiPassPoints({});
+    cloud_frame_ = CloudFrame::None;   // an empty pane places nothing (#47)
     refreshCloudColorChannels();
     cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
     status_->setText(
@@ -3745,10 +3786,11 @@ void SidescanViewerWindow::exitSelectionCloud()
   // otherwise leave it empty.
   cloud_->resetView();
   if (session_) {
-    requestRender();
+    requestRender();   // the render sets the pane's frame back to the open bag
   } else {
     cloud_->setPoints({});
     cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
+    cloud_frame_ = CloudFrame::None;
   }
   // The scrub cloud has no pass identity: Pass greys out (with its reason)
   // and the colouring falls back to Depth if it was the live choice.
@@ -3904,6 +3946,33 @@ void SidescanViewerWindow::onPaneHoverGeo(
   hover_geo_->setText(QString::fromStdString(hover_readout_.text()));
 }
 
+void SidescanViewerWindow::onPaneHoverWorld(
+  HoverPane pane, double map_x, double map_y, bool valid)
+{
+  // Each pane converts in ITS OWN frame: the three sonar panes hover in the
+  // open bag's map-ENU, while the 3D pane's points may be a selection or CUBE
+  // load in another bag's reference frame entirely.
+  const std::optional<MapGeoAffine> anchor =
+    (pane == HoverPane::Cloud) ? cloudFrameAnchor() : canvas_->mapAnchor();
+  onPaneHoverGeo(
+    pane, valid ? geo_from_map(anchor, map_x, map_y) : std::nullopt);
+}
+
+std::optional<MapGeoAffine> SidescanViewerWindow::cloudFrameAnchor() const
+{
+  switch (cloud_frame_) {
+    case CloudFrame::OpenBag:
+      // The scrub cloud is the open bag's window, in the same map-ENU the map
+      // places that bag by — so it reads through the same anchor, live.
+      return canvas_->mapAnchor();
+    case CloudFrame::Reference:
+      return cloud_ref_anchor_;
+    case CloudFrame::None:
+      break;
+  }
+  return std::nullopt;
+}
+
 void SidescanViewerWindow::onPaneLeave(HoverPane pane)
 {
   hover_readout_.leave(pane);
@@ -3960,9 +4029,14 @@ void SidescanViewerWindow::onCloudPassesLoaded()
   cloud_->resetView();
   cloud_->setMultiPassPoints(out.pass_clouds);
   // The frame these soundings live in (#36): a later CUBE run may only lay a
-  // surface over them when its own load resolved the same reference.
+  // surface over them when its own load resolved the same reference. It is
+  // also the frame the pane's cursor reads out in (#47) — a load that
+  // resolved no earth reference places nothing.
   selection_ref_bag_ = out.ref_bag;
   selection_ref_frame_ = out.ref_frame;
+  cloud_frame_ = CloudFrame::Reference;
+  cloud_ref_anchor_ =
+    earthAnchorAffine(out.ref_earth_from_world, out.ref_has_geo, 0.0);
   // Pass identity exists again, so the Pass entry goes live; a selection that
   // just entered multi-pass mode also lands on it.
   refreshCloudColorChannels();
