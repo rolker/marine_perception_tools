@@ -213,6 +213,13 @@ depth inside the estimator, and uncertainty is a property of the surface) and no
 **Sidescan** (that is a drape painted onto CUBE nodes by marching the terrain),
 and the surface offers no **Pass** (a node merges every pass that touched it).
 
+A **Run CUBE** *adds* its surface over the soundings already loaded instead of
+replacing them: after a run you are still looking at your selection, now with a
+surface over it. The one exception is a run whose reference world frame differs
+from the loaded cloud's — the surface is a grid in its own frame and would be
+placed by luck over soundings in another — where the run falls back to showing
+its own soundings and says so in the status line.
+
 Bag opens are accelerated by a **bag-index cache** (`--cache-dir`, default
 `$XDG_CACHE_HOME/survey_explorer`): the whole-bag metadata scan runs once per
 bag and is then a file read, keyed by the bag's size+mtime (bags are never

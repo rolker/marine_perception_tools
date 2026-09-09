@@ -25,6 +25,7 @@ namespace
 {
 
 using marine_perception_tools::CloudPassInfo;
+using marine_perception_tools::cube_surface_shares_cloud_frame;
 using marine_perception_tools::load_cloud_passes;
 
 TEST(MbesPassLoader, EmptyInputYieldsEmptyOutcome)
@@ -103,6 +104,53 @@ TEST(MbesPassLoader, UnsetCancelTokenLoadsNormally)
   EXPECT_EQ(out.skipped_passes, 2);
   ASSERT_EQ(out.notes.size(), 2);
   EXPECT_TRUE(out.notes[0].contains("bag read failed"));
+}
+
+// --- a CUBE surface over the selection cloud (#36) ---------------------------
+//
+// A finished CUBE run lays its surface over the soundings already on screen
+// instead of replacing them. The one thing that can stop it is the frame: the
+// surface is a grid in the run's own reference world frame, placed by the
+// displayed cloud's centroid, so it may only be drawn over soundings that live
+// in that frame. Same reference bag AND frame name is that guarantee.
+TEST(CubeSurfaceSharesCloudFrame, KeepsTheCloudWhenBothLoadsResolvedTheSameReference)
+{
+  EXPECT_TRUE(
+    cube_surface_shares_cloud_frame(
+      true, true, "/bags/a", "bizzy/map", "/bags/a", "bizzy/map"));
+}
+
+// A different reference bag — or the same bag under a different frame name —
+// means the two point sets are related by a rigid transform the surface grid
+// cannot be re-gridded through without re-running the estimate. Drawing it
+// anyway would place bathymetry by luck, so the run falls back to its own
+// soundings.
+TEST(CubeSurfaceSharesCloudFrame, RefusesAcrossDifferentReferenceFrames)
+{
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      true, true, "/bags/a", "bizzy/map", "/bags/b", "bizzy/map"));
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      true, true, "/bags/a", "bizzy/map", "/bags/a", "izzy/map"));
+}
+
+// Nothing to preserve: the pane is not showing a selection, or its load has
+// not landed yet. An unresolved reference on either side is not a match
+// either — a load that resolved no reference produced no soundings at all.
+TEST(CubeSurfaceSharesCloudFrame, RefusesWithNothingLoadedOrNoReference)
+{
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      false, true, "/bags/a", "bizzy/map", "/bags/a", "bizzy/map"));
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      true, false, "/bags/a", "bizzy/map", "/bags/a", "bizzy/map"));
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(true, true, "", "", "", ""));
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      true, true, "/bags/a", "bizzy/map", "", ""));
 }
 
 }  // namespace

@@ -67,6 +67,36 @@ struct CloudLoadOutcome
   bool cancelled = false;
 };
 
+// May a CUBE surface be drawn OVER an already-loaded selection cloud (#36)?
+//
+// A run's surface is a heightmap in the run's OWN reference world frame — the
+// first loadable pass of its box query — and PointCloudView recentres it on
+// the displayed cloud's centroid. Drawing it over a cloud loaded in a
+// DIFFERENT reference frame would place it by luck: the two frames are related
+// by a rigid transform through their earth anchors, which the surface (a
+// grid, not a point set) cannot be re-gridded through without re-running the
+// estimate. So the surface joins the selection cloud only when both loads
+// resolved the same reference bag and frame name; otherwise the caller falls
+// back to showing the run's own soundings.
+//
+// `cloud_loaded` is false while a selection load is still in flight — there is
+// nothing on screen to preserve.
+inline bool cube_surface_shares_cloud_frame(
+  bool selection_cloud, bool cloud_loaded,
+  const std::string & cloud_ref_bag, const std::string & cloud_ref_frame,
+  const std::string & cube_ref_bag, const std::string & cube_ref_frame)
+{
+  if (!selection_cloud || !cloud_loaded) {
+    return false;
+  }
+  // An unidentified reference frame on either side is not a match: a load that
+  // resolved no reference produced no soundings to be in a frame at all.
+  if (cloud_ref_bag.empty() || cube_ref_bag.empty()) {
+    return false;
+  }
+  return cloud_ref_bag == cube_ref_bag && cloud_ref_frame == cube_ref_frame;
+}
+
 // Optional clip region: keep only soundings within `margin_m` horizontally
 // of the geographic point (a contact + margin, #24 desk finding — 6-7 passes
 // over a tile is millions of soundings; the inspect-a-contact workflow needs

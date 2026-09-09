@@ -123,6 +123,9 @@ public:
     std::vector<float> positions_xyz, std::vector<float> colors_rgb,
     std::vector<std::uint32_t> indices);
   void clearSurface();
+  // Whether a surface layer is currently held (the CUBE lab's, #36) — the
+  // geometry, not its visibility switch.
+  bool hasSurface() const {return !surface_idx_.empty();}
   void setSurfaceVisible(bool on);
   void setSurfaceAlpha(float alpha);   // clamped to [0.05, 1]
   // Hide/show the point cloud itself (e.g. to view the CUBE surface alone).

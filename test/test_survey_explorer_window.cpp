@@ -31,6 +31,7 @@
 #include <QElapsedTimer>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPushButton>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QSettings>
@@ -62,6 +63,7 @@
 #include "marine_survey_index/schema.hpp"
 #include "color_vocabulary.hpp"
 #include "point_cloud_view.hpp"
+#include "sidescan_geometry.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_viewer_window.hpp"
 #include "time_bar_widget.hpp"
@@ -1135,6 +1137,173 @@ TEST_F(ExplorerWindowFixture, CubeOrderPresetsSeedTheUncertaintyBudget)
   QCoreApplication::processEvents();
   EXPECT_FLOAT_EQ(window.cubeTuning().iho_fixed, held_fixed);
   EXPECT_FLOAT_EQ(window.cubeTuning().iho_percent, held_percent);
+}
+
+// --- a CUBE run adds a surface over the selection cloud (#36) ---------------
+
+// A light synthetic recording centred on the fixture position: enough beams
+// for CUBE to settle nodes, small enough that a selection load AND a run both
+// finish inside a test. Unlike writeSyntheticBag (whose job is to be SLOW),
+// the earth<-map anchor here is the fixture position itself, so the region
+// drawn on the map really does clip to these soundings.
+void writeLightBag(const std::string & uri, std::int64_t t0_ns, std::int64_t t1_ns)
+{
+  double ax = 0.0;
+  double ay = 0.0;
+  double az = 0.0;
+  marine_perception_tools::geodetic_to_ecef(kLat, kLon, 0.0, ax, ay, az);
+  const std::int64_t span = t1_ns - t0_ns;
+
+  rosbag2_cpp::Writer writer;
+  writer.open(uri);
+  {
+    tf2_msgs::msg::TFMessage tfm;
+    geometry_msgs::msg::TransformStamped t;
+    t.header.frame_id = "bizzy/base_link";
+    t.child_frame_id = "bizzy/m3";
+    t.transform.translation.z = -0.5;
+    t.transform.rotation.w = 1.0;
+    t.header.stamp.sec = static_cast<std::int32_t>(t0_ns / 1000000000LL);
+    tfm.transforms.push_back(t);
+    writer.write(tfm, "/tf_static", rclcpp::Time(t0_ns));
+  }
+  constexpr int kTfSamples = 200;
+  for (int i = 0; i < kTfSamples; ++i) {
+    const std::int64_t t = t0_ns + span * i / kTfSamples;
+    tf2_msgs::msg::TFMessage tfm;
+    geometry_msgs::msg::TransformStamped pose;
+    pose.header.frame_id = "bizzy/map";
+    pose.child_frame_id = "bizzy/base_link";
+    pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
+    pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
+    pose.transform.translation.x = 0.1 * i;   // ~20 m of line, well inside a region
+    pose.transform.rotation.w = 1.0;
+    tfm.transforms.push_back(pose);
+
+    geometry_msgs::msg::TransformStamped anchor = pose;
+    anchor.header.frame_id = "earth";
+    anchor.child_frame_id = "bizzy/map";
+    anchor.transform.translation.x = ax;
+    anchor.transform.translation.y = ay;
+    anchor.transform.translation.z = az;
+    tfm.transforms.push_back(anchor);
+    writer.write(tfm, "/tf", rclcpp::Time(t));
+  }
+
+  constexpr int kBeams = 64;
+  constexpr int kPings = 80;
+  marine_acoustic_msgs::msg::SonarDetections det;
+  det.header.frame_id = "bizzy/m3";
+  det.ping_info.sound_speed = 1500.0f;
+  det.two_way_travel_times.resize(kBeams);
+  det.tx_angles.assign(kBeams, 0.0f);
+  det.rx_angles.resize(kBeams);
+  det.intensities.assign(kBeams, -30.0f);
+  for (int b = 0; b < kBeams; ++b) {
+    const double angle = -0.6 + 1.2 * b / (kBeams - 1);
+    det.rx_angles[static_cast<std::size_t>(b)] = static_cast<float>(angle);
+    det.two_way_travel_times[static_cast<std::size_t>(b)] =
+      static_cast<float>(2.0 * 12.0 / (1500.0 * std::cos(angle)));
+  }
+  for (int i = 0; i < kPings; ++i) {
+    const std::int64_t t = t0_ns + span * i / kPings;
+    det.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
+    det.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
+    writer.write(det, "/bizzy/sensors/m3/detections", rclcpp::Time(t));
+  }
+}
+
+// The operator's second complaint, as a test: a CUBE run must ADD a surface
+// over the soundings already loaded, not replace them. Before this, a finished
+// run swapped the multi-pass, pass-coloured cloud for its own separately
+// gathered soundings — which read, rightly, as the run stealing the selection.
+//
+// The region is drawn once, with the one left-drag gesture that carries both
+// consequences (#42): the tiles it covers load the cloud, its exact bounds are
+// the processing extent. What must survive the run is everything that belongs
+// to the selection — the per-pass cloud, its legend, and its colouring.
+TEST_F(ExplorerWindowFixture, ACubeRunAddsASurfaceOverTheSelectionCloud)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+
+  const std::string bag_uri = std::string(::testing::TempDir()) + "/explorer_cube_bag";
+  struct BagCleanup
+  {
+    std::string uri;
+    ~BagCleanup() {std::filesystem::remove_all(uri);}
+  } cleanup{bag_uri};
+  std::filesystem::remove_all(bag_uri);
+  constexpr std::int64_t kT0 = 1700000000000000000LL;
+  constexpr std::int64_t kT1 = kT0 + 20000000000LL;
+  writeLightBag(bag_uri, kT0, kT1);
+
+  // Swap the fixture's missing-bag pass for one over the real recording.
+  sqlite3 * db = marine_survey_index::openIndexDb(db_path_);
+  exec(db, "DELETE FROM passes WHERE sensor_type = 'mbes-bathy';");
+  exec(db, ("INSERT INTO bags (id, path, size_bytes, mtime_ns, indexed_at_ns)"
+    " VALUES (2, '" + bag_uri + "', 100, 200, 300);").c_str());
+  const auto tile = gggs::Level(14).gridIndex(kLat, kLon);
+  exec(db, ("INSERT INTO passes (bag_id, level, tile_row, tile_col, sensor_type,"
+    " topic, t_start_ns, t_end_ns, ping_count) VALUES (2, 14, " +
+    std::to_string(tile.row()) + ", " + std::to_string(tile.column()) +
+    ", 'mbes-bathy', '/bizzy/sensors/m3/detections', " +
+    std::to_string(kT0) + ", " + std::to_string(kT1) + ", 80);").c_str());
+  sqlite3_close(db);
+
+  SidescanViewerWindow window;
+  window.resize(1200, 800);
+  window.openSurveyIndex(db_path_, std::string(::testing::TempDir()));
+  window.show();
+  QCoreApplication::processEvents();
+
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  auto * cloud = window.findChild<PointCloudView *>();
+  auto * legend = window.findChild<QTreeWidget *>("cloud_legend");
+  auto * points = window.findChild<QComboBox *>("cloud_color_combo");
+  auto * run = window.findChild<QPushButton *>("cube_run_btn");
+  auto * cell = window.findChild<QDoubleSpinBox *>("cube_cell_spin");
+  ASSERT_NE(canvas, nullptr);
+  ASSERT_NE(cloud, nullptr);
+  ASSERT_NE(legend, nullptr);
+  ASSERT_NE(points, nullptr);
+  ASSERT_NE(run, nullptr);
+  ASSERT_NE(cell, nullptr);
+  canvas->grab();   // force the pending fit, so the drag reads a settled view
+
+  // One region: the whole visible map, so it covers both the index tile and
+  // the recorded line whatever the fit margin turned out to be.
+  leftDrag(*canvas, QPoint(4, 4), QPoint(canvas->width() - 4, canvas->height() - 4));
+  ASSERT_TRUE(
+    process_until(
+      [legend]() {
+        return legend->topLevelItemCount() > 0 &&
+               legend->topLevelItem(0)->text(1).toInt() > 0;
+      }))
+    << "the selection never loaded soundings from the synthetic bag";
+  const int rows_before = legend->topLevelItemCount();
+  ASSERT_EQ(cloud->passCount(), 1);
+  ASSERT_EQ(points->currentText(), "Pass");
+  ASSERT_FALSE(cloud->hasSurface());
+
+  // Coarse cells: the surface only has to exist, and a 0.1 m grid over a
+  // whole map view is a lot of nodes to settle inside a test.
+  cell->setValue(2.0);
+  ASSERT_TRUE(run->isEnabled()) << "the region did not arm the CUBE run";
+  run->click();
+  ASSERT_TRUE(process_until([cloud]() {return cloud->hasSurface();}))
+    << "the CUBE run never produced a surface";
+
+  // The selection is still what the operator is looking at — now with a
+  // surface over it.
+  EXPECT_EQ(cloud->passCount(), 1) << "the run replaced the multi-pass cloud";
+  EXPECT_TRUE(legend->isVisible());
+  EXPECT_EQ(legend->topLevelItemCount(), rows_before);
+  EXPECT_EQ(points->currentText(), "Pass")
+    << "the run re-coloured the operator's cloud by depth";
+  EXPECT_TRUE(points->isEnabled());
 }
 
 }  // namespace

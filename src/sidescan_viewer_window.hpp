@@ -126,6 +126,7 @@ struct CubeLabTicket
   // Reference frame identity from the cloud load (#29): the sidescan drape
   // reprojects its pings into this frame.
   std::string ref_bag;
+  std::string ref_frame;
   bool ref_has_geo = false;
   geometry_msgs::msg::TransformStamped ref_earth_from_world;
 };
@@ -488,6 +489,13 @@ private:
   CubeSurface cube_drape_terrain_;   // the extended terrain the drape rode
   QFutureWatcher<DrapeTicket> drape_watcher_;
   std::uint64_t drape_gen_ = 0;
+  // The reference world frame the CURRENT selection cloud lives in (#36).
+  // A CUBE surface may only be drawn over soundings in its own reference
+  // frame, so a run compares its frame against these before keeping the
+  // cloud on screen. Empty = no selection cloud loaded.
+  std::string selection_ref_bag_;
+  std::string selection_ref_frame_;
+
   std::string cube_ref_bag_;
   bool cube_ref_has_geo_ = false;
   geometry_msgs::msg::TransformStamped cube_ref_anchor_;

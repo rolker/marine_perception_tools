@@ -681,6 +681,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   // cell size, IHO order, the explicit Run trigger (CUBE is expensive — no
   // auto-runs), and the surface's display controls.
   cube_cell_spin_ = new QDoubleSpinBox(this);
+  cube_cell_spin_->setObjectName("cube_cell_spin");
   cube_cell_spin_->setRange(0.02, 50.0);
   cube_cell_spin_->setDecimals(2);
   cube_cell_spin_->setSingleStep(0.05);
@@ -704,6 +705,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "one entry here. NOTE: the budget is compared against a PLACEHOLDER "
     "per-sounding error — see params….");
   cube_run_btn_ = new QPushButton("Run CUBE", this);
+  cube_run_btn_->setObjectName("cube_run_btn");
   cube_run_btn_->setEnabled(false);   // until a region has been drawn
   cube_run_btn_->setToolTip(
     "Gather every MBES sounding in the map region and CUBE it "
@@ -1113,15 +1115,43 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         cube_run_btn_->setEnabled(cube_box_.has_value());
         return;
       }
-      // The lab owns the cloud pane now: plain points in the same frame as
-      // the surface, scalar modes + range controls live.
-      selection_cloud_ = false;
-      ++cloud_gen_;   // any tile-selection load in flight is stale
-      cloud_pass_clouds_.clear();
-      cloud_legend_->clear();
-      cloud_legend_->setVisible(false);
-      cloud_->setPoints(ticket.soundings);
-      refreshCloudColorChannels();   // one set of points: Pass greys out
+      // A run ADDS a surface over the soundings already on screen (#36): the
+      // operator selected a region, got his multi-pass cloud, and asked for a
+      // surface over it — replacing that cloud with the run's own gather was
+      // read, rightly, as the CUBE run stealing his selection.
+      //
+      // The one thing that can stop it is the frame: the surface is a grid in
+      // the run's own reference world frame and is placed by the displayed
+      // cloud's centroid, so it may only be drawn over soundings in that same
+      // frame. When the two loads resolved different references the run falls
+      // back to showing its own soundings — a misplaced surface would be a
+      // wrong answer, not an inconvenience — and says so.
+      const bool keep_cloud = cube_surface_shares_cloud_frame(
+        selection_cloud_, !cloud_pass_clouds_.empty(),
+        selection_ref_bag_, selection_ref_frame_,
+        ticket.ref_bag, ticket.ref_frame);
+      QString cloud_note;
+      if (!keep_cloud) {
+        if (selection_cloud_) {
+          cloud_note = QString("  [selection cloud replaced: the run's frame "
+            "(%1) is not the cloud's (%2)]")
+          .arg(QString::fromStdString(
+            ticket.ref_bag.empty() ? std::string("none") : ticket.ref_bag))
+          .arg(QString::fromStdString(
+            selection_ref_bag_.empty() ? std::string("none") : selection_ref_bag_));
+        }
+        // The lab owns the cloud pane: plain points in the same frame as the
+        // surface, scalar modes + range controls live.
+        selection_cloud_ = false;
+        ++cloud_gen_;   // any tile-selection load in flight is stale
+        cloud_pass_clouds_.clear();
+        cloud_legend_->clear();
+        cloud_legend_->setVisible(false);
+        selection_ref_bag_ = ticket.ref_bag;
+        selection_ref_frame_ = ticket.ref_frame;
+        cloud_->setPoints(ticket.soundings);
+        refreshCloudColorChannels();   // one set of points: Pass greys out
+      }
       cube_soundings_ = std::move(ticket.soundings);   // self-cal input
       cube_selfcal_btn_->setEnabled(!cube_soundings_.empty());
       // The drape frame follows the CUBE load: remember the reference and
@@ -1134,12 +1164,13 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_drape_terrain_ = CubeSurface{};
       populateDrapePasses();
       refreshCubeSurface();
-      status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5")
+      status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5%6")
       .arg(cube_surface_.cell_m)
       .arg(cube_surface_.soundings_in)
       .arg(QString::fromStdString(cube_surface_.note))
       .arg(ticket.elapsed_ms / 1000.0, 0, 'f', 1)
-      .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
+      .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]")
+      .arg(cloud_note));
       cube_run_btn_->setEnabled(cube_box_.has_value());
     });
 
@@ -1293,6 +1324,7 @@ void SidescanViewerWindow::runCubeLab()
         }
         ticket.notes = std::move(outcome.notes);
         ticket.ref_bag = outcome.ref_bag;
+        ticket.ref_frame = outcome.ref_frame;
         ticket.ref_has_geo = outcome.ref_has_geo;
         ticket.ref_earth_from_world = outcome.ref_earth_from_world;
         std::size_t total = 0;
@@ -3565,8 +3597,10 @@ void SidescanViewerWindow::onTileSelectionChanged()
   cloud_pass_default_pending_ = !selection_cloud_;
   selection_cloud_ = true;
   // The pane is reloading: the passes on screen no longer answer to the
-  // selection.
+  // selection, and the frame they were loaded in is no longer current.
   cloud_pass_clouds_.clear();
+  selection_ref_bag_.clear();
+  selection_ref_frame_.clear();
   cloud_legend_->clear();
   cloud_legend_->setVisible(true);
   ++cloud_gen_;   // any load in flight is for a stale selection
@@ -3677,6 +3711,8 @@ void SidescanViewerWindow::exitSelectionCloud()
   selection_cloud_ = false;
   ++cloud_gen_;   // an in-flight selection load must not apply any more
   cloud_pass_clouds_.clear();
+  selection_ref_bag_.clear();
+  selection_ref_frame_.clear();
   cloud_legend_->clear();
   cloud_legend_->setVisible(false);
   // Hand the pane back to the scrub window: re-render if a bag is open,
@@ -3818,6 +3854,10 @@ void SidescanViewerWindow::onCloudPassesLoaded()
 
   cloud_->resetView();
   cloud_->setMultiPassPoints(out.pass_clouds);
+  // The frame these soundings live in (#36): a later CUBE run may only lay a
+  // surface over them when its own load resolved the same reference.
+  selection_ref_bag_ = out.ref_bag;
+  selection_ref_frame_ = out.ref_frame;
   // Pass identity exists again, so the Pass entry goes live; a selection that
   // just entered multi-pass mode also lands on it.
   refreshCloudColorChannels();
