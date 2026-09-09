@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "map_gesture.hpp"
+#include "view_animation.hpp"
 
 namespace marine_perception_tools
 {
@@ -58,6 +59,96 @@ SidescanCanvas::SidescanCanvas(QWidget * parent)
       cache_rebuild_due_ = true;
       update();
     });
+  // Middle-click recentre glide (#42): ~60 Hz frames, but the position comes
+  // from wall time (recenter_clock_), not from a frame count, so a dropped
+  // frame costs smoothness and never the duration.
+  recenter_timer_.setInterval(16);
+  connect(&recenter_timer_, &QTimer::timeout, this, [this]() {stepRecenter();});
+}
+
+// --- middle-click recentre glide (#42) --------------------------------------
+
+void SidescanCanvas::setRecenterDurationMs(int ms)
+{
+  recenter_duration_ms_ = std::max(0, ms);
+  if (recentering_ && recenter_duration_ms_ == 0) {
+    settleRecenter();   // switching to instant lands whatever is in flight
+  }
+}
+
+void SidescanCanvas::startRecenter(const QPointF & target)
+{
+  recenter_to_ = target;
+  user_adjusted_ = true;
+  fit_pending_ = false;
+  if (recenter_duration_ms_ <= 0) {
+    // Instant path (headless snapshots, tests): identical outcome, no frames
+    // in between for a capture to land on.
+    recentering_ = false;
+    recenter_timer_.stop();
+    center_map_ = target;
+    update();
+    emit viewChanged();
+    return;
+  }
+  // A second middle click retargets rather than cancelling: the gesture means
+  // "go to here", so a fresh one means "actually, here" — and starting from
+  // wherever the glide has reached keeps the map continuous, where cancelling
+  // to a stop first would stutter. The full duration restarts, so the second
+  // click reads exactly like the first.
+  recenter_from_ = center_map_;
+  recentering_ = true;
+  recenter_clock_.start();
+  recenter_timer_.start();
+  update();
+}
+
+void SidescanCanvas::stepRecenter()
+{
+  if (!recentering_) {
+    recenter_timer_.stop();
+    return;
+  }
+  const double t = animationProgress(
+    static_cast<double>(recenter_clock_.elapsed()),
+    static_cast<double>(recenter_duration_ms_));
+  if (t >= 1.0) {
+    settleRecenter();
+    return;
+  }
+  center_map_ = QPointF(
+    easedInterpolate(recenter_from_.x(), recenter_to_.x(), t),
+    easedInterpolate(recenter_from_.y(), recenter_to_.y(), t));
+  update();   // repaints through the translated blit; the cache is untouched
+}
+
+void SidescanCanvas::settleRecenter()
+{
+  if (!recentering_) {
+    return;
+  }
+  recenter_timer_.stop();
+  recentering_ = false;
+  center_map_ = recenter_to_;   // exact: the cache compares centres for equality
+  update();   // the one full layer-cache rebuild for the whole glide
+  emit viewChanged();
+}
+
+void SidescanCanvas::abandonRecenter()
+{
+  if (!recentering_) {
+    return;
+  }
+  // The operator started something else. Stop where the glide stands and let
+  // the new gesture own the view from there — landing on the old target
+  // afterwards would move the map out from under them.
+  recenter_timer_.stop();
+  recentering_ = false;
+}
+
+void SidescanCanvas::finishRecenterNow()
+{
+  settleRecenter();
 }
 
 // --- geographic frame -------------------------------------------------------
@@ -180,6 +271,7 @@ void SidescanCanvas::setTimeArrow(const std::optional<TimeArrow> & arrow)
 
 void SidescanCanvas::fitGeo(double south, double west, double north, double east)
 {
+  abandonRecenter();   // an explicit fit replaces the view the glide was heading for
   fit_south_ = south;
   fit_west_ = west;
   fit_north_ = north;
@@ -359,6 +451,7 @@ void SidescanCanvas::setCenter(double map_x, double map_y)
   if (!mapPlaceable()) {
     return;
   }
+  abandonRecenter();   // following the playhead outranks a glide already running
   center_map_ = bagToCanvas(map_x, map_y);
   update();
 }
@@ -398,6 +491,7 @@ QPointF SidescanCanvas::screenToMap(double sx, double sy) const
 
 void SidescanCanvas::resetView()
 {
+  abandonRecenter();
   double min_x = 0.0;
   double min_y = 0.0;
   double max_x = 0.0;
@@ -617,6 +711,7 @@ void SidescanCanvas::rebuildLayerCache()
   if (size().isEmpty()) {
     return;   // pre-layout paint: nothing sane to rasterize yet
   }
+  ++layer_cache_rebuilds_;
   layer_cache_ = QPixmap(size());
   QPainter painter(&layer_cache_);
   painter.fillRect(layer_cache_.rect(), QColor(20, 24, 28));
@@ -673,7 +768,13 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     cache_px_per_m_ == px_per_m_ && cache_center_ == center_map_;
   const bool stale_ok = layer_cache_valid_ && cache_size_ == size() &&
     !cache_rebuild_due_;
-  const bool pan_blit = panning_ && stale_ok && cache_px_per_m_ == px_per_m_;
+  // A recentre glide moves the centre every frame for three quarters of a
+  // second (#42). It rides the same translated blit as a pan for exactly the
+  // reason the pan does: a per-frame rebuild of the coastline, basemap and
+  // tile grid would stutter on a collection-wide view. One rebuild happens
+  // when it settles, on the frame after recentering_ goes false.
+  const bool pan_blit = (panning_ || recentering_) && stale_ok &&
+    cache_px_per_m_ == px_per_m_;
   // A zoom step (wheel) blits the stale cache scaled about the widget centre
   // — same slippy-map idea as the pan blit — and queues one full-quality
   // rebuild for when the wheel settles (#26 snappiness).
@@ -865,6 +966,7 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
 {
   const double steps = event->angleDelta().y() / 120.0;
   if (steps == 0.0) {return;}
+  abandonRecenter();   // zooming takes the view over from here, mid-glide
   const QPointF cursor = event->position();
   const QPointF before = screenToMap(cursor.x(), cursor.y());
   const double factor = std::pow(1.2, steps);
@@ -884,6 +986,10 @@ void SidescanCanvas::mousePressEvent(QMouseEvent * event)
   // idiom): press-and-release centres the view on the point, press-and-drag
   // pans. Which one it was is only known at release, so the decision waits
   // there and nothing is committed on press.
+  // Any new press ends a recentre glide in flight (#42): a middle press is
+  // about to pan or retarget, and a left press draws a region whose corners
+  // are read in screen pixels — the map must not slide out from under it.
+  abandonRecenter();
   if (event->button() == Qt::MiddleButton) {
     middle_start_ = event->pos();
     last_drag_pos_ = event->pos();
@@ -972,11 +1078,12 @@ void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
       return;
     }
     const QPointF m = screenToMap(event->pos().x(), event->pos().y());
-    center_map_ = m;
-    user_adjusted_ = true;
-    fit_pending_ = false;
-    update();
-    emit viewChanged();
+    // The view glides to the point over about three quarters of a second so
+    // the operator can see where the map went (startRecenter emits
+    // viewChanged when it settles, or immediately on the instant path).
+    startRecenter(m);
+    // The seek fires at the CLICK, not at the landing: the time cursor must
+    // not lag the pointer by the length of the animation.
     const auto bag = canvasToBag(m.x(), m.y());
     if (bag) {
       emit seekWorld(bag->x(), bag->y());

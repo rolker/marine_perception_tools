@@ -15,6 +15,7 @@
 #ifndef SIDESCAN_CANVAS_HPP_
 #define SIDESCAN_CANVAS_HPP_
 
+#include <QElapsedTimer>
 #include <QImage>
 #include <QPixmap>
 #include <QPoint>
@@ -36,6 +37,7 @@
 #include "coastline_data.hpp"
 #include "map_geo_anchor.hpp"
 #include "tile_selection.hpp"
+#include "view_animation.hpp"
 
 namespace marine_perception_tools
 {
@@ -183,6 +185,32 @@ public:
   // pending and no bag content, refits the survey bounds instead.
   void resetView();
 
+  // --- middle-click recentre animation (#42) ------------------------------
+  // The recentre glides rather than jumping, so the operator can see where
+  // the map went. Only this gesture animates: panning tracks the pointer,
+  // the wheel zoom is already incremental, and the initial fit has no
+  // previous view to glide from.
+  //
+  // Duration in milliseconds; 0 makes the recentre instant. Headless runs
+  // and the widget tests set 0 so no capture can land on an intermediate
+  // frame, instead of racing a running animation with sleeps.
+  void setRecenterDurationMs(int ms);
+  int recenterDurationMs() const {return recenter_duration_ms_;}
+
+  // True while a recentre glide is in flight.
+  bool recenterAnimating() const {return recentering_;}
+
+  // Land the glide on its target now (settling the view and rebuilding the
+  // layer cache exactly as the last frame would have). A no-op when nothing
+  // is animating.
+  void finishRecenterNow();
+
+  // How many times the static-layer cache has been rasterized (see
+  // rebuildLayerCache). Diagnostic, and the regression guard for the reason
+  // the glide exists in this shape at all: a moving centre must NOT rebuild
+  // the coastline, basemap and tile grid once per frame.
+  std::size_t layerCacheRebuildCount() const {return layer_cache_rebuilds_;}
+
   // In mark mode, left-drag draws a contact box (instead of panning) and emits
   // boxMarked() on release.
   void setMarkMode(bool on);
@@ -237,11 +265,17 @@ private:
   // view parameters.
   void rebuildLayerCache();
   QPixmap layer_cache_;
+  std::size_t layer_cache_rebuilds_ = 0;
   bool layer_cache_valid_ = false;
   double cache_px_per_m_ = 0.0;
   QPointF cache_center_;
   QSize cache_size_;
   bool panning_ = false;   // mid middle-drag pan (#42)
+  // A recentre glide blits the stale cache translated for its whole run, for
+  // the same reason a pan does: the centre moves every frame, and rebuilding
+  // the static layers per frame would stutter on a collection-wide view. One
+  // rebuild happens when it settles.
+  bool recentering_ = false;
   // Zoom snappiness (#26): a zoom step blits the stale cache scaled (like the
   // pan blit) and the expensive rebuild waits for the wheel to settle.
   QTimer cache_settle_;
@@ -320,6 +354,22 @@ private:
   QPointF center_map_{0.0, 0.0};  // canvas point shown at the widget centre
 
   QPoint last_drag_pos_;
+
+  // --- middle-click recentre glide (#42) ---
+  // Started by a middle click, driven by recenter_timer_ against wall time
+  // (recenter_clock_) so a dropped frame shortens the run rather than
+  // stretching it. Any gesture that moves the view takes over immediately:
+  // pan and wheel abandon it where it stands, a second middle click retargets
+  // from there.
+  void startRecenter(const QPointF & target);
+  void stepRecenter();
+  void abandonRecenter();   // stop where it stands; the new gesture owns the view
+  void settleRecenter();    // land on the target, rebuild the cache, emit viewChanged
+  QTimer recenter_timer_;
+  QElapsedTimer recenter_clock_;
+  QPointF recenter_from_;
+  QPointF recenter_to_;
+  int recenter_duration_ms_ = kRecenterDurationMs;
 
   bool mark_mode_ = false;
   bool marking_ = false;        // mid contact box-drag

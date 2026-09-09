@@ -25,16 +25,22 @@
 #include <QApplication>
 #include <QImage>
 #include <QLabel>
+#include <QElapsedTimer>
+#include <QMouseEvent>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QSurfaceFormat>
 #include <QThread>
 #include <QTreeWidget>
+#include <QWheelEvent>
 
 #include <sqlite3.h>
 
+#include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <set>
+#include <utility>
 #include <stdexcept>
 #include <string>
 
@@ -49,6 +55,7 @@ namespace
 {
 
 using marine_perception_tools::Coastline;
+using marine_perception_tools::GeoRect;
 using marine_perception_tools::SidescanCanvas;
 using marine_perception_tools::SidescanViewerWindow;
 using marine_perception_tools::TimeBarWidget;
@@ -262,6 +269,225 @@ TEST_F(ExplorerWindowFixture, CoastlineDrawsAtRegionZoomAndVanishesAtSurveyZoom)
   const QImage survey_on = renderOverBox(canvas, 0.001, true);
   const QImage survey_off = renderOverBox(canvas, 0.001, false);
   EXPECT_EQ(survey_on, survey_off) << "the coastline still draws at survey zoom";
+}
+
+// --- middle-click recentre (#42) --------------------------------------------
+
+// The canvas has no view-centre accessor, so read the settled view the way
+// the LOD basemap does and take the middle of it.
+std::pair<double, double> viewCentreGeo(const SidescanCanvas & canvas)
+{
+  const auto region = canvas.visibleGeoRegion();
+  EXPECT_TRUE(region.has_value());
+  if (!region) {
+    return {0.0, 0.0};
+  }
+  return {(region->south + region->north) * 0.5, (region->west + region->east) * 0.5};
+}
+
+// Where a screen pixel sits geographically, from the visible region alone:
+// the canvas plane is equirectangular, so the mapping is linear in both axes.
+std::pair<double, double> pixelGeo(const SidescanCanvas & canvas, const QPoint & pos)
+{
+  const GeoRect r = canvas.visibleGeoRegion().value();
+  return {
+    r.north - (r.north - r.south) * pos.y() / canvas.height(),
+    r.west + (r.east - r.west) * pos.x() / canvas.width()};
+}
+
+void middleClick(SidescanCanvas & canvas, const QPoint & pos)
+{
+  const QPointF local(pos);
+  const QPointF global(canvas.mapToGlobal(pos));
+  QMouseEvent press(
+    QEvent::MouseButtonPress, local, global, Qt::MiddleButton, Qt::MiddleButton,
+    Qt::NoModifier);
+  QApplication::sendEvent(&canvas, &press);
+  QMouseEvent release(
+    QEvent::MouseButtonRelease, local, global, Qt::MiddleButton, Qt::NoButton,
+    Qt::NoModifier);
+  QApplication::sendEvent(&canvas, &release);
+}
+
+// A canvas with a geographic frame, laid out and fitted over a box around the
+// fixture position. grab() forces the pending fit to apply (it only lands on a
+// laid-out paint), so the view is settled before the gesture under test.
+void prepareFittedCanvas(SidescanCanvas & canvas)
+{
+  canvas.resize(400, 300);
+  canvas.setGeoOrigin(kLat, kLon);
+  canvas.fitGeo(kLat - 0.01, kLon - 0.01, kLat + 0.01, kLon + 0.01);
+  canvas.grab();
+}
+
+// Zero duration is the headless/test contract: the recentre is instant, so no
+// snapshot or pixel test can land on an intermediate frame.
+TEST_F(ExplorerWindowFixture, MiddleClickRecentresInstantlyAtZeroDuration)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  prepareFittedCanvas(canvas);
+  canvas.setRecenterDurationMs(0);
+
+  const QPoint target_px(100, 60);
+  const auto target = pixelGeo(canvas, target_px);
+  int view_changed = 0;
+  QObject::connect(
+    &canvas, &SidescanCanvas::viewChanged, &canvas, [&view_changed]() {++view_changed;});
+
+  middleClick(canvas, target_px);
+
+  EXPECT_FALSE(canvas.recenterAnimating());
+  const auto centre = viewCentreGeo(canvas);
+  EXPECT_NEAR(centre.first, target.first, 1e-9);
+  EXPECT_NEAR(centre.second, target.second, 1e-9);
+  EXPECT_EQ(view_changed, 1) << "the settled view must announce itself exactly once";
+}
+
+// With a duration the view GLIDES: it has not arrived when the click returns,
+// and viewChanged is held until it settles (the LOD basemap must re-evaluate
+// once, for the view the operator ends up looking at).
+TEST_F(ExplorerWindowFixture, MiddleClickGlidesAndSettlesOnTheClickedPoint)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  prepareFittedCanvas(canvas);
+  EXPECT_EQ(canvas.recenterDurationMs(), marine_perception_tools::kRecenterDurationMs);
+
+  const QPoint target_px(320, 240);
+  const auto start = viewCentreGeo(canvas);
+  const auto target = pixelGeo(canvas, target_px);
+  int view_changed = 0;
+  QObject::connect(
+    &canvas, &SidescanCanvas::viewChanged, &canvas, [&view_changed]() {++view_changed;});
+
+  middleClick(canvas, target_px);
+
+  ASSERT_TRUE(canvas.recenterAnimating());
+  EXPECT_EQ(view_changed, 0) << "viewChanged fired before the view settled";
+  // Barely any of the run has elapsed, and the curve starts flat, so the view
+  // is still essentially where it was: it did not jump.
+  const auto in_flight = viewCentreGeo(canvas);
+  EXPECT_NEAR(in_flight.first, start.first, 1e-6);
+  EXPECT_NEAR(in_flight.second, start.second, 1e-6);
+
+  // Land it deterministically instead of racing the timer with a sleep.
+  canvas.finishRecenterNow();
+  EXPECT_FALSE(canvas.recenterAnimating());
+  EXPECT_EQ(view_changed, 1);
+  const auto settled = viewCentreGeo(canvas);
+  EXPECT_NEAR(settled.first, target.first, 1e-9);
+  EXPECT_NEAR(settled.second, target.second, 1e-9);
+}
+
+// The animation must never fight the operator: a wheel zoom mid-glide takes
+// the view over from where the glide stands, and the abandoned target must
+// not land afterwards.
+TEST_F(ExplorerWindowFixture, AWheelZoomMidGlideTakesOverTheView)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  prepareFittedCanvas(canvas);
+
+  const QPoint target_px(380, 20);
+  const auto start = viewCentreGeo(canvas);
+  const auto target = pixelGeo(canvas, target_px);
+  middleClick(canvas, target_px);
+  ASSERT_TRUE(canvas.recenterAnimating());
+
+  const QPointF centre_px(canvas.width() / 2.0, canvas.height() / 2.0);
+  QWheelEvent wheel(
+    centre_px, QPointF(canvas.mapToGlobal(centre_px.toPoint())), QPoint(0, 0),
+    QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(&canvas, &wheel);
+
+  EXPECT_FALSE(canvas.recenterAnimating()) << "the glide outlived the gesture that took over";
+  // Zooming about the widget centre holds the centre point, so the view is
+  // still where the glide was abandoned — near the start, not at the target.
+  const auto after = viewCentreGeo(canvas);
+  EXPECT_NEAR(after.first, start.first, 1e-6);
+  EXPECT_NEAR(after.second, start.second, 1e-6);
+  EXPECT_GT(std::abs(after.second - target.second), 1e-5);
+}
+
+// A second middle click RETARGETS: the gesture means "go to here", so a fresh
+// one means "actually, here". It restarts from wherever the map has reached,
+// and the first target is forgotten.
+TEST_F(ExplorerWindowFixture, ASecondMiddleClickRetargetsTheGlide)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  prepareFittedCanvas(canvas);
+
+  const QPoint first_px(360, 40);
+  const auto first_target = pixelGeo(canvas, first_px);
+  middleClick(canvas, first_px);
+  ASSERT_TRUE(canvas.recenterAnimating());
+
+  const QPoint second_px(40, 260);
+  const auto second_target = pixelGeo(canvas, second_px);
+  middleClick(canvas, second_px);
+  ASSERT_TRUE(canvas.recenterAnimating()) << "the second click cancelled instead of retargeting";
+
+  canvas.finishRecenterNow();
+  const auto settled = viewCentreGeo(canvas);
+  EXPECT_NEAR(settled.first, second_target.first, 1e-9);
+  EXPECT_NEAR(settled.second, second_target.second, 1e-9);
+  EXPECT_GT(std::abs(settled.second - first_target.second), 1e-5);
+}
+
+// The reason the glide is built the way it is (#42): the static layer cache
+// (coastline, store basemap, measuring grid, tile grid) is keyed on the view
+// centre, so animating the centre naively would re-rasterize every layer on
+// every frame — a stutter on any collection-wide view. The glide rides the
+// same translated blit a pan does, and rebuilds ONCE when it settles.
+TEST_F(ExplorerWindowFixture, TheGlideRebuildsTheLayerCacheOnceNotPerFrame)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  prepareFittedCanvas(canvas);
+  // A short run so the test does not spend three quarters of a second; the
+  // frame path under test is the same one the full-length glide uses.
+  canvas.setRecenterDurationMs(200);
+  canvas.grab();
+
+  const std::size_t rebuilds_before = canvas.layerCacheRebuildCount();
+  middleClick(canvas, QPoint(340, 250));
+  ASSERT_TRUE(canvas.recenterAnimating());
+
+  // Drive the animation: processEvents runs the frame timer, grab() forces
+  // each repaint (the canvas is never shown, so paints do not arrive on
+  // their own).
+  int frames = 0;
+  QElapsedTimer bound;
+  bound.start();
+  while (canvas.recenterAnimating() && bound.elapsed() < 5000) {
+    QCoreApplication::processEvents();
+    canvas.grab();
+    ++frames;
+  }
+  ASSERT_FALSE(canvas.recenterAnimating()) << "the glide never settled";
+  EXPECT_GT(frames, 5) << "too few frames to say anything about per-frame cost";
+  canvas.grab();   // the settled repaint, where the one rebuild belongs
+
+  EXPECT_EQ(canvas.layerCacheRebuildCount() - rebuilds_before, 1u)
+    << "the layer cache was rebuilt " << canvas.layerCacheRebuildCount() - rebuilds_before
+    << " times across " << frames << " animation frames";
 }
 
 }  // namespace
