@@ -276,6 +276,7 @@ private:
   std::optional<MapGeoAffine> cloud_ref_anchor_;   // valid when cloud_frame_ == Reference
   std::optional<MapGeoAffine> cloudFrameAnchor() const;
   void onPaneLeave(HoverPane pane);   // the cursor left: a shown position must be live
+  void connectHoverReadout();        // wire the panes that hover in a map frame
   // Which pane (if any) an event's receiver is, for the QEvent::Leave path.
   std::optional<HoverPane> paneOf(const QObject * obj) const;
   HoverGeoReadout hover_readout_;

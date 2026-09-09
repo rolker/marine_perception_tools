@@ -1154,7 +1154,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         // frame — which may be another bag's than the one open (#47).
         cloud_frame_ = CloudFrame::Reference;
         cloud_ref_anchor_ =
-          earthAnchorAffine(ticket.ref_earth_from_world, ticket.ref_has_geo, 0.0);
+        earthAnchorAffine(ticket.ref_earth_from_world, ticket.ref_has_geo, 0.0);
         refreshCloudColorChannels();   // one set of points: Pass greys out
       }
       cube_soundings_ = std::move(ticket.soundings);   // self-cal input
@@ -2483,25 +2483,9 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(canvas_, &SidescanCanvas::seekWorld, this, &SidescanViewerWindow::onCursorSeek);
   connect(cloud_, &PointCloudView::hoverWorld, this, &SidescanViewerWindow::onCursorHover);
   connect(cloud_, &PointCloudView::seekWorld, this, &SidescanViewerWindow::onCursorSeek);
-  // ...and the same hovers again as the geographic readout (#47), tagged with
-  // the pane they came from. Separate from the linked cursor on purpose: the
-  // cursor is a map-frame broadcast to every pane, the readout is one pane's
-  // position converted at its source.
+  connectHoverReadout();   // the same hovers again, as the geographic readout (#47)
   const auto wf_hover = [this](QPointF p, bool v) {onCursorHover(p.x(), p.y(), v);};
   const auto wf_seek = [this](QPointF p) {onCursorSeek(p.x(), p.y());};
-  connect(
-    cloud_, &PointCloudView::hoverWorld, this,
-    [this](double x, double y, bool v) {onPaneHoverWorld(HoverPane::Cloud, x, y, v);});
-  connect(
-    waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this,
-    [this](QPointF p, bool v) {
-      onPaneHoverWorld(HoverPane::Sidescan, p.x(), p.y(), v);
-    });
-  connect(
-    mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this,
-    [this](QPointF p, bool v) {
-      onPaneHoverWorld(HoverPane::Mbes, p.x(), p.y(), v);
-    });
   connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this, wf_hover);
   connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::seekRequested, this, wf_seek);
   connect(mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this, wf_hover);
@@ -2591,6 +2575,28 @@ void SidescanViewerWindow::closeEvent(QCloseEvent * event)
   if (grid_bot_split_) {settings.setValue("split_grid_bot", grid_bot_split_->saveState());}
   if (cloud_split_) {settings.setValue("split_cloud", cloud_split_->saveState());}
   QMainWindow::closeEvent(event);
+}
+
+void SidescanViewerWindow::connectHoverReadout()
+{
+  // Separate from the linked cursor on purpose: the cursor is a map-frame
+  // point broadcast to every pane, while the readout is ONE pane's position
+  // converted in its own frame and named by the pane that produced it. The
+  // map feeds it through hoverGeo (it has a geographic frame of its own) and
+  // the echogram through onEchogramHover (its frame is along-track distance).
+  connect(
+    cloud_, &PointCloudView::hoverWorld, this,
+    [this](double x, double y, bool v) {onPaneHoverWorld(HoverPane::Cloud, x, y, v);});
+  connect(
+    waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this,
+    [this](QPointF p, bool v) {
+      onPaneHoverWorld(HoverPane::Sidescan, p.x(), p.y(), v);
+    });
+  connect(
+    mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this,
+    [this](QPointF p, bool v) {
+      onPaneHoverWorld(HoverPane::Mbes, p.x(), p.y(), v);
+    });
 }
 
 std::optional<HoverPane> SidescanViewerWindow::paneOf(const QObject * obj) const
