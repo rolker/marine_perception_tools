@@ -86,6 +86,7 @@
 #include "distance_buffer_policy.hpp"
 #include "map_geo_anchor.hpp"
 #include "tf_lift.hpp"   // rotate_by_quat (the export anchor probe)
+#include "world_layout.hpp"
 #include "marine_colormap/colormap.hpp"
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
@@ -2205,14 +2206,23 @@ void SidescanViewerWindow::onOpenIndex()
   openIndexWithDefaults(path.toStdString());
 }
 
-void SidescanViewerWindow::reopenLastIndexIfAny()
+void SidescanViewerWindow::openStartupIndex()
 {
+  // Precedence (#40): the index the operator last had open, then the
+  // conventional world collection. An explicit --index never reaches here —
+  // main opens it directly. Absence is silent at every step: the window
+  // starts empty rather than raising a dialog about a path nobody named.
   const QSettings settings("UNH-CCOM", "survey_explorer");
   const QString last = settings.value("last_index").toString();
-  if (last.isEmpty() || !QFileInfo::exists(last)) {
-    return;   // nothing remembered (or it moved) — start empty, no dialog
+  if (!last.isEmpty() && QFileInfo::exists(last)) {
+    openIndexWithDefaults(last.toStdString());
+    return;
   }
-  openIndexWithDefaults(last.toStdString());
+  const auto world = worldIndexPath(defaultWorldRoot());
+  std::error_code ec;
+  if (!world.empty() && std::filesystem::is_regular_file(world, ec)) {
+    openIndexWithDefaults(world.string());
+  }
 }
 
 void SidescanViewerWindow::onReopenLastIndex()
@@ -2227,11 +2237,10 @@ void SidescanViewerWindow::onReopenLastIndex()
 
 void SidescanViewerWindow::openIndexWithDefaults(const std::string & index_path)
 {
-  // Same stores default as the --stores CLI option: the sibling
-  // bathymetry/survey layer next to the index (discovery finds the rest).
+  // Same stores default as the --stores CLI option: the authoritative depth
+  // product beside the index (discovery finds the rest). #40.
   const std::string stores_dir =
-    (std::filesystem::path(index_path).parent_path() /
-    "bathymetry" / "survey").string();
+    defaultStoresDir(std::filesystem::path(index_path).parent_path()).string();
   try {
     openSurveyIndex(index_path, stores_dir);
   } catch (const std::exception & e) {
@@ -2973,36 +2982,50 @@ void SidescanViewerWindow::discoverBasemapLayers(
 
   // Preferred layers first (the ones an operator reaches for), then any other
   // tile-holding subdirectory found one or two levels under the stores root.
-  const std::vector<std::string> preferred = {
-    "bathymetry/survey", "backscatter/survey", "sidescan/processed",
-    "bathymetry/reference"};
-  for (const auto & rel : preferred) {
+  // The names are the uma-ADR-0010 D3 taxonomy; see world_layout.hpp (#40).
+  for (const auto & rel : preferredLayerPaths()) {
     const auto dir = std::filesystem::path(root) / rel;
     if (has_tif(dir)) {
       basemap_layers_.emplace_back(QString::fromStdString(rel), dir.string());
     }
   }
-  std::error_code ec;
-  for (const auto & top : std::filesystem::directory_iterator(root, ec)) {
-    if (!top.is_directory()) {
-      continue;
-    }
-    std::error_code ec2;
-    for (const auto & sub : std::filesystem::directory_iterator(top.path(), ec2)) {
-      if (!sub.is_directory() || !has_tif(sub.path())) {
-        continue;
+  // Fallback discovery: any tile-holding directory up to three levels under
+  // the root. Three, not two, because the imagery theme nests a store between
+  // the theme and its layers (imagery/sidescan/processed) while the depth
+  // theme does not (depths/processed). A directory that is not a world
+  // collection at all still lights up whatever it has.
+  const std::function<void(const std::filesystem::path &, int)> scan =
+    [&](const std::filesystem::path & dir, int depth) {
+      if (depth > 3) {
+        return;
       }
-      const std::string dir = sub.path().string();
-      const bool known = std::any_of(
-        basemap_layers_.begin(), basemap_layers_.end(),
-        [&dir](const auto & l) {return l.second == dir;});
-      if (!known) {
-        const auto rel = std::filesystem::relative(sub.path(), root, ec2);
-        basemap_layers_.emplace_back(
-          QString::fromStdString(ec2 ? dir : rel.string()), dir);
+      std::error_code ec;
+      for (const auto & e : std::filesystem::directory_iterator(dir, ec)) {
+        if (!e.is_directory()) {
+          continue;
+        }
+        // The derived overview sidecar is the same layer at coarser levels,
+        // not a layer of its own — listing it would offer the operator a
+        // second, blurrier copy of every store.
+        if (e.path().filename() == "overviews") {
+          continue;
+        }
+        if (has_tif(e.path())) {
+          const std::string sub_dir = e.path().string();
+          const bool known = std::any_of(
+            basemap_layers_.begin(), basemap_layers_.end(),
+            [&sub_dir](const auto & l) {return l.second == sub_dir;});
+          if (!known) {
+            std::error_code rel_ec;
+            const auto rel = std::filesystem::relative(e.path(), root, rel_ec);
+            basemap_layers_.emplace_back(
+              QString::fromStdString(rel_ec ? sub_dir : rel.string()), sub_dir);
+          }
+        }
+        scan(e.path(), depth + 1);
       }
-    }
-  }
+    };
+  scan(std::filesystem::path(root), 1);
   // An explicit --stores dir that discovery didn't produce goes first (it was
   // asked for), labeled by its path.
   const bool initial_known = std::any_of(
