@@ -267,6 +267,13 @@ if(BUILD_TESTING)
   target_include_directories(test_nav_track_lookup PRIVATE src)
   ament_target_dependencies(test_nav_track_lookup marine_survey_index)
 
+  # Position -> time over the nav track: the nearest-fix search under the map
+  # cursor and its screen-pixel hit radius (nav_track_hit.hpp, #46) —
+  # header-only + the query lib's NavPoint.
+  ament_add_gtest(test_nav_track_hit test/test_nav_track_hit.cpp)
+  target_include_directories(test_nav_track_hit PRIVATE src)
+  ament_target_dependencies(test_nav_track_hit marine_survey_index)
+
   # Bag-index cache serialization (#24): round-trip + identity/version/
   # truncation invalidation — links sidescan_core (SessionIndex).
   ament_add_gtest(test_session_index_io test/test_session_index_io.cpp)
