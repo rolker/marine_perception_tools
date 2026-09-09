@@ -174,6 +174,17 @@ install(TARGETS sea_surface_tuner sidescan_probe survey_explorer sidescan_target
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# The vendored world coastline (#41) — public-domain Natural Earth data
+# committed under data/coastline/ so the explorer's index map is navigable
+# with no network, at build time or at run time. Installed as data (the
+# scripts that regenerate it are not; see data/coastline/README.md).
+# NOTE: install(DIRECTORY ...) copies even under --symlink-install, so
+# re-vendoring the data needs a rebuild to take effect.
+install(DIRECTORY data/
+  DESTINATION share/${PROJECT_NAME}/data
+  FILES_MATCHING PATTERN "*.txt" PATTERN "README.md"
+)
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_resim_engine test/test_resim_engine.cpp)
