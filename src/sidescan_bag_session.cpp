@@ -981,6 +981,13 @@ std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
         w.y = p->ty + ry;
         w.z = p->tz + rz;
         w.intensity = s.intensity;
+        // The beam's own geometry rides along: angle and slant range are
+        // measured in the SENSOR frame, so a rigid lift to world leaves them
+        // unchanged — and both the ARA/TL correction (#27) and the angle-aware
+        // per-sounding uncertainty (#49) read them off the world sounding.
+        // Dropping them here left every bag-loaded sounding with a NaN angle.
+        w.beam_angle = s.beam_angle;
+        w.slant_range = s.slant_range;
         out[idx].world_soundings.push_back(w);
       }
     } catch (const std::exception &) {
