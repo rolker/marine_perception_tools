@@ -301,6 +301,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_basemap_contrast test/test_basemap_contrast.cpp)
   target_include_directories(test_basemap_contrast PRIVATE src)
 
+  # The 3D pane's one colour vocabulary (#36): the entries, their order, and
+  # which channels a layer cannot carry. Header-only and Qt-free.
+  ament_add_gtest(test_color_vocabulary test/test_color_vocabulary.cpp)
+  target_include_directories(test_color_vocabulary PRIVATE src)
+
   # Multi-pass cloud loader (#24): error paths (missing bag, empty input) —
   # the happy path needs a real bag and is covered by test_mbes_window_reader's
   # units plus the window smoke below. QtCore only (QStringList notes).

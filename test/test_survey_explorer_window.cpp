@@ -60,6 +60,8 @@
 #include "cube_lab.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_survey_index/schema.hpp"
+#include "color_vocabulary.hpp"
+#include "point_cloud_view.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_viewer_window.hpp"
 #include "time_bar_widget.hpp"
@@ -69,6 +71,7 @@ namespace
 
 using marine_perception_tools::Coastline;
 using marine_perception_tools::GeoRect;
+using marine_perception_tools::PointCloudView;
 using marine_perception_tools::SidescanCanvas;
 using marine_perception_tools::SidescanViewerWindow;
 using marine_perception_tools::TimeBarWidget;
@@ -240,6 +243,135 @@ TEST_F(ExplorerWindowFixture, IndexModeSurvivesTileSelectionAndClear)
   EXPECT_EQ(legend->topLevelItemCount(), 0);
   EXPECT_TRUE(timeline->isVisible());
   EXPECT_EQ(timeline->passCount(), 0);
+}
+
+
+// --- one colour vocabulary for the 3D pane (#36) -----------------------------
+
+// Whether a selector row is offerable (Qt greys a disabled row but keeps it in
+// the list — which is the point: a channel a layer cannot carry must still be
+// visible, with its reason).
+bool comboRowEnabled(const QComboBox & combo, int row)
+{
+  return (combo.model()->index(row, 0).flags() & Qt::ItemIsEnabled) != Qt::NoItemFlags;
+}
+
+int comboRowOf(const QComboBox & combo, const QString & text)
+{
+  for (int i = 0; i < combo.count(); ++i) {
+    if (combo.itemText(i) == text) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// The points and the CUBE surface are two layers of one picture, so their
+// selectors offer the SAME entries in the SAME order. A channel a layer cannot
+// carry is present and greyed with the reason on its tooltip — never dropped,
+// which is what made the two dropdowns read as unrelated controls.
+TEST_F(ExplorerWindowFixture, PointAndSurfaceSelectorsShareOneColourVocabulary)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  window.show();
+  QCoreApplication::processEvents();
+
+  auto * points = window.findChild<QComboBox *>("cloud_color_combo");
+  auto * surface = window.findChild<QComboBox *>("cube_shade_combo");
+  ASSERT_NE(points, nullptr);
+  ASSERT_NE(surface, nullptr);
+
+  const QStringList expected{"Depth", "Uncertainty", "Backscatter", "Pass", "Sidescan"};
+  ASSERT_EQ(points->count(), expected.size());
+  ASSERT_EQ(surface->count(), expected.size());
+  for (int i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(points->itemText(i), expected[i]);
+    EXPECT_EQ(surface->itemText(i), expected[i]);
+  }
+
+  // A sounding carries no uncertainty (run_cube derives its own placeholder
+  // from depth) and no sidescan amplitude (that is a drape onto CUBE nodes),
+  // so both are greyed for the points — and each says why.
+  for (const QString & name : {QString("Uncertainty"), QString("Sidescan")}) {
+    const int row = comboRowOf(*points, name);
+    ASSERT_GE(row, 0);
+    EXPECT_FALSE(comboRowEnabled(*points, row)) << name.toStdString();
+    EXPECT_FALSE(points->itemData(row, Qt::ToolTipRole).toString().isEmpty())
+      << name.toStdString() << " is greyed without saying why";
+  }
+  // A CUBE node merges every pass that touched it, so Pass is the surface's
+  // one greyed entry; the other three are its real shades.
+  const int surface_pass_row = comboRowOf(*surface, "Pass");
+  ASSERT_GE(surface_pass_row, 0);
+  EXPECT_FALSE(comboRowEnabled(*surface, surface_pass_row));
+  EXPECT_FALSE(
+    surface->itemData(surface_pass_row, Qt::ToolTipRole).toString().isEmpty());
+  for (const QString & name : {QString("Depth"), QString("Uncertainty"),
+      QString("Backscatter"), QString("Sidescan")})
+  {
+    EXPECT_TRUE(comboRowEnabled(*surface, comboRowOf(*surface, name)))
+      << name.toStdString();
+  }
+}
+
+// The operator's complaint, as a test: selecting a multi-pass region must
+// DEFAULT to pass colouring without taking the choice away. Pass is an
+// ordinary entry — the selector stays enabled through the load, the operator
+// can leave Pass for a scalar ramp and come back to it.
+TEST_F(ExplorerWindowFixture, PassIsAnEntryAndTheSelectorStaysLiveThroughASelection)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  window.openSurveyIndex(db_path_, std::string(::testing::TempDir()));
+  window.show();
+  QCoreApplication::processEvents();
+
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  auto * points = window.findChild<QComboBox *>("cloud_color_combo");
+  auto * legend = window.findChild<QTreeWidget *>("cloud_legend");
+  ASSERT_NE(canvas, nullptr);
+  ASSERT_NE(points, nullptr);
+  ASSERT_NE(legend, nullptr);
+
+  // Before any selection the pane holds no passes, so Pass is greyed (with its
+  // reason) rather than offering a colouring that would paint every point the
+  // same hue.
+  const int pass_row = comboRowOf(*points, "Pass");
+  ASSERT_GE(pass_row, 0);
+  EXPECT_FALSE(comboRowEnabled(*points, pass_row));
+  EXPECT_EQ(points->currentText(), "Depth");
+
+  canvas->selectTiles({0, 1});
+  ASSERT_TRUE(process_until([legend]() {return legend->topLevelItemCount() > 0;}))
+    << "cloud load never completed";
+
+  EXPECT_TRUE(points->isEnabled())
+    << "the selection took the colour control away instead of offering Pass";
+  EXPECT_TRUE(comboRowEnabled(*points, pass_row));
+  EXPECT_EQ(points->currentText(), "Pass") << "a new multi-pass selection defaults to Pass";
+
+  // Deselectable: a scalar ramp is one click away, and it sticks.
+  points->setCurrentIndex(comboRowOf(*points, "Backscatter"));
+  EXPECT_EQ(points->currentText(), "Backscatter");
+  EXPECT_TRUE(points->isEnabled());
+  points->setCurrentIndex(pass_row);
+  EXPECT_EQ(points->currentText(), "Pass");
+
+  // Handing the pane back to the scrub window retires pass identity: Pass
+  // greys out again and the colouring falls back rather than claiming a mode
+  // it is not drawing.
+  canvas->clearTileSelection();
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(comboRowEnabled(*points, pass_row));
+  EXPECT_EQ(points->currentText(), "Depth");
+  EXPECT_TRUE(points->isEnabled());
 }
 
 // --- bounded teardown while a background job runs (#44) ---------------------

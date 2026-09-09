@@ -200,6 +200,31 @@ TEST_F(PointCloudViewTest, ColorModePassOnSinglePassIsSafe)
   EXPECT_GT(non_background(img), 0);
 }
 
+// Pass identity is a property of the LOAD, not a mode: a multi-pass load has
+// passes to tell apart (so the Pass entry is offerable), a plain setPoints
+// cloud does not. The colour vocabulary reads exactly this to decide whether
+// to grey the Pass entry, so it is pinned here (#36).
+TEST_F(PointCloudViewTest, PassCountFollowsTheLoad)
+{
+  PointCloudView view;
+  view.resize(kW, kH);
+  EXPECT_EQ(view.passCount(), 0) << "an empty view has no passes";
+
+  view.setMultiPassPoints({make_cloud(), make_cloud(), {}});
+  EXPECT_EQ(view.passCount(), 3)
+    << "an EMPTY pass still has a legend row and a colour, so it still counts";
+
+  // A single set of points — the scrub window, or a CUBE run's own gather —
+  // carries no pass identity, whatever was loaded before it.
+  view.setPoints(make_cloud());
+  EXPECT_EQ(view.passCount(), 0);
+
+  view.setMultiPassPoints({make_cloud()});
+  EXPECT_EQ(view.passCount(), 1);
+  view.clear();
+  EXPECT_EQ(view.passCount(), 0);
+}
+
 // The golden-angle pass palette is pure and stable: pinned values + distinct
 // leading hues (legend colours must not drift between releases).
 TEST(PassColor, StableAndDistinct)

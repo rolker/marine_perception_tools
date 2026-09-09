@@ -92,6 +92,13 @@ public:
   void setMultiPassPoints(const std::vector<std::vector<MbesSounding>> & passes);
   void clear();
 
+  // How many passes the current cloud was loaded as: 0 for a setPoints cloud
+  // (one undifferentiated set of points), otherwise the setMultiPassPoints
+  // count — including empty passes, whose legend rows still exist. The colour
+  // vocabulary reads this to say whether ColorMode::Pass has anything to
+  // distinguish (#36).
+  int passCount() const {return pass_count_;}
+
   // Re-frame the camera (default orbit + auto distance) on the next setPoints. Call
   // on a new bag or from a "Fit View" action; scrubbing does not call this, so the
   // zoom set by the operator is kept.
@@ -211,6 +218,7 @@ private:
   std::vector<float> depth_;       // -z (positive down) for the depth ramp
   std::vector<float> intensity_;   // backscatter dB
   std::vector<int> pass_of_point_;  // pass index per point (ColorMode::Pass)
+  int pass_count_ = 0;              // passes in the last multi-pass load (0 = none)
   std::vector<float> colors_;      // rgb triples, size == 3 * pts_.size()
   float center_x_ = 0.0f;
   float center_y_ = 0.0f;

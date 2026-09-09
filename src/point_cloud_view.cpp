@@ -120,6 +120,7 @@ PointCloudView::~PointCloudView()
 void PointCloudView::setPoints(const std::vector<MbesSounding> & world_soundings)
 {
   // Single-pass entry: every point belongs to pass 0.
+  pass_count_ = 0;   // one undifferentiated set of points: no pass identity
   set_points_impl(world_soundings, std::vector<int>(world_soundings.size(), 0));
 }
 
@@ -219,6 +220,7 @@ void PointCloudView::setMultiPassPoints(
     all.insert(all.end(), passes[i].begin(), passes[i].end());
     ids.insert(ids.end(), passes[i].size(), static_cast<int>(i));
   }
+  pass_count_ = static_cast<int>(passes.size());
   set_points_impl(all, std::move(ids));
 }
 

@@ -201,6 +201,18 @@ have **checkboxes** to show/hide individual passes, and **clip to
 contact** (+ margin) restricts a multi-pass load to the selected contact's
 neighbourhood. Contacts can be deleted from the list's context menu.
 
+The **3D pane's colouring** is one vocabulary shared by the point cloud and the
+CUBE surface: **Depth**, **Uncertainty**, **Backscatter**, **Pass** and
+**Sidescan**, in that order in both selectors. **Pass** is an ordinary entry —
+loading a multi-pass region defaults to it, but you can leave it for a scalar
+ramp and come back; it is not a mode that takes the selector away. An entry a
+layer cannot carry stays in the list, greyed, with the reason on the entry
+rather than silently missing: the points offer no **Uncertainty** (a sounding
+carries none — the per-beam errors CUBE consumes are a placeholder derived from
+depth inside the estimator, and uncertainty is a property of the surface) and no
+**Sidescan** (that is a drape painted onto CUBE nodes by marching the terrain),
+and the surface offers no **Pass** (a node merges every pass that touched it).
+
 Bag opens are accelerated by a **bag-index cache** (`--cache-dir`, default
 `$XDG_CACHE_HOME/survey_explorer`): the whole-bag metadata scan runs once per
 bag and is then a file read, keyed by the bag's size+mtime (bags are never

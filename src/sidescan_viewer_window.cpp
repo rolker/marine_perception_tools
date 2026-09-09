@@ -22,6 +22,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QStandardItemModel>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -111,6 +112,33 @@ namespace marine_perception_tools
 {
 namespace
 {
+
+// --- shared colour vocabulary (#36) -----------------------------------------
+
+// The channel a selector row stands for (stored as the item's user data, so
+// the two selectors never depend on each other's row ORDER).
+ColorChannel channel_at(const QComboBox * combo, int row)
+{
+  if (!combo || row < 0 || row >= combo->count()) {
+    return ColorChannel::Depth;
+  }
+  return static_cast<ColorChannel>(combo->itemData(row).toInt());
+}
+
+// Enable or grey out one row. `reason` is nullptr when the channel is
+// available; otherwise it greys the row AND becomes its tooltip — a channel a
+// layer cannot carry must say why, never quietly vanish from the list.
+void set_channel_available(QComboBox * combo, int row, const char * reason)
+{
+  if (!combo) {return;}
+  if (auto * model = qobject_cast<QStandardItemModel *>(combo->model())) {
+    if (auto * item = model->item(row)) {
+      item->setEnabled(reason == nullptr);
+    }
+  }
+  combo->setItemData(
+    row, reason ? QString::fromUtf8(reason) : QString(), Qt::ToolTipRole);
+}
 
 // Maximum slant range (≈ far ground range) of a ping's last sample, used to pad
 // the swath bounding box.
@@ -505,6 +533,43 @@ SidescanRenderResult render_window(
 
 }  // namespace
 
+void SidescanViewerWindow::setupCloudControls()
+{
+  cloud_color_combo_ = new QComboBox(this);
+  cloud_color_combo_->setObjectName("cloud_color_combo");
+  // The SAME vocabulary the surface shade offers (#36). Pass is an ordinary
+  // entry here — selectable and deselectable — never a mode that takes the
+  // control away; the entries the soundings cannot carry are greyed with
+  // their reason, so the two lists read as one.
+  populateColorVocabulary(cloud_color_combo_);
+  cloud_color_combo_->setToolTip(
+    "Point colouring. Greyed entries name a channel a sounding does not "
+    "carry — the reason is on the entry.");
+  zexag_spin_ = new QDoubleSpinBox(this);
+  zexag_spin_->setRange(1.0, 20.0);
+  zexag_spin_->setSingleStep(0.5);
+  zexag_spin_->setValue(1.0);          // no vertical exaggeration by default
+  zexag_spin_->setPrefix("Z× ");
+  point_size_spin_ = new QDoubleSpinBox(this);
+  point_size_spin_->setRange(1.0, 12.0);
+  point_size_spin_->setSingleStep(0.5);
+  point_size_spin_->setValue(2.5);
+  point_size_spin_->setPrefix("pt ");
+  point_size_spin_->setToolTip("3D point size (pixels)");
+
+  // The cloud's own palette, independent of the surface's (the CUBE row has
+  // its own) so cloud and surface can contrast. Defaults to bronze, applied
+  // to the view here because a combo does not fire on construction.
+  cloud_palette_ = new QComboBox(this);
+  for (const auto & name : marine_colormap::palette_names()) {
+    cloud_palette_->addItem(QString::fromStdString(name));
+  }
+  if (const auto vi = marine_colormap::palette_index("bronze")) {
+    cloud_palette_->setCurrentIndex(static_cast<int>(*vi));
+    cloud_->setColorMap(static_cast<int>(*vi));
+  }
+}
+
 void SidescanViewerWindow::setupRangeControls()
 {
   // Per-pane colour-range controls (#26): "auto" (default) or manual lo/hi
@@ -679,10 +744,21 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_alpha_spin_->setValue(1.0);
   cube_alpha_spin_->setToolTip("Surface opacity");
   cube_shade_combo_ = new QComboBox(this);
-  cube_shade_combo_->addItems({"Depth", "Uncertainty", "Backscatter", "Sidescan"});
+  cube_shade_combo_->setObjectName("cube_shade_combo");
+  // One vocabulary with the point selector (#36): the same five entries in the
+  // same order. Pass is listed and greyed — a node merges every pass that
+  // touched it — rather than dropped, so the two lists read as one.
+  populateColorVocabulary(cube_shade_combo_);
+  for (int i = 0; i < cube_shade_combo_->count(); ++i) {
+    set_channel_available(
+      cube_shade_combo_, i,
+      surface_channel_unavailable_reason(channel_at(cube_shade_combo_, i)));
+  }
   cube_shade_combo_->setToolTip(
     "Surface colouring: depth, CUBE uncertainty, CUBE-settled backscatter, "
-    "or the draped sidescan pass (pick one in the drape combo)");
+    "or the draped sidescan pass (pick one in the drape combo). Greyed "
+    "entries name a channel the surface cannot carry — the reason is on the "
+    "entry.");
   cube_drape_combo_ = new QComboBox(this);
   cube_drape_combo_->addItem("drape: none");
   cube_drape_combo_->setToolTip(
@@ -1041,13 +1117,11 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       // the surface, scalar modes + range controls live.
       selection_cloud_ = false;
       ++cloud_gen_;   // any tile-selection load in flight is stale
+      cloud_pass_clouds_.clear();
       cloud_legend_->clear();
       cloud_legend_->setVisible(false);
-      cloud_color_combo_->setEnabled(true);
-      cloud_->setColorMode(
-        cloud_color_combo_->currentIndex() == 1 ?
-        PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
       cloud_->setPoints(ticket.soundings);
+      refreshCloudColorChannels();   // one set of points: Pass greys out
       cube_soundings_ = std::move(ticket.soundings);   // self-cal input
       cube_selfcal_btn_->setEnabled(!cube_soundings_.empty());
       // The drape frame follows the CUBE load: remember the reference and
@@ -1244,13 +1318,78 @@ void SidescanViewerWindow::runCubeLab()
     }));
 }
 
+void SidescanViewerWindow::populateColorVocabulary(QComboBox * combo)
+{
+  if (!combo) {
+    return;
+  }
+  for (const auto channel : kColorVocabulary) {
+    combo->addItem(
+      QString::fromUtf8(color_channel_name(channel)), static_cast<int>(channel));
+  }
+}
+
+// Which point channels the CURRENT cloud can offer. Called after every load
+// into the pane, because pass identity comes and goes with the cloud: a
+// multi-pass selection has passes to tell apart, a scrub window or a CUBE
+// run's own gather is one undifferentiated set of points.
+void SidescanViewerWindow::refreshCloudColorChannels()
+{
+  if (!cloud_color_combo_) {
+    return;
+  }
+  const bool has_pass_identity = cloud_ && cloud_->passCount() > 0;
+  int depth_row = 0;
+  bool current_unavailable = false;
+  for (int i = 0; i < cloud_color_combo_->count(); ++i) {
+    const auto channel = channel_at(cloud_color_combo_, i);
+    const char * reason =
+      point_channel_unavailable_reason(channel, has_pass_identity);
+    set_channel_available(cloud_color_combo_, i, reason);
+    if (channel == ColorChannel::Depth) {
+      depth_row = i;
+    }
+    if (reason != nullptr && i == cloud_color_combo_->currentIndex()) {
+      current_unavailable = true;
+    }
+  }
+  // Never leave a greyed entry showing as the current choice — the pane would
+  // claim a colouring it is not drawing.
+  if (current_unavailable) {
+    cloud_color_combo_->setCurrentIndex(depth_row);
+  }
+  applyCloudColorMode();
+}
+
+void SidescanViewerWindow::applyCloudColorMode()
+{
+  if (!cloud_ || !cloud_color_combo_) {
+    return;
+  }
+  switch (channel_at(cloud_color_combo_, cloud_color_combo_->currentIndex())) {
+    case ColorChannel::Backscatter:
+      cloud_->setColorMode(PointCloudView::ColorMode::Backscatter);
+      break;
+    case ColorChannel::Pass:
+      cloud_->setColorMode(PointCloudView::ColorMode::Pass);
+      break;
+    default:
+      // Uncertainty and Sidescan are greyed for the points, so Depth is the
+      // only other reachable entry.
+      cloud_->setColorMode(PointCloudView::ColorMode::Depth);
+      break;
+  }
+}
+
 void SidescanViewerWindow::refreshCubeSurface()
 {
   if (!cube_surface_.ok()) {
     cloud_->clearSurface();
     return;
   }
-  const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const ColorChannel shade_ch = cube_shade_combo_ ?
+    channel_at(cube_shade_combo_, cube_shade_combo_->currentIndex()) :
+    ColorChannel::Depth;
   const int style_i = cube_mesh_combo_ ? cube_mesh_combo_->currentIndex() : 0;
   const CubeMeshStyle style =
     (style_i == 1) ? CubeMeshStyle::CrispStepped :
@@ -1260,7 +1399,7 @@ void SidescanViewerWindow::refreshCubeSurface()
   // through the SIDESCAN pane's palette + range (so drape and waterfall read
   // identically), acoustic shadows near-black, ensonified-but-unseen nodes
   // dim grey (the relief stays legible).
-  if (shade_i == 3) {
+  if (shade_ch == ColorChannel::Sidescan) {
     // The drape rides its own extended terrain (surface grown to the
     // swath); fall back to the CUBE surface for pre-terrain drapes.
     const CubeSurface & terrain =
@@ -1349,8 +1488,9 @@ void SidescanViewerWindow::refreshCubeSurface()
   }
 
   const CubeShade shade =
-    (shade_i == 1) ? CubeShade::Uncertainty :
-    (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
+    (shade_ch == ColorChannel::Uncertainty) ? CubeShade::Uncertainty :
+    (shade_ch == ColorChannel::Backscatter) ? CubeShade::Intensity :
+    CubeShade::Depth;
   const std::size_t n_pal = marine_colormap::palette_count();
   const auto pal_i = (n_pal > 0) ?
     static_cast<std::size_t>(std::clamp(
@@ -1459,13 +1599,15 @@ void SidescanViewerWindow::onExportSurfaceRgba()
   // Render the ACTIVE shade to per-node RGBA, mirroring refreshCubeSurface:
   // alpha 0 = hole (unestimated; or, in the Sidescan shade, interpolated
   // terrain the pass never touched).
-  const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const ColorChannel shade_ch = cube_shade_combo_ ?
+    channel_at(cube_shade_combo_, cube_shade_combo_->currentIndex()) :
+    ColorChannel::Depth;
   const CubeSurface * srf = &cube_surface_;
   const std::size_t n_scalar =
     static_cast<std::size_t>(cube_surface_.nx) *
     static_cast<std::size_t>(cube_surface_.ny);
   std::vector<std::uint8_t> rgba;
-  if (shade_i == 3) {
+  if (shade_ch == ColorChannel::Sidescan) {
     const CubeSurface & terrain =
       cube_drape_terrain_.ok() ? cube_drape_terrain_ : cube_surface_;
     const std::size_t n =
@@ -1515,8 +1657,9 @@ void SidescanViewerWindow::onExportSurfaceRgba()
     // Scalar shades: the spins hold the ramp in force (auto keeps them
     // synced to the computed range), so read the ramp straight from them.
     const CubeShade shade =
-      (shade_i == 1) ? CubeShade::Uncertainty :
-      (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
+      (shade_ch == ColorChannel::Uncertainty) ? CubeShade::Uncertainty :
+      (shade_ch == ColorChannel::Backscatter) ? CubeShade::Intensity :
+      CubeShade::Depth;
     const auto & scalar =
       (shade == CubeShade::Depth) ? cube_surface_.depth :
       (shade == CubeShade::Uncertainty) ? cube_surface_.uncertainty :
@@ -1801,20 +1944,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // MBES 3D point cloud: orbit view of the window's soundings (colour mode +
   // Z-exaggeration live).
   cloud_ = new PointCloudView(this);
-  cloud_color_combo_ = new QComboBox(this);
-  cloud_color_combo_->addItem("Depth");
-  cloud_color_combo_->addItem("Backscatter");
-  zexag_spin_ = new QDoubleSpinBox(this);
-  zexag_spin_->setRange(1.0, 20.0);
-  zexag_spin_->setSingleStep(0.5);
-  zexag_spin_->setValue(1.0);          // no vertical exaggeration by default
-  zexag_spin_->setPrefix("Z× ");
-  point_size_spin_ = new QDoubleSpinBox(this);
-  point_size_spin_->setRange(1.0, 12.0);
-  point_size_spin_->setSingleStep(0.5);
-  point_size_spin_->setValue(2.5);
-  point_size_spin_->setPrefix("pt ");
-  point_size_spin_->setToolTip("3D point size (pixels)");
+  setupCloudControls();
 
   // Per-pane colormap selectors. Every pane offers the SAME full marine_colormap
   // palette set (the waterfalls/echogram via the lib's palette overload, the map +
@@ -1853,15 +1983,6 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   waterfall_->set_color_map(marine_colormap::palette(sidescan_cmap_->currentIndex()));
   mbes_waterfall_->set_color_map(marine_colormap::palette(mbes_cmap_->currentIndex()));
   echogram_->set_color_map(marine_colormap::palette(echo_cmap_->currentIndex()));
-  cloud_palette_ = new QComboBox(this);
-  for (const auto & name : marine_colormap::palette_names()) {
-    cloud_palette_->addItem(QString::fromStdString(name));
-  }
-  if (const auto vi = marine_colormap::palette_index("bronze")) {
-    cloud_palette_->setCurrentIndex(static_cast<int>(*vi));
-    cloud_->setColorMap(static_cast<int>(*vi));
-  }
-
   setupRangeControls();
 
   // Wrap a view in a titled panel with a small header row (title + per-pane controls).
@@ -2267,10 +2388,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       }
     });
   connect(cloud_color_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-    this, [this](int i) {
-      cloud_->setColorMode(
-        i == 1 ? PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
-    });
+    this, [this](int) {applyCloudColorMode();});
+  refreshCloudColorChannels();   // the startup cloud is empty: Pass has nothing to tell apart
   connect(zexag_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, [this](double z) {cloud_->setZExaggeration(static_cast<float>(z));});
   connect(point_size_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -3079,6 +3198,7 @@ void SidescanViewerWindow::onRenderFinished()
   // pane alone — the selection cloud spans bags and would be clobbered.
   if (!selection_cloud_) {
     cloud_->setPoints(r.mbes_soundings);
+    refreshCloudColorChannels();   // one set of points: no pass identity
     cloud_->setBoat(r.boat_x, r.boat_y, r.boat_z, r.boat_heading, r.boat_valid);
   }
   // Size the MBES backscatter scrollback to the window too (same reason as the
@@ -3437,9 +3557,16 @@ void SidescanViewerWindow::onTileSelectionChanged()
   if (cube_selfcal_btn_) {cube_selfcal_btn_->setEnabled(false);}
   ++drape_gen_;
   cloud_->clearSurface();
+  // Entering multi-pass mode from anything else defaults the colouring to
+  // Pass once the load lands (#36); re-selecting while already in a
+  // multi-pass cloud keeps the operator's choice. Either way the selector
+  // stays live — Pass is an entry, not a mode that takes the control away,
+  // which is what made a CUBE run look like it stole the cloud.
+  cloud_pass_default_pending_ = !selection_cloud_;
   selection_cloud_ = true;
-  cloud_->setColorMode(PointCloudView::ColorMode::Pass);
-  cloud_color_combo_->setEnabled(false);
+  // The pane is reloading: the passes on screen no longer answer to the
+  // selection.
+  cloud_pass_clouds_.clear();
   cloud_legend_->clear();
   cloud_legend_->setVisible(true);
   ++cloud_gen_;   // any load in flight is for a stale selection
@@ -3447,6 +3574,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
   if (cloud_passes.empty()) {
     cloud_->resetView();
     cloud_->setMultiPassPoints({});
+    refreshCloudColorChannels();
     cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
     status_->setText(
       QString("%1 tile%2 selected, %3 pass%4 — none mbes-bathy; nothing to "
@@ -3551,9 +3679,6 @@ void SidescanViewerWindow::exitSelectionCloud()
   cloud_pass_clouds_.clear();
   cloud_legend_->clear();
   cloud_legend_->setVisible(false);
-  cloud_color_combo_->setEnabled(true);
-  cloud_->setColorMode(cloud_color_combo_->currentIndex() == 1 ?
-    PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
   // Hand the pane back to the scrub window: re-render if a bag is open,
   // otherwise leave it empty.
   cloud_->resetView();
@@ -3563,6 +3688,9 @@ void SidescanViewerWindow::exitSelectionCloud()
     cloud_->setPoints({});
     cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
   }
+  // The scrub cloud has no pass identity: Pass greys out (with its reason)
+  // and the colouring falls back to Depth if it was the live choice.
+  refreshCloudColorChannels();
 }
 
 void SidescanViewerWindow::onTimelinePassActivated(
@@ -3690,6 +3818,18 @@ void SidescanViewerWindow::onCloudPassesLoaded()
 
   cloud_->resetView();
   cloud_->setMultiPassPoints(out.pass_clouds);
+  // Pass identity exists again, so the Pass entry goes live; a selection that
+  // just entered multi-pass mode also lands on it.
+  refreshCloudColorChannels();
+  if (cloud_pass_default_pending_) {
+    cloud_pass_default_pending_ = false;
+    for (int i = 0; i < cloud_color_combo_->count(); ++i) {
+      if (channel_at(cloud_color_combo_, i) == ColorChannel::Pass) {
+        cloud_color_combo_->setCurrentIndex(i);
+        break;
+      }
+    }
+  }
   // The selection cloud sits in the reference pass's world frame — the scrub
   // bag's boat arrow would be in the wrong frame, so hide it.
   cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);

@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "color_vocabulary.hpp"
 #include "cube_lab.hpp"
 #include "sidescan_drape.hpp"
 #include "marine_contacts/contact_store.hpp"
@@ -267,6 +268,9 @@ private:
   // Build + wire the per-pane colour-range controls (#26); ctor helper, must
   // run before the pane headers consume the widgets.
   void setupRangeControls();
+  // Build the 3D pane's own controls (colour selector, Z-exaggeration, point
+  // size, palette); ctor helper, run once the PointCloudView exists.
+  void setupCloudControls();
   // Build + wire the CUBE-lab controls row (#27) into the cloud pane;
   // ctor helper, run after the pane exists.
   void setupCubeLab(QWidget * cloud_pane);
@@ -282,6 +286,14 @@ private:
   // Re-triangulate + recolour the stored surface for the shade combo (cheap;
   // no CUBE re-run) and hand it to the cloud pane.
   void refreshCubeSurface();
+  // The shared colour vocabulary (#36): fill a selector with every channel,
+  // then keep the point selector's entries enabled/disabled for the cloud
+  // that is actually loaded. refreshCloudColorChannels also re-applies the
+  // resulting mode, and falls back to Depth if the chosen entry just became
+  // unavailable — it is called after every load into the pane.
+  void populateColorVocabulary(QComboBox * combo);
+  void refreshCloudColorChannels();
+  void applyCloudColorMode();
   // The CUBE frame's world->geo affine, probed through the reference
   // earth anchor; nullopt without a geo reference (export refuses then).
   std::optional<MapGeoAffine> cubeSurfaceAnchor() const;
@@ -396,6 +408,10 @@ private:
   // passes without re-reading bags (index-aligned with cloud_passes_).
   std::vector<std::vector<MbesSounding>> cloud_pass_clouds_;
   bool selection_cloud_ = false;   // cloud pane shows the tile selection, not the scrub window
+  // A selection that ENTERS multi-pass mode defaults its colouring to Pass
+  // (#36) — set when the pane was not already showing a multi-pass cloud, so
+  // adjusting an existing region keeps whatever colouring the operator chose.
+  bool cloud_pass_default_pending_ = false;
   TimeBarWidget * time_bar_ = nullptr;   // GeoZui-style time navigator (replaced phase d's axis)
   std::vector<TimelinePassInfo> selection_passes_;   // for time->bag lookup on cue
   // Campaign nav track + bag paths (index mode): the time-bar position arrow
