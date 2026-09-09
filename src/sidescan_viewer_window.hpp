@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,6 +36,7 @@
 #include "marine_contacts/contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
 #include "mbes_pass_loader.hpp"
+#include "nav_track_hit.hpp"   // TrackHit (the nav-track fix under the cursor)
 #include "sidescan_bag_session.hpp"
 #include "sidescan_canvas.hpp"   // OverviewTile/GeoRect (index-map layer types)
 #include "survey_index_bridge.hpp"
@@ -244,6 +246,18 @@ private:
 
   void refreshContacts();   // push the store to the map overlay + the list
 
+  // --- the nav-track fix under the map cursor (#46) ------------------------
+  // The map answers "when did THAT pass happen", which is the one question
+  // the time bar cannot: hovering near a track highlights the nearest fix and
+  // reads out its time, and a plain click cues there. The search is the pure
+  // nearestTrackFix over nav_track_points_; the window owns the result
+  // because only it holds the timestamps and the cue path.
+  void onMapHoverGeo(double lat, double lon);   // hover readout + fix search
+  void onMapPlainClicked();                     // cue, but only on a hit
+  void clearFixHighlight();                     // no hit: no marker, no readout
+  void refreshFixHighlightReadout();            // re-render after a UTC toggle
+  std::optional<TrackHit> hovered_fix_;
+
   // Load the vendored world coastline into the map's bottom layer (#41), once
   // per session and never over the network — the operator station and the
   // boat have no route to one. A missing or unreadable dataset leaves the map
@@ -402,6 +416,7 @@ private:
   QTreeWidget * cloud_legend_ = nullptr;        // per-pass colours + counts
   QSplitter * cloud_split_ = nullptr;           // [cloud | legend]
   QLabel * hover_geo_ = nullptr;                // lat/lon readout (geo mode)
+  QLabel * hover_time_ = nullptr;               // time of the hovered fix (#46)
   QFutureWatcher<CloudLoadTicket> cloud_watcher_;
   std::uint64_t cloud_gen_ = 0;                 // bumped per selection change
   std::vector<CloudPassInfo> cloud_passes_;     // passes of the in-flight/last load

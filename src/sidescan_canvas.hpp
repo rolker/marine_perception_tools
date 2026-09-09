@@ -159,6 +159,37 @@ public:
   };
   void setTimeArrow(const std::optional<TimeArrow> & arrow);
 
+  // The nav-track fix under the cursor (#46): a distinct marker drawn on the
+  // track where the operator is pointing, so "this point, here" is a thing he
+  // can see before he commits to it. nullopt clears it — beyond the hit
+  // radius nothing highlights, and the map stays silent while he is doing
+  // something else.
+  //
+  // The canvas draws it and nothing more. WHICH fix it is, and when the boat
+  // was there, is the window's business: only the window holds the nav
+  // track's timestamps, and only the window knows what a click on it should
+  // cue. Keeping the decision there is what stops the canvas reaching into
+  // the time bar.
+  struct HighlightedFix
+  {
+    double lat = 0.0;
+    double lon = 0.0;
+  };
+  void setHighlightedFix(const std::optional<HighlightedFix> & fix);
+  const std::optional<HighlightedFix> & highlightedFix() const {return highlighted_fix_;}
+
+  // True while a gesture owns the pointer, or the view is moving under it: a
+  // region drag that has travelled past the click slop, a middle-drag pan,
+  // contact marking, or a recentre glide. Hover-driven feedback must stay
+  // silent while this holds (#46) — a highlight that appears mid-drag is
+  // noise the operator did not ask for, and it offers a click target the
+  // release was never going to honour.
+  //
+  // A left press that has NOT travelled is deliberately not a gesture yet: it
+  // is still on its way to being the plain click that cues, and suppressing
+  // the highlight on press would clear the very thing the release acts on.
+  bool pointerGestureActive() const;
+
   // Selectable index tiles. Replaces the set and clears the selection.
   void setIndexTiles(const std::vector<GeoRect> & tiles);
   const std::set<std::size_t> & selectedTiles() const {return selected_tiles_;}
@@ -304,6 +335,19 @@ signals:
   void cubeBoxSelected(double south, double west, double north, double east);
   void cubeBoxCleared();
 
+  // A plain left click on the map: pressed and released without a drag (#46).
+  // It does nothing to the region — that is #42's contract and it stands —
+  // and exists so the window can act on a highlighted nav-track fix. With no
+  // highlight the window does nothing, so a bare click on empty water is
+  // still the no-op #42 made it.
+  void plainClicked();
+
+  // Hover feedback must clear: a gesture has just taken the pointer or the
+  // view (a region drag, a pan, a recentre glide, contact marking) (#46). The
+  // highlight under a cursor that is no longer where the map thinks it is
+  // would be a lie, and a click target the operator did not choose.
+  void hoverInterrupted();
+
 protected:
   void paintEvent(QPaintEvent * event) override;
   void resizeEvent(QResizeEvent * event) override;
@@ -385,6 +429,7 @@ private:
   bool show_nav_track_ = true;
   bool show_index_tiles_ = true;
   std::optional<TimeArrow> time_arrow_;
+  std::optional<HighlightedFix> highlighted_fix_;   // nav-track fix under the cursor (#46)
 
   bool fit_pending_ = false;
   bool user_adjusted_ = false;
@@ -394,6 +439,9 @@ private:
   // bounds are the processing extent (cube_box_geo_) and the index tiles it
   // covers are the pass query (selected_tiles_).
   bool region_selecting_ = false;
+  // Whether that press has travelled far enough to be a drag rather than a
+  // click. Only a travelled press is a gesture for pointerGestureActive (#46).
+  bool region_dragged_ = false;
   QPoint region_start_;
   QPoint region_cur_;
   // Middle button: a click centres, a drag pans, decided at release (#42).

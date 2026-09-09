@@ -24,6 +24,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QImage>
@@ -1304,6 +1305,330 @@ TEST_F(ExplorerWindowFixture, ACubeRunAddsASurfaceOverTheSelectionCloud)
   EXPECT_EQ(points->currentText(), "Pass")
     << "the run re-coloured the operator's cloud by depth";
   EXPECT_TRUE(points->isEnabled());
+}
+
+// --- the nav-track fix under the cursor (#46) --------------------------------
+
+// The inverse of pixelGeo: where a geographic point lands on screen. Same
+// linear equirectangular mapping, read off the settled visible region.
+QPoint geoPixel(const SidescanCanvas & canvas, double lat, double lon)
+{
+  const GeoRect r = canvas.visibleGeoRegion().value();
+  return QPoint(
+    static_cast<int>(std::lround((lon - r.west) / (r.east - r.west) * canvas.width())),
+    static_cast<int>(std::lround((r.north - lat) / (r.north - r.south) * canvas.height())));
+}
+
+void hoverAt(SidescanCanvas & canvas, const QPoint & pos)
+{
+  QMouseEvent move(
+    QEvent::MouseMove, QPointF(pos), QPointF(canvas.mapToGlobal(pos)),
+    Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(&canvas, &move);
+}
+
+// A shown explorer window whose map is fitted tightly around the fixture's
+// nav track, so a screen pixel is a fraction of a metre and the two fixes
+// (11 m apart) are tens of pixels apart — the survey zoom the feature is used
+// at, rather than a campaign-wide view where everything is within the radius.
+SidescanCanvas * prepareHoverWindow(
+  SidescanViewerWindow & window, const std::string & db_path)
+{
+  window.openSurveyIndex(db_path, std::string(::testing::TempDir()));
+  window.show();
+  QCoreApplication::processEvents();
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  if (!canvas) {
+    return nullptr;
+  }
+  canvas->fitGeo(kLat - 0.0005, kLon - 0.001, kLat + 0.0015, kLon + 0.001);
+  canvas->grab();   // the fit only lands on a laid-out paint
+  return canvas;
+}
+
+// The question the map can answer and the time bar cannot: when did THAT pass
+// happen. Hovering near the drawn track marks the nearest fix and reads out
+// its time; moving away takes both back.
+TEST_F(ExplorerWindowFixture, HoveringNearTheTrackHighlightsTheNearestFixAndItsTime)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * readout = window.findChild<QLabel *>("hover_time");
+  ASSERT_NE(readout, nullptr);
+  auto * timeline = window.findChild<TimeBarWidget *>("time_bar");
+  ASSERT_NE(timeline, nullptr);
+  EXPECT_TRUE(readout->text().isEmpty()) << "a readout with nothing hovered";
+  EXPECT_FALSE(canvas->highlightedFix().has_value());
+
+  // Straight onto the SECOND fixture fix (t = 2000 ns).
+  hoverAt(*canvas, geoPixel(*canvas, kLat + 1e-4, kLon));
+
+  ASSERT_TRUE(canvas->highlightedFix().has_value()) << "nothing highlighted on the track";
+  EXPECT_NEAR(canvas->highlightedFix()->lat, kLat + 1e-4, 1e-9);
+  EXPECT_NEAR(canvas->highlightedFix()->lon, kLon, 1e-9);
+  // The time bar's own formatter, so one instant never reads two ways.
+  EXPECT_EQ(readout->text(), timeline->formatTime(2000));
+
+  // The other fix is the near one from a pixel beside it.
+  hoverAt(*canvas, geoPixel(*canvas, kLat, kLon));
+  ASSERT_TRUE(canvas->highlightedFix().has_value());
+  EXPECT_NEAR(canvas->highlightedFix()->lat, kLat, 1e-9);
+  EXPECT_EQ(readout->text(), timeline->formatTime(1000));
+
+  // Off the track entirely: no marker, no readout. The feature is silent
+  // whenever the operator is not asking it anything.
+  hoverAt(*canvas, QPoint(3, canvas->height() / 2));
+  EXPECT_FALSE(canvas->highlightedFix().has_value());
+  EXPECT_TRUE(readout->text().isEmpty());
+}
+
+// The readout is a time display like every other one in the window, so it
+// follows the one UTC/local toggle rather than answering in its own zone.
+TEST_F(ExplorerWindowFixture, TheHoveredFixTimeFollowsTheUtcToggle)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * readout = window.findChild<QLabel *>("hover_time");
+  auto * utc = window.findChild<QCheckBox *>("utc_check");
+  auto * timeline = window.findChild<TimeBarWidget *>("time_bar");
+  ASSERT_NE(readout, nullptr);
+  ASSERT_NE(utc, nullptr);
+  ASSERT_NE(timeline, nullptr);
+  ASSERT_FALSE(utc->isChecked()) << "local time is the default (#26)";
+
+  hoverAt(*canvas, geoPixel(*canvas, kLat, kLon));
+  ASSERT_FALSE(readout->text().isEmpty());
+  EXPECT_EQ(readout->text(), timeline->formatTime(1000));
+
+  // Switching zone re-renders what is already on screen — the operator must
+  // not have to jiggle the mouse to get the answer he just asked for.
+  utc->setChecked(true);
+  EXPECT_TRUE(readout->text().endsWith(" UTC"));
+  EXPECT_EQ(readout->text(), timeline->formatTime(1000));
+}
+
+// The point of the whole feature: the click cues. It goes through the same
+// path a committed time on the time bar takes, so there is one cueing
+// implementation and the map and the tape cannot disagree.
+TEST_F(ExplorerWindowFixture, ClickingAHighlightedFixCuesThatInstant)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * status = window.findChild<QLabel *>("status");
+  ASSERT_NE(status, nullptr);
+
+  hoverAt(*canvas, geoPixel(*canvas, kLat, kLon));
+  ASSERT_TRUE(canvas->highlightedFix().has_value());
+
+  leftClick(*canvas, geoPixel(*canvas, kLat, kLon));
+
+  // The instant is in the fixture's one recording, which is not open, so the
+  // cue resolves to that bag — and says so. The reopen is the known, and
+  // deliberately out-of-scope, cost of cueing across recordings (#36); what
+  // this feature owes the operator is that he can tell it is happening.
+  EXPECT_TRUE(status->text().contains("Cueing")) << status->text().toStdString();
+  EXPECT_TRUE(status->text().contains("bag_a")) << status->text().toStdString();
+  EXPECT_TRUE(status->text().contains("another recording")) << status->text().toStdString();
+}
+
+// #42 made a bare left click do nothing, because the one thing it used to do
+// was silently destroy the operator's region. That stands: this issue adds an
+// action on a HIT only, and off the track the click is still a no-op.
+TEST_F(ExplorerWindowFixture, AClickWithNoHighlightedFixStillDoesNothing)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * status = window.findChild<QLabel *>("status");
+  ASSERT_NE(status, nullptr);
+
+  // Draw a region, then step off the track so nothing is highlighted.
+  leftDrag(*canvas, QPoint(20, 20), QPoint(canvas->width() - 20, canvas->height() - 20));
+  ASSERT_TRUE(canvas->hasRegion()) << "the drag never produced a region";
+  const std::set<std::size_t> selected_before = canvas->selectedTiles();
+  const QPoint away(3, canvas->height() / 2);
+  hoverAt(*canvas, away);
+  ASSERT_FALSE(canvas->highlightedFix().has_value());
+  const QString status_before = status->text();
+
+  int cleared = 0;
+  int selection_changed = 0;
+  QObject::connect(
+    canvas, &SidescanCanvas::cubeBoxCleared, canvas, [&cleared]() {++cleared;});
+  QObject::connect(
+    canvas, &SidescanCanvas::tileSelectionChanged, canvas,
+    [&selection_changed]() {++selection_changed;});
+
+  leftClick(*canvas, away);
+
+  EXPECT_TRUE(canvas->hasRegion());
+  EXPECT_EQ(canvas->selectedTiles(), selected_before);
+  EXPECT_EQ(cleared, 0);
+  EXPECT_EQ(selection_changed, 0);
+  EXPECT_EQ(status->text(), status_before) << "a miss cued something";
+}
+
+// The highlight must not fight the gestures the map already has. A left drag
+// draws the region; dragging it across the track must not light fixes up
+// under the rubber band, and the release must draw a region rather than cue.
+TEST_F(ExplorerWindowFixture, ARegionDragAcrossTheTrackNeverHighlights)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * status = window.findChild<QLabel *>("status");
+  auto * readout = window.findChild<QLabel *>("hover_time");
+  ASSERT_NE(status, nullptr);
+  ASSERT_NE(readout, nullptr);
+
+  // Highlighted first, so the drag has something to take away.
+  const QPoint on_fix = geoPixel(*canvas, kLat, kLon);
+  hoverAt(*canvas, on_fix);
+  ASSERT_TRUE(canvas->highlightedFix().has_value());
+
+  const QPoint from(on_fix.x() - 40, on_fix.y() - 40);
+  QMouseEvent press(
+    QEvent::MouseButtonPress, QPointF(from), QPointF(canvas->mapToGlobal(from)),
+    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(canvas, &press);
+  // The press alone is not yet a gesture — it is still on its way to being a
+  // click — so it must not have cleared anything.
+  EXPECT_TRUE(canvas->highlightedFix().has_value())
+    << "the press cleared the highlight the release might have cued";
+
+  // Now travel, straight over the fix.
+  for (const QPoint & at : {QPoint(on_fix.x() - 10, on_fix.y() - 10), on_fix,
+      QPoint(on_fix.x() + 40, on_fix.y() + 40)})
+  {
+    QMouseEvent move(
+      QEvent::MouseMove, QPointF(at), QPointF(canvas->mapToGlobal(at)),
+      Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &move);
+    EXPECT_TRUE(canvas->pointerGestureActive()) << "a travelled drag is a gesture";
+    EXPECT_FALSE(canvas->highlightedFix().has_value())
+      << "a fix lit up under the rubber band";
+    EXPECT_TRUE(readout->text().isEmpty());
+  }
+  const QPoint to(on_fix.x() + 40, on_fix.y() + 40);
+  QMouseEvent release(
+    QEvent::MouseButtonRelease, QPointF(to), QPointF(canvas->mapToGlobal(to)),
+    Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(canvas, &release);
+
+  // The release reports the region it drew (its status line says so) and
+  // cues nothing: a drag is not a click, however exactly it crossed the track.
+  EXPECT_TRUE(canvas->hasRegion()) << "the drag drew no region";
+  EXPECT_FALSE(status->text().contains("Cueing"))
+    << "the drag cued as well as selecting: " << status->text().toStdString();
+  EXPECT_FALSE(canvas->pointerGestureActive()) << "the settled drag is still a gesture";
+}
+
+// The other two view-moving gestures: a middle-drag pan, and the recentre
+// glide a middle click starts. Both move the map out from under a pointer
+// that is not itself moving, so a highlight left standing would be pointing
+// at water the boat never crossed.
+TEST_F(ExplorerWindowFixture, PanningAndTheRecentreGlideClearTheHighlight)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * readout = window.findChild<QLabel *>("hover_time");
+  ASSERT_NE(readout, nullptr);
+  const QPoint on_fix = geoPixel(*canvas, kLat, kLon);
+
+  // A middle-drag pan.
+  hoverAt(*canvas, on_fix);
+  ASSERT_TRUE(canvas->highlightedFix().has_value());
+  QMouseEvent press(
+    QEvent::MouseButtonPress, QPointF(on_fix), QPointF(canvas->mapToGlobal(on_fix)),
+    Qt::MiddleButton, Qt::MiddleButton, Qt::NoModifier);
+  QApplication::sendEvent(canvas, &press);
+  const QPoint moved(on_fix.x() + 60, on_fix.y() + 20);
+  QMouseEvent drag(
+    QEvent::MouseMove, QPointF(moved), QPointF(canvas->mapToGlobal(moved)),
+    Qt::NoButton, Qt::MiddleButton, Qt::NoModifier);
+  QApplication::sendEvent(canvas, &drag);
+  EXPECT_TRUE(canvas->pointerGestureActive());
+  EXPECT_FALSE(canvas->highlightedFix().has_value()) << "the highlight rode the pan";
+  EXPECT_TRUE(readout->text().isEmpty());
+  QMouseEvent up(
+    QEvent::MouseButtonRelease, QPointF(moved), QPointF(canvas->mapToGlobal(moved)),
+    Qt::MiddleButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(canvas, &up);
+  EXPECT_FALSE(canvas->pointerGestureActive()) << "the settled pan is still a gesture";
+
+  // And the recentre glide: a middle CLICK, which travels nowhere.
+  canvas->grab();   // settle the panned view before reading pixels off it
+  const QPoint fix_now = geoPixel(*canvas, kLat, kLon);
+  hoverAt(*canvas, fix_now);
+  ASSERT_TRUE(canvas->highlightedFix().has_value());
+  middleClick(*canvas, QPoint(canvas->width() - 10, 10));
+  ASSERT_TRUE(canvas->recenterAnimating()) << "no glide to test against";
+  EXPECT_TRUE(canvas->pointerGestureActive());
+  EXPECT_FALSE(canvas->highlightedFix().has_value()) << "the highlight rode the glide";
+  EXPECT_TRUE(readout->text().isEmpty());
+  canvas->finishRecenterNow();
+}
+
+// A zoom moves the map under a pointer that did not move and changes what
+// "close on screen" means, so no move event will ever come along to correct a
+// stale highlight. It clears; the next move re-searches at the new scale.
+TEST_F(ExplorerWindowFixture, AWheelZoomClearsTheHighlight)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * readout = window.findChild<QLabel *>("hover_time");
+  ASSERT_NE(readout, nullptr);
+
+  const QPoint on_fix = geoPixel(*canvas, kLat, kLon);
+  hoverAt(*canvas, on_fix);
+  ASSERT_TRUE(canvas->highlightedFix().has_value());
+
+  const QPointF centre_px(canvas->width() / 2.0, canvas->height() / 2.0);
+  QWheelEvent wheel(
+    centre_px, QPointF(canvas->mapToGlobal(centre_px.toPoint())), QPoint(0, 0),
+    QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(canvas, &wheel);
+
+  EXPECT_FALSE(canvas->highlightedFix().has_value());
+  EXPECT_TRUE(readout->text().isEmpty());
+
+  // And it comes back at the new scale on the next move.
+  canvas->grab();
+  hoverAt(*canvas, geoPixel(*canvas, kLat, kLon));
+  EXPECT_TRUE(canvas->highlightedFix().has_value());
 }
 
 }  // namespace

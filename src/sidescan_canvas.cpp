@@ -139,6 +139,10 @@ void SidescanCanvas::setRecenterDurationMs(int ms)
 
 void SidescanCanvas::startRecenter(const QPointF & target)
 {
+  // The map is about to move out from under the pointer — on the instant path
+  // as much as the glide — so whatever was highlighted is no longer where the
+  // cursor is (#46).
+  emit hoverInterrupted();
   recenter_to_ = target;
   user_adjusted_ = true;
   fit_pending_ = false;
@@ -339,6 +343,27 @@ void SidescanCanvas::setTimeArrow(const std::optional<TimeArrow> & arrow)
   update();
 }
 
+void SidescanCanvas::setHighlightedFix(const std::optional<HighlightedFix> & fix)
+{
+  // Called at mouse-move rate, so repaint only on a real change: the same fix
+  // re-reported as the cursor slides along it must not queue a frame.
+  const bool same = (highlighted_fix_.has_value() == fix.has_value()) &&
+    (!fix.has_value() ||
+    (highlighted_fix_->lat == fix->lat && highlighted_fix_->lon == fix->lon));
+  if (same) {
+    return;
+  }
+  highlighted_fix_ = fix;
+  update();   // a dynamic overlay: no layer-cache invalidation
+}
+
+bool SidescanCanvas::pointerGestureActive() const
+{
+  return (region_selecting_ && region_dragged_) ||
+         (middle_dragging_ && middle_moved_) ||
+         mark_mode_ || recentering_;
+}
+
 void SidescanCanvas::fitGeo(double south, double west, double north, double east)
 {
   abandonRecenter();   // an explicit fit replaces the view the glide was heading for
@@ -530,6 +555,11 @@ void SidescanCanvas::setMarkMode(bool on)
 {
   mark_mode_ = on;
   setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
+  if (on) {
+    // An explicitly chosen mode owns left-drag; the nav-track highlight must
+    // not sit there offering a click that marking is about to take (#46).
+    emit hoverInterrupted();
+  }
 }
 
 void SidescanCanvas::setCursorWorld(const std::optional<QPointF> & map_point)
@@ -951,6 +981,21 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     }
   }
 
+  // The nav-track fix under the cursor (#46). Drawn as a filled disc with a
+  // dark rim so it reads against both the pale track and the store basemap,
+  // in a colour used nowhere else on this map (the track is white, the time
+  // arrow orange, contacts magenta, the linked cursor cyan) — the operator
+  // must never have to work out which of two markers he is about to click.
+  if (geo_mode_ && highlighted_fix_) {
+    const QPointF c = geoToCanvas(highlighted_fix_->lat, highlighted_fix_->lon);
+    const QPointF p = mapToScreen(c.x(), c.y());
+    constexpr double kR = 4.5;   // px; comfortably inside kFixHitRadiusPx
+    painter.setPen(QPen(QColor(20, 20, 20), 1.5));
+    painter.setBrush(QColor(255, 235, 59));   // highlight yellow
+    painter.drawEllipse(p, kR, kR);
+    painter.setBrush(Qt::NoBrush);
+  }
+
   // Time-bar position arrow: the boat at the bar's centre time, in the 3D
   // pane's boat-arrow orange for consistent iconography. Drawn near the TOP
   // of the stack — it is a transient indicator and must never hide under the
@@ -1040,6 +1085,10 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
   const double steps = event->angleDelta().y() / 120.0;
   if (steps == 0.0) {return;}
   abandonRecenter();   // zooming takes the view over from here, mid-glide
+  // A zoom changes what "close on screen" means, and the map slid under a
+  // pointer that did not move, so no move event will correct the highlight
+  // (#46). Drop it; the next move re-searches at the new scale.
+  emit hoverInterrupted();
   const QPointF cursor = event->position();
   const QPointF before = screenToMap(cursor.x(), cursor.y());
   const double factor = std::pow(1.2, steps);
@@ -1088,6 +1137,7 @@ void SidescanCanvas::mousePressEvent(QMouseEvent * event)
   // anything here: the region replaced both the index-tile rubber band and the
   // separate CUBE box, so one rectangle feeds every action.
   region_selecting_ = true;
+  region_dragged_ = false;   // not a gesture until it travels (#46)
   region_start_ = event->pos();
   region_cur_ = event->pos();
   update();
@@ -1116,6 +1166,7 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
       (event->pos() - middle_start_).manhattanLength() > kClickSlopPx)
     {
       middle_moved_ = true;
+      emit hoverInterrupted();   // a pan owns the pointer from here (#46)
     }
     if (middle_moved_) {
       panning_ = true;   // repaint via the translated cache until release
@@ -1130,6 +1181,12 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
   }
   if (!(event->buttons() & Qt::LeftButton)) {return;}
   if (region_selecting_) {
+    if (!region_dragged_ &&
+      (event->pos() - region_start_).manhattanLength() > kClickSlopPx)
+    {
+      region_dragged_ = true;
+      emit hoverInterrupted();   // drawing a region, not picking a fix (#46)
+    }
     region_cur_ = event->pos();
     update();
     return;
@@ -1170,6 +1227,7 @@ void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
   if (event->button() != Qt::LeftButton) {return;}
   if (region_selecting_) {
     region_selecting_ = false;
+    region_dragged_ = false;
     const bool was_click =
       (event->pos() - region_start_).manhattanLength() <= kClickSlopPx;
     // One rectangle, both consequences: the exact bounds are the processing
@@ -1183,6 +1241,10 @@ void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
     // right-click menu, where it has to be asked for by name.
     if (was_click) {
       update();   // erase the zero-size rubber band the press started
+      // Still nothing to the region. It does now REPORT itself, so the window
+      // can cue the time cursor to a highlighted nav-track fix (#46) — a
+      // non-destructive action that exists only when there is a hit.
+      emit plainClicked();
       return;
     }
     const QPointF a = screenToMap(region_start_.x(), region_start_.y());

@@ -1916,6 +1916,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     "both renders more pings and refines the map.");
 
   status_ = new QLabel("Open a bag to begin (File → Open Bag).", this);
+  status_->setObjectName("status");
   // The status line must never dictate the window size: a long load note was
   // resizing the whole window (desk finding). Long text clips instead.
   status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -2007,6 +2008,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // the time bar, tooltips, status messages and pass labels to UTC — the
   // zone of bag stamps and survey_index_query output.
   utc_check_ = new QCheckBox("UTC", this);
+  utc_check_->setObjectName("utc_check");
   utc_check_->setChecked(false);
   utc_check_->setToolTip(
     "Display times in UTC instead of local time "
@@ -2104,13 +2106,21 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   outer_split_->setStretchFactor(1, 3);
   outer_split_->setStretchFactor(2, 4);
 
-  // Status row: the main readout plus a right-aligned lat/lon hover readout
-  // (populated only in survey/geo mode).
+  // Status row: the main readout plus right-aligned hover readouts (populated
+  // only in survey/geo mode) — the time of the highlighted nav-track fix
+  // (#46) and then the cursor's lat/lon. The time sits beside the lat/lon
+  // because they answer the same question about the same pointer: where the
+  // cursor is, and when the boat was there.
   hover_geo_ = new QLabel(this);
+  hover_time_ = new QLabel(this);
+  hover_time_->setObjectName("hover_time");
+  hover_time_->setToolTip(
+    "Time of the highlighted nav-track fix — click the map to cue there");
   auto * status_row = new QWidget(this);
   auto * srow = new QHBoxLayout(status_row);
   srow->setContentsMargins(0, 0, 0, 0);
   srow->addWidget(status_, 1);
+  srow->addWidget(hover_time_);
   srow->addWidget(hover_geo_);
   srow->addWidget(utc_check_);   // right under the time bar it switches
 
@@ -2327,6 +2337,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(utc_check_, &QCheckBox::toggled, this, [this](bool on) {
       time_bar_->setDisplayUtc(on);
       refreshPassLabels();
+      refreshFixHighlightReadout();   // the hovered fix reads in the new zone too
     });
 
   // Clip changes re-run the selection load (cheap: the query is local, the
@@ -2346,10 +2357,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     });
   connect(canvas_, &SidescanCanvas::tileSelectionChanged,
     this, &SidescanViewerWindow::onTileSelectionChanged);
-  connect(canvas_, &SidescanCanvas::hoverGeo, this, [this](double lat, double lon) {
-      hover_geo_->setText(
-        QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
-    });
+  connect(canvas_, &SidescanCanvas::hoverGeo,
+    this, &SidescanViewerWindow::onMapHoverGeo);
+  connect(canvas_, &SidescanCanvas::hoverInterrupted,
+    this, &SidescanViewerWindow::clearFixHighlight);
+  connect(canvas_, &SidescanCanvas::plainClicked,
+    this, &SidescanViewerWindow::onMapPlainClicked);
   connect(time_bar_, &TimeBarWidget::passActivated,
     this, &SidescanViewerWindow::onTimelinePassActivated);
   connect(time_bar_, &TimeBarWidget::timeSelected,
@@ -2663,7 +2676,15 @@ void SidescanViewerWindow::scheduleOpen(
   debounce_t0_ns_ = t0_ns;
   debounce_t1_ns_ = t1_ns;
   open_debounce_.start();   // restart on every commit; the last one wins
-  status_->setText(QString("Cueing %1 …")
+  // Say what the stall IS. Cueing to an instant outside the open recording
+  // reopens and re-indexes a whole bag, and in a revisited area — the case
+  // the map-click cue exists for (#46) — most clicks land in another
+  // recording and pay it. A wait the operator understands is a different
+  // thing from one he does not. (Making it CHEAP is the cursor-to-absolute-
+  // time work discussed against #36, not this.)
+  status_->setText(
+    QString("Cueing %1 — that time is in another recording, which has to be "
+      "reopened and indexed …")
     .arg(QFileInfo(QString::fromStdString(bag_uri)).fileName()));
 }
 
@@ -3311,6 +3332,7 @@ void SidescanViewerWindow::openSurveyIndex(
   // the time-bar position arrow (time -> fix) and time -> bag resolution.
   nav_track_points_ = bridge_->navTrack();
   bag_paths_ = bridge_->bagPaths();
+  clearFixHighlight();   // the old index's fix is not in this one (#46)
   std::vector<std::vector<std::pair<double, double>>> segments;
   {
     std::int64_t cur_bag = -1;
@@ -3837,6 +3859,65 @@ void SidescanViewerWindow::onCenterTimeChanged(qlonglong t_ns)
   } else {
     canvas_->setTimeArrow(std::nullopt);
   }
+}
+
+void SidescanViewerWindow::onMapHoverGeo(double lat, double lon)
+{
+  hover_geo_->setText(
+    QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
+  // No highlight while a gesture owns the pointer (#46): a region drag past
+  // the slop, a pan, a glide, or contact marking. hoverGeo still fires
+  // throughout those — the lat/lon readout should keep following the cursor —
+  // so the suppression belongs here rather than at the emit.
+  if (canvas_->pointerGestureActive()) {
+    clearFixHighlight();
+    return;
+  }
+  // In bag-only mode nav_track_points_ is empty, so this is a no-hit and the
+  // feature is simply absent — no special case needed.
+  const auto hit = nearestTrackFix(
+    nav_track_points_, lat, lon, canvas_->groundMetresPerPixel());
+  hovered_fix_ = hit;
+  canvas_->setHighlightedFix(
+    hit ?
+    std::optional<SidescanCanvas::HighlightedFix>(
+      SidescanCanvas::HighlightedFix{hit->latitude, hit->longitude}) :
+    std::nullopt);
+  refreshFixHighlightReadout();
+}
+
+void SidescanViewerWindow::clearFixHighlight()
+{
+  hovered_fix_.reset();
+  canvas_->setHighlightedFix(std::nullopt);
+  hover_time_->clear();
+}
+
+void SidescanViewerWindow::refreshFixHighlightReadout()
+{
+  if (!hovered_fix_) {
+    hover_time_->clear();
+    return;
+  }
+  // The time bar's formatter, so this instant reads exactly as the same
+  // instant does on the tape, in tooltips and in pass labels — and follows
+  // the one UTC/local toggle rather than inventing a second answer.
+  hover_time_->setText(time_bar_->formatTime(hovered_fix_->t_ns));
+}
+
+void SidescanViewerWindow::onMapPlainClicked()
+{
+  // With no highlighted fix a bare left click still does nothing at all —
+  // #42's contract, and the reason it exists (a click that quietly destroyed
+  // the operator's region) has not gone away. With one, the click cues.
+  if (!hovered_fix_) {
+    return;
+  }
+  // Deliberately the SAME path a committed time on the time bar takes: one
+  // cueing implementation, so the map and the tape can never disagree about
+  // what "go there" does. It resolves the recording itself, including the
+  // reopen when the instant is in another one.
+  onTimeSelected(static_cast<qlonglong>(hovered_fix_->t_ns));
 }
 
 void SidescanViewerWindow::onCloudPassesLoaded()
