@@ -23,12 +23,15 @@
 #include <gtest/gtest.h>
 
 #include <QApplication>
+#include <QCheckBox>
+#include <QDoubleSpinBox>
 #include <QImage>
 #include <QLabel>
 #include <QElapsedTimer>
 #include <QMouseEvent>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
+#include <QSettings>
 #include <QSurfaceFormat>
 #include <QThread>
 #include <QTreeWidget>
@@ -89,6 +92,18 @@ QApplication & app()
   static char arg0[] = "test_survey_explorer_window";
   static char * argv[] = {arg0, nullptr};
   static QApplication a(argc, argv);
+  // The window remembers operator preferences (last index, layer visibility)
+  // in QSettings("UNH-CCOM", "survey_explorer"). Redirect that store into the
+  // temp dir before any window exists: the suite must neither read the
+  // developer's own preferences (a remembered toggle would decide a default
+  // test) nor write to them.
+  static const bool redirected = []() {
+      QSettings::setPath(
+        QSettings::NativeFormat, QSettings::UserScope,
+        QString::fromStdString(std::string(::testing::TempDir()) + "/qsettings"));
+      return true;
+    }();
+  (void)redirected;
   return a;
 }
 
@@ -269,6 +284,90 @@ TEST_F(ExplorerWindowFixture, CoastlineDrawsAtRegionZoomAndVanishesAtSurveyZoom)
   const QImage survey_on = renderOverBox(canvas, 0.001, true);
   const QImage survey_off = renderOverBox(canvas, 0.001, false);
   EXPECT_EQ(survey_on, survey_off) << "the coastline still draws at survey zoom";
+}
+
+// --- metric measuring grid (#42) --------------------------------------------
+
+// Render the canvas with the metric grid on or off. Like renderOverBox, the
+// visibility toggle goes LAST because it invalidates the static layer cache.
+QImage renderWithMetricGrid(SidescanCanvas & canvas, bool grid_on)
+{
+  canvas.fitGeo(kLat - 0.001, kLon - 0.001, kLat + 0.001, kLon + 0.001);
+  canvas.setMetricGridVisible(grid_on);
+  return canvas.grab().toImage();
+}
+
+// The grid must actually answer to its new switch: it is drawn into the
+// cached static layer, so a toggle that forgot to invalidate the cache would
+// leave the screen unchanged until something else forced a rebuild.
+TEST_F(ExplorerWindowFixture, MetricGridTogglesOffAndBackOnScreen)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  canvas.resize(400, 300);
+  canvas.setGeoOrigin(kLat, kLon);
+  canvas.setGridSpacing(10.0);
+
+  const QImage with_grid = renderWithMetricGrid(canvas, true);
+  const QImage without_grid = renderWithMetricGrid(canvas, false);
+  EXPECT_NE(with_grid, without_grid) << "hiding the metric grid changed nothing";
+
+  // And back: the cache must invalidate in both directions.
+  const QImage again = renderWithMetricGrid(canvas, true);
+  EXPECT_EQ(again, with_grid) << "the metric grid did not come back";
+}
+
+// Mode-dependent default (#42): over a whole collection the grid measures
+// from an arbitrary origin, so an open index starts with it off — while a
+// bag, where the grid is the ruler a target is sized against, starts with it
+// on. The spacing spinbox follows the grid it spaces.
+TEST_F(ExplorerWindowFixture, MetricGridDefaultsOffInIndexModeAndOnForABag)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  // A previous run of this binary left its toggle in the redirected settings
+  // store; the default under test is the no-preference one.
+  {
+    QSettings settings("UNH-CCOM", "survey_explorer");
+    settings.remove("show_metric_grid");
+    settings.sync();
+  }
+
+  SidescanViewerWindow bag_window;
+  auto * bag_check = bag_window.findChild<QCheckBox *>("show_metric_grid_check");
+  ASSERT_NE(bag_check, nullptr);
+  EXPECT_TRUE(bag_check->isChecked()) << "a bag lost its measuring grid";
+  auto * bag_canvas = bag_window.findChild<SidescanCanvas *>();
+  ASSERT_NE(bag_canvas, nullptr);
+  EXPECT_TRUE(bag_canvas->metricGridVisible());
+
+  SidescanViewerWindow window;
+  window.openSurveyIndex(db_path_, std::string(::testing::TempDir()));
+  window.show();
+  QCoreApplication::processEvents();
+
+  auto * check = window.findChild<QCheckBox *>("show_metric_grid_check");
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->isVisible());
+  EXPECT_FALSE(check->isChecked()) << "the index map opened with the measuring grid on";
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  ASSERT_NE(canvas, nullptr);
+  EXPECT_FALSE(canvas->metricGridVisible());
+
+  // The spacing spinbox spaces this grid, so it is greyed out with it.
+  auto * spin = window.findChild<QDoubleSpinBox *>("grid_spacing_spin");
+  ASSERT_NE(spin, nullptr);
+  EXPECT_FALSE(spin->isEnabled());
+
+  check->setChecked(true);
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(canvas->metricGridVisible());
+  EXPECT_TRUE(spin->isEnabled());
 }
 
 // --- middle-click recentre (#42) --------------------------------------------

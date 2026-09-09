@@ -134,6 +134,15 @@ public:
   void setNavTrackVisible(bool on);
   void setIndexTilesVisible(bool on);
 
+  // The metric measuring grid (#42): Cartesian lines every setGridSpacing()
+  // metres, labelled in canvas metres. It came from the target viewer, where
+  // the map was one bag's local frame and the grid was the ruler a target was
+  // sized against. On a collection-wide index map it measures from an
+  // arbitrary origin and is noise, so the window defaults it OFF there and ON
+  // for a bag — see SidescanViewerWindow.
+  void setMetricGridVisible(bool on);
+  bool metricGridVisible() const {return show_metric_grid_;}
+
   // The time-bar position arrow (#24): the boat's interpolated nav-track
   // position/course at the time bar's centre time. Replaces the per-track
   // direction arrowheads — direction on demand instead of everywhere at
@@ -350,6 +359,7 @@ private:
   std::vector<QPointF> track_;  // map frame
 
   double grid_spacing_m_ = 10.0;
+  bool show_metric_grid_ = true;   // bag-mode default; index mode turns it off
   double px_per_m_ = 4.0;       // zoom
   QPointF center_map_{0.0, 0.0};  // canvas point shown at the widget centre
 

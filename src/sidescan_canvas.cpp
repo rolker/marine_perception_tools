@@ -263,6 +263,15 @@ void SidescanCanvas::setIndexTilesVisible(bool on)
   }
 }
 
+void SidescanCanvas::setMetricGridVisible(bool on)
+{
+  if (show_metric_grid_ != on) {
+    show_metric_grid_ = on;
+    layer_cache_valid_ = false;   // the grid lives in the cached static layer
+    update();
+  }
+}
+
 void SidescanCanvas::setTimeArrow(const std::optional<TimeArrow> & arrow)
 {
   time_arrow_ = arrow;
@@ -541,6 +550,9 @@ void SidescanCanvas::resetView()
 
 void SidescanCanvas::drawGrid(QPainter & painter) const
 {
+  if (!show_metric_grid_) {
+    return;
+  }
   const QPointF tl = screenToMap(0, 0);
   const QPointF br = screenToMap(width(), height());
   const double min_x = std::min(tl.x(), br.x());

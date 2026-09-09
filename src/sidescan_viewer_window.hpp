@@ -398,6 +398,7 @@ private:
   QCheckBox * show_track_check_ = nullptr;
   QCheckBox * show_grid_check_ = nullptr;
   QCheckBox * show_coast_check_ = nullptr;
+  QCheckBox * show_metric_grid_check_ = nullptr;
   QCheckBox * utc_check_ = nullptr;
 
   // Per-pane colour-range controls (#26): auto (default) or a manual lo/hi

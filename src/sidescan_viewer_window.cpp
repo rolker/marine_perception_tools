@@ -1574,6 +1574,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   scrub_->setEnabled(false);
 
   grid_spin_ = new QDoubleSpinBox(this);
+  grid_spin_->setObjectName("grid_spacing_spin");
   grid_spin_->setRange(1.0, 1000.0);
   grid_spin_->setValue(10.0);
   grid_spin_->setSuffix(" m");
@@ -1719,6 +1720,24 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     show_coast_check_->setChecked(on);
     canvas_->setCoastlineVisible(on);
   }
+  // Metric measuring grid (#42): the slate Cartesian lines and their metre
+  // labels, a ruler inherited from the target viewer. Distinct from the
+  // "grid" box above, which toggles the cyan survey index tiles — the two
+  // were indistinguishable while only one of them could be switched off.
+  // Checked here for the bag case (the target-viewer window, where the grid
+  // IS the measuring tool); openSurveyIndex overrides it for index mode,
+  // where the remembered state wins and the default is off.
+  show_metric_grid_check_ = new QCheckBox("metric grid", this);
+  show_metric_grid_check_->setObjectName("show_metric_grid_check");
+  show_metric_grid_check_->setChecked(true);
+  show_metric_grid_check_->setToolTip(
+    "Show the metric measuring grid: Cartesian lines at the spacing set by "
+    "the Grid box in the bottom row, labelled in metres from the map "
+    "origin.\nA ruler for sizing a target, not navigation chrome — over a "
+    "whole collection the origin is arbitrary. This is NOT the index-tile "
+    "grid ('grid').");
+  show_metric_grid_check_->setVisible(false);
+
   // Times display in the system local zone by default (#26); this switches
   // the time bar, tooltips, status messages and pass labels to UTC — the
   // zone of bag stamps and survey_index_query output.
@@ -1820,7 +1839,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     "Map", canvas_,
     {basemap_layer_, basemap_cmap_,
       map_range_.auto_check, map_range_.lo, map_range_.hi,
-      show_track_check_, show_grid_check_, show_coast_check_});
+      show_track_check_, show_grid_check_, show_coast_check_,
+      show_metric_grid_check_});
   outer_split_ = new QSplitter(Qt::Horizontal, this);
   outer_split_->addWidget(contacts_pane);
   outer_split_->addWidget(map_pane);
@@ -1977,6 +1997,14 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       canvas_->setCoastlineVisible(on);
       QSettings settings("UNH-CCOM", "survey_explorer");
       settings.setValue("show_coastline", on);
+    });
+  connect(show_metric_grid_check_, &QCheckBox::toggled, this, [this](bool on) {
+      canvas_->setMetricGridVisible(on);
+      // The spacing spinbox belongs to this grid; grey it out while there is
+      // no grid for it to space.
+      grid_spin_->setEnabled(on);
+      QSettings settings("UNH-CCOM", "survey_explorer");
+      settings.setValue("show_metric_grid", on);
     });
   connect(utc_check_, &QCheckBox::toggled, this, [this](bool on) {
       time_bar_->setDisplayUtc(on);
@@ -2989,6 +3017,17 @@ void SidescanViewerWindow::openSurveyIndex(
   show_track_check_->setVisible(true);
   show_grid_check_->setVisible(true);
   show_coast_check_->setVisible(true);
+  // Index mode: the measuring grid is off unless the operator asked for it
+  // back. Applied here rather than in the constructor because this is the
+  // moment the window learns which mode it is in.
+  {
+    const QSettings settings("UNH-CCOM", "survey_explorer");
+    const bool on = settings.value("show_metric_grid", false).toBool();
+    show_metric_grid_check_->setChecked(on);
+    canvas_->setMetricGridVisible(on);
+    grid_spin_->setEnabled(on);
+  }
+  show_metric_grid_check_->setVisible(true);
   loadCoastlineLayer();
 }
 
