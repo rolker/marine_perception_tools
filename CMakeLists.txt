@@ -267,6 +267,12 @@ if(BUILD_TESTING)
   target_include_directories(test_nav_track_lookup PRIVATE src)
   ament_target_dependencies(test_nav_track_lookup marine_survey_index)
 
+  # The CUBE lab's angle-aware per-sounding uncertainty (sounding_uncertainty.hpp,
+  # #49) — header-only, no deps: the propagation formula, its nadir reduction,
+  # and its refusal to answer for missing beam geometry.
+  ament_add_gtest(test_sounding_uncertainty test/test_sounding_uncertainty.cpp)
+  target_include_directories(test_sounding_uncertainty PRIVATE src)
+
   # Position -> time over the nav track: the nearest-fix search under the map
   # cursor and its screen-pixel hit radius (nav_track_hit.hpp, #46) —
   # header-only + the query lib's NavPoint.
