@@ -303,6 +303,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_geo_anchor test/test_map_geo_anchor.cpp)
   target_include_directories(test_map_geo_anchor PRIVATE src)
 
+  # The geographic cursor readout's rules (hover_geo_readout.hpp, #47) —
+  # header-only and Qt-free: per-pane conversion through a frame's anchor,
+  # the attributed one-line format, and which pane owns the readout.
+  ament_add_gtest(test_hover_geo_readout test/test_hover_geo_readout.cpp)
+  target_include_directories(test_hover_geo_readout PRIVATE src)
+
   # Robust basemap contrast (basemap_contrast.hpp, #24) — header-only. Pins
   # the desk-verify bug: store outlier cells must not own the colour scale.
   ament_add_gtest(test_basemap_contrast test/test_basemap_contrast.cpp)
