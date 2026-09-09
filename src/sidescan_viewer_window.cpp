@@ -340,11 +340,20 @@ marine_sonar_widgets::WaterfallRow build_mbes_backscatter_row(const MbesWindowPi
 // Build the coverage render for a distance window on a worker thread (readWindow +
 // paint + rasterize + waterfall). Touches no widgets, so it is safe off the UI
 // thread; the caller applies the result on the UI thread.
+// `cancel` (optional) is polled between the three bag re-reads (each of which
+// polls it per message itself) and per ping while the coverage is painted —
+// the units a window render is made of (#44). A cancelled render is marked
+// `cancelled` and delivers nothing: a window painted from half its pings is
+// not a coarser view, it is a wrong one.
 SidescanRenderResult render_window(
   std::shared_ptr<SidescanBagSession> session, double head, double total,
   double win_lo, double win_hi, int max_pings, double res, int palette_index,
-  std::optional<std::pair<float, float>> manual_range = std::nullopt)
+  std::optional<std::pair<float, float>> manual_range = std::nullopt,
+  const std::shared_ptr<std::atomic<bool>> & cancel = {})
 {
+  const auto stop = [&cancel]() {
+      return cancel && cancel->load(std::memory_order_relaxed);
+    };
   SidescanRenderResult out;
   out.res_m = res;
   out.head_m = head;
@@ -353,7 +362,13 @@ SidescanRenderResult render_window(
   out.win_hi = win_hi;
   out.ok = true;
 
-  const std::vector<WindowPing> paint = session->readWindow(win_lo, win_hi, max_pings);
+  const std::vector<WindowPing> paint =
+    session->readWindow(win_lo, win_hi, max_pings, false, cancel);
+  if (stop()) {
+    out.ok = false;
+    out.cancelled = true;
+    return out;
+  }
   out.npings = paint.size();
   if (paint.empty()) {return out;}  // ok, but a null image -> canvas clears
 
@@ -385,7 +400,13 @@ SidescanRenderResult render_window(
 
   // MBES soundings for the same window (world frame), flattened for the 3D view.
   // Shares the distance window so the cloud stays in lockstep with the scrub.
-  const std::vector<MbesWindowPing> mwin = session->readMbesWindow(win_lo, win_hi, max_pings);
+  const std::vector<MbesWindowPing> mwin =
+    session->readMbesWindow(win_lo, win_hi, max_pings, cancel);
+  if (stop()) {
+    out.ok = false;
+    out.cancelled = true;
+    return out;
+  }
   std::size_t n_soundings = 0;
   for (const auto & mp : mwin) {
     n_soundings += mp.world_soundings.size();
@@ -401,7 +422,12 @@ SidescanRenderResult render_window(
   }
 
   // Down-channel water-column pings (raw) for the echogram, same window.
-  out.down_images = session->readDownImages(win_lo, win_hi, max_pings);
+  out.down_images = session->readDownImages(win_lo, win_hi, max_pings, cancel);
+  if (stop()) {
+    out.ok = false;
+    out.cancelled = true;
+    return out;
+  }
 
   // Boat pose at the scrub head, for the 3D context arrow: the ping nearest `head`
   // gives the boat x/y/heading; place the arrow at the top of the cloud (near the
@@ -461,6 +487,11 @@ SidescanRenderResult render_window(
 
   CoverageRaster raster(min_x, min_y, res, w, h);
   for (const auto & p : paint) {
+    if (stop()) {
+      out.ok = false;
+      out.cancelled = true;
+      return out;
+    }
     paint_ping(raster, p.geometry, p.amplitudes);
   }
 
@@ -2859,6 +2890,9 @@ void SidescanViewerWindow::updateScrubStep()
 void SidescanViewerWindow::requestRender()
 {
   if (!session_) {return;}
+  // Closing (#44): never launch a fresh render into the teardown — the
+  // destructor would then wait for a job that started after the cancel.
+  if (worker_cancel_->load(std::memory_order_relaxed)) {return;}
   // Coalesce: if a render is already running, flag a pending one and re-launch on
   // finish with the latest scrub position (so a drag never queues a backlog).
   if (rendering_) {
@@ -2882,15 +2916,18 @@ void SidescanViewerWindow::requestRender()
     manual_range = {static_cast<float>(ss_range_.lo->value()),
       static_cast<float>(ss_range_.hi->value())};
   }
+  const auto cancel = worker_cancel_;
   render_watcher_.setFuture(QtConcurrent::run(
-      [session, head, total, win, max_pings, res, palette, epoch, manual_range]() {
+      [session, head, total, win, max_pings, res, palette, epoch, manual_range,
+      cancel]() {
         SidescanRenderResult r;
         try {
           r = render_window(
             session, head, total, win.lo, win.hi, max_pings, res, palette,
-            manual_range);
+            manual_range, cancel);
         } catch (const std::exception &) {
           r.ok = false;   // e.g. the bag became unreadable mid-session
+          r.cancelled = cancel->load(std::memory_order_relaxed);
         }
         r.epoch = epoch;
         return r;
@@ -2901,6 +2938,12 @@ void SidescanViewerWindow::onRenderFinished()
 {
   rendering_ = false;
   const SidescanRenderResult r = render_watcher_.result();
+  if (r.cancelled) {
+    // The window is closing (#44): publish nothing, and above all do not
+    // relaunch a pending render into widgets that are going away.
+    render_pending_ = false;
+    return;
+  }
 
   // Drop a render computed for a previous bag (epoch mismatch) so it never flashes
   // stale coverage or leaves the waterfall index on the wrong geometry.
