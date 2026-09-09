@@ -74,6 +74,7 @@ namespace marine_perception_tools
 struct SidescanRenderResult
 {
   bool ok = false;
+  bool cancelled = false;   // the window is closing (#44): do not publish
   uint64_t epoch = 0;    // session epoch this render was computed for (stale-drop)
   QImage image;          // georeferenced coverage (map frame)
   // Uncorrected slant-range sidescan rows (shared-lib WaterfallWidget) for the same
@@ -108,7 +109,7 @@ struct SidescanRenderResult
 struct CloudLoadTicket
 {
   std::uint64_t generation = 0;
-  CloudLoadOutcome outcome;
+  CloudLoadOutcome outcome;   // outcome.cancelled marks a teardown-abandoned load
 };
 
 // A box-CUBE run in flight (#27): the gathered box soundings (reference
@@ -120,6 +121,7 @@ struct CubeLabTicket
   CubeSurface surface;
   QStringList notes;
   qint64 elapsed_ms = 0;
+  bool cancelled = false;   // the window is closing (#44): do not publish
   // Reference frame identity from the cloud load (#29): the sidescan drape
   // reprojects its pings into this frame.
   std::string ref_bag;
@@ -138,6 +140,7 @@ struct DrapeTicket
   CubeSurface terrain;
   QStringList notes;
   qint64 elapsed_ms = 0;
+  bool cancelled = false;   // the window is closing (#44): do not publish
 };
 
 
@@ -180,6 +183,10 @@ public:
 protected:
   // Persist window geometry + splitter sizes on close (QSettings).
   void closeEvent(QCloseEvent * event) override;
+
+  // Set every worker cancel token (#44). Called from closeEvent (so the jobs
+  // have the whole teardown to notice) and again from the destructor.
+  void cancelWorkers();
 
   // Route scrub keys (Left/Right/PageUp/PageDown/Home/End) to the scrub slider from
   // anywhere in the window, so scrubbing works without the slider holding focus —
@@ -334,6 +341,15 @@ private:
   // Cancel token for the CURRENT scan; superseding an open sets it so the
   // abandoned worker stops streaming the bag instead of running to the end.
   std::shared_ptr<std::atomic<bool>> scan_cancel_;
+  // Teardown cancel token for the four workers that had none (#44): the
+  // sidescan render, the cloud-pass load, the CUBE run and the drape. Set in
+  // closeEvent — the whole teardown before the destructor's waits, so the
+  // operator gets their prompt back instead of watching a dead window — and
+  // again in the destructor as the backstop for a window destroyed without a
+  // close. Never reset: it means "this window is going away", not "this job
+  // is superseded" (supersede is the generation counters' job).
+  std::shared_ptr<std::atomic<bool>> worker_cancel_ =
+    std::make_shared<std::atomic<bool>>(false);
   // Session handoff worker -> UI (the constructor runs in the worker so the
   // UI never touches a multi-GB bag synchronously): the worker parks the
   // session + its epoch here, then emits sessionOpened.

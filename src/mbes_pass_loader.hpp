@@ -23,7 +23,9 @@
 
 #include <QStringList>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -59,6 +61,10 @@ struct CloudLoadOutcome
   std::string ref_frame;
   bool ref_has_geo = false;
   geometry_msgs::msg::TransformStamped ref_earth_from_world;
+  // Set when the load was cancelled mid-flight (#44): whatever it had
+  // gathered is dropped, because a partial multi-pass load is indistinguish-
+  // able from a complete one once it reaches the legend.
+  bool cancelled = false;
 };
 
 // Optional clip region: keep only soundings within `margin_m` horizontally
@@ -84,9 +90,15 @@ struct GeoClip
 
 // Load every pass's soundings into the first loadable pass's world frame.
 // Never throws: a failing bag costs only its own pass (skipped + noted).
+//
+// `cancel` (optional) is polled between passes AND handed to read_mbes_window,
+// which polls it per bag message (#44) — one pass over one bag is minutes of
+// reading, so a between-passes check alone would bound nothing. A cancelled
+// load returns `cancelled` with no clouds.
 CloudLoadOutcome load_cloud_passes(
   const std::vector<CloudPassInfo> & passes,
-  const std::optional<GeoClip> & clip = std::nullopt);
+  const std::optional<GeoClip> & clip = std::nullopt,
+  const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
 }  // namespace marine_perception_tools
 

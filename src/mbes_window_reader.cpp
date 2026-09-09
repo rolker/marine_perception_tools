@@ -15,8 +15,10 @@
 #include "mbes_window_reader.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -58,10 +60,22 @@ constexpr std::int64_t kPadNs = 3000000000LL;  // 3 s
 
 MbesWindowResult read_mbes_window(
   const std::string & bag_uri, std::int64_t t_start_ns, std::int64_t t_end_ns,
-  const MbesWindowOptions & options)
+  const MbesWindowOptions & options,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
 {
   MbesWindowResult result;
   result.world_frame = options.world_frame;
+  const auto stop = [&cancel]() {
+      return cancel && cancel->load(std::memory_order_relaxed);
+    };
+  // A cancelled read hands back nothing: the partial window it had gathered
+  // is not a smaller window, it is an unfinished one (#44).
+  const auto abandon = [&result]() {
+      result.world_soundings.clear();
+      result.used_pings = 0;
+      result.cancelled = true;
+      return result;
+    };
   if (t_end_ns < t_start_ns) {
     std::swap(t_start_ns, t_end_ns);   // reversed window: the readMbesWindow precedent
   }
@@ -82,8 +96,11 @@ MbesWindowResult read_mbes_window(
     (t_end_ns - t_start_ns) + 2 * kPadNs + 60000000000LL);
   tf2::BufferCore tf_buffer(cache_span);
   const auto feed_tf =
-    [&tf_buffer, t_end_ns](rosbag2_cpp::Reader & reader, bool is_static) {
+    [&tf_buffer, t_end_ns, &stop](rosbag2_cpp::Reader & reader, bool is_static) {
       while (reader.has_next()) {
+        if (stop()) {
+          return;   // cancelled: stop consuming the bag between messages
+        }
         auto bag_msg = reader.read_next();
         if (bag_msg->recv_timestamp > t_end_ns + kPadNs) {
           break;
@@ -106,6 +123,7 @@ MbesWindowResult read_mbes_window(
     reader.set_filter(filter);
     feed_tf(reader, true);
   }
+  if (stop()) {return abandon();}
   {
     // 15 s of pre-window /tf history: enough to bracket the earliest window
     // stamp for every continuously-published pair, with margin over kPadNs.
@@ -122,6 +140,7 @@ MbesWindowResult read_mbes_window(
     }
     feed_tf(reader, false);
   }
+  if (stop()) {return abandon();}
 
   // Geo anchor for cross-bag combination: earth<-world at the window midpoint.
   {
@@ -151,6 +170,9 @@ MbesWindowResult read_mbes_window(
     // seek unsupported -> sequential scan
   }
   while (reader.has_next()) {
+    if (stop()) {
+      return abandon();   // cancelled: per message, not per bag
+    }
     auto bag_msg = reader.read_next();
     if (bag_msg->recv_timestamp > t_end_ns + kPadNs) {
       break;

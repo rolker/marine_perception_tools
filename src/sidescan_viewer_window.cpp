@@ -2194,7 +2194,9 @@ SidescanViewerWindow::~SidescanViewerWindow()
   // index/render to finish before the members tear down (~QObject then discards any
   // already-queued indexProgress events targeted at this window). Cancelling the
   // live scan first turns a minutes-long wait into milliseconds.
-  if (scan_cancel_) {scan_cancel_->store(true);}
+  // closeEvent already cancelled both tokens on the normal path (#44); this is
+  // the backstop for a window destroyed without ever being closed.
+  cancelWorkers();
   if (index_watcher_.isRunning()) {index_watcher_.waitForFinished();}
   for (auto & f : superseded_index_futures_) {
     f.waitForFinished();   // orphaned indexers also captured `this`
@@ -2207,8 +2209,26 @@ SidescanViewerWindow::~SidescanViewerWindow()
   // its own worker) runs during QObject teardown after this body.
 }
 
+void SidescanViewerWindow::cancelWorkers()
+{
+  // One token per meaning: `scan_cancel_` is the bag index scan's (it doubles
+  // as the supersede signal), `worker_cancel_` is the render/cloud/CUBE/drape
+  // teardown token. Both are only ever set here, never cleared.
+  if (scan_cancel_) {scan_cancel_->store(true);}
+  worker_cancel_->store(true);
+  // basemap_lod_ carries its own cancel_, set by its destructor during the
+  // QObject teardown that follows ~SidescanViewerWindow's body.
+}
+
 void SidescanViewerWindow::closeEvent(QCloseEvent * event)
 {
+  // Tell the background workers to stop FIRST (#44): the destructor waits on
+  // them, and by the time it runs the window is already off the screen — the
+  // operator would be staring at a vanished application while a CUBE run or a
+  // multi-bag cloud load finished work nobody wants. Cancelling here gives
+  // them the whole teardown to notice.
+  cancelWorkers();
+
   // Persist the window geometry + the resizable-pane splitter sizes so the
   // operator's arrangement survives a restart.
   QSettings settings("UNH-CCOM", "survey_explorer");
@@ -3307,10 +3327,11 @@ void SidescanViewerWindow::onTileSelectionChanged()
     QString()));
   const auto gen = cloud_gen_;
   const auto snapshot = std::move(cloud_passes);   // worker owns its own copy
-  cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen, clip]() {
+  const auto cancel = worker_cancel_;
+  cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen, clip, cancel]() {
       CloudLoadTicket ticket;
       ticket.generation = gen;
-      ticket.outcome = load_cloud_passes(snapshot, clip);
+      ticket.outcome = load_cloud_passes(snapshot, clip, cancel);
       return ticket;
     }));
 }
@@ -3502,6 +3523,9 @@ void SidescanViewerWindow::onCloudPassesLoaded()
   // Non-const: the per-pass clouds are MOVED out below (a const ticket
   // silently degraded the move to a full copy — review round-2 finding).
   CloudLoadTicket ticket = cloud_watcher_.result();
+  if (ticket.outcome.cancelled) {
+    return;   // the window is closing (#44): the widgets below are going away
+  }
   if (ticket.generation != cloud_gen_) {
     return;   // a newer selection (or a cleared one) superseded this load
   }
