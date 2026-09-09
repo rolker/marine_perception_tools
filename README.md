@@ -288,6 +288,25 @@ from the loaded cloud's — the surface is a grid in its own frame and would be
 placed by luck over soundings in another — where the run falls back to showing
 its own soundings and says so in the status line.
 
+The **cell size** runs from 0.001 m to 50 m at three decimals, stepping by a
+centimetre. That floor is just the finest spacing the box can display — it is
+not a judgement about what is worth gridding, and it is not there to bound
+memory: how large a grid a run may allocate is the separate **max grid nodes**
+limit in *params…*, which asks (with the real node count and a one-shot
+override) rather than refusing. Cells far below the beam footprint — a
+2-degree beam in 5 m of water footprints about 0.17 m at nadir — resolve the
+sounding pattern rather than the seafloor, which is worth knowing and is the
+operator's call to make.
+
+A cell size below the floor is corrected to the nearest value the box accepts
+**and reported in the status line** (#42). Qt's own behaviour is to restore
+the value that was in the box *before* the edit, on focus-out — which is the
+moment you click **Run CUBE** — so a cell size typed below the old 0.02 m
+floor ran at whatever had been there before, with nothing on screen saying the
+entry had been dropped. Only the floors do this: text above a maximum cannot
+grow into anything valid, so Qt refuses those keystrokes and the digit
+visibly never appears.
+
 Bag opens are accelerated by a **bag-index cache** (`--cache-dir`, default
 `$XDG_CACHE_HOME/survey_explorer`): the whole-bag metadata scan runs once per
 bag and is then a file read, keyed by the bag's size+mtime (bags are never

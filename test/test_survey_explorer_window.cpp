@@ -22,6 +22,7 @@
 
 #include <gtest/gtest.h>
 
+#include <QAbstractSpinBox>
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -32,6 +33,8 @@
 #include <QImage>
 #include <QLabel>
 #include <QElapsedTimer>
+#include <QFocusEvent>
+#include <QKeyEvent>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPushButton>
@@ -2114,6 +2117,148 @@ TEST_F(ExplorerWindowFixture, ALateLeaveDoesNotBlankThePaneTheCursorMovedTo)
   QApplication::sendEvent(canvas, &leave);   // the map's leave, arriving late
 
   EXPECT_TRUE(geo->text().startsWith("Sidescan  ")) << geo->text().toStdString();
+}
+
+// --- the cell-size entry the operator actually types (#42) -------------------
+
+// Type into a spin box the way an operator does: take the whole entry, then
+// key the characters in one at a time as real key events, so the widget's own
+// validator sees every keystroke. selectAll() (the widget's own slot, what a
+// triple-click does) selects the numeric part WITHOUT the suffix - selecting
+// the suffix too would make the first keystroke invalid and be swallowed.
+void typeValue(QAbstractSpinBox & spin, const QString & text)
+{
+  spin.setFocus();
+  spin.selectAll();
+  for (const QChar & c : text) {
+    const int key = (c == QChar('.')) ?
+      static_cast<int>(Qt::Key_Period) :
+      static_cast<int>(Qt::Key_0) + (c.unicode() - u'0');
+    QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier, QString(c));
+    QApplication::sendEvent(&spin, &press);
+  }
+}
+
+// The commit that used to eat the entry: focus leaving the spin box, which is
+// what clicking Run CUBE does.
+void sendFocusOut(QWidget & widget)
+{
+  QFocusEvent out(QEvent::FocusOut, Qt::MouseFocusReason);
+  QApplication::sendEvent(&widget, &out);
+}
+
+// The operator's exact case (#42): 0.01 m cells. The floor was 0.02, so Qt
+// read "0.01" as not-yet-valid and put the pre-edit 0.1 back on focus-out -
+// i.e. on the click of Run CUBE - and the run used 0.1 with nothing said.
+// The entry must now survive the focus change AND be the cell size the run
+// reads, which the status line quotes back before any loading starts.
+TEST_F(ExplorerWindowFixture, ACentimetreCellSurvivesTheFocusChangeIntoTheRun)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  window.resize(1200, 800);
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * cell = window.findChild<QDoubleSpinBox *>("cube_cell_spin");
+  auto * run = window.findChild<QPushButton *>("cube_run_btn");
+  auto * status = window.findChild<QLabel *>("status");
+  ASSERT_NE(cell, nullptr);
+  ASSERT_NE(run, nullptr);
+  ASSERT_NE(status, nullptr);
+  EXPECT_DOUBLE_EQ(cell->value(), 0.1) << "the box opens on the 0.1 m default";
+
+  // A small region on a tightly fitted map: metres across, so 0.01 m cells
+  // stay far under the max-nodes pre-flight (which would open a modal).
+  const QPoint centre = geoPixel(*canvas, kLat, kLon);
+  leftDrag(*canvas, centre - QPoint(20, 20), centre + QPoint(20, 20));
+  QCoreApplication::processEvents();
+  ASSERT_TRUE(run->isEnabled()) << "the region did not arm the CUBE run";
+
+  typeValue(*cell, "0.01");
+  sendFocusOut(*cell);
+  EXPECT_DOUBLE_EQ(cell->value(), 0.01)
+    << "the typed cell size did not survive the focus change";
+  EXPECT_FALSE(status->text().contains("outside"))
+    << "a valid entry was reported as out of range: " << status->text().toStdString();
+
+  // And the run reads that number, not the pre-edit one: the status line it
+  // sets before any loading names the cell size it is about to estimate at.
+  run->click();
+  EXPECT_TRUE(status->text().contains("at 0.01 m"))
+    << "the run did not take the typed cell size: " << status->text().toStdString();
+}
+
+// Widening the range only moves where the clamp happens, so the clamp itself
+// has to be audible: an entry Qt will not accept is corrected to the nearest
+// valid value AND said out loud in the status line - never a modal, and never
+// the silent substitution that made the original report so hard to place.
+TEST_F(ExplorerWindowFixture, AnOutOfRangeCellSizeIsReportedNotSilentlySwapped)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  window.resize(1200, 800);
+  window.openSurveyIndex(db_path_, std::string(::testing::TempDir()));
+  window.show();
+  QCoreApplication::processEvents();
+  auto * cell = window.findChild<QDoubleSpinBox *>("cube_cell_spin");
+  auto * status = window.findChild<QLabel *>("status");
+  ASSERT_NE(cell, nullptr);
+  ASSERT_NE(status, nullptr);
+
+  // Zero: "as fine as it goes", and below the floor whatever the floor is.
+  typeValue(*cell, "0");
+  sendFocusOut(*cell);
+  EXPECT_DOUBLE_EQ(cell->value(), cell->minimum())
+    << "an out-of-range entry fell back to the stale pre-edit value";
+  const QString said = status->text();
+  EXPECT_TRUE(said.contains("outside")) << said.toStdString();
+  EXPECT_TRUE(said.contains(QString::number(cell->minimum()))) << said.toStdString();
+
+  // An entry the range does accept says nothing at all - the notice is for
+  // corrections, not for every commit.
+  status->setText("quiet");
+  typeValue(*cell, "0.25");
+  sendFocusOut(*cell);
+  EXPECT_DOUBLE_EQ(cell->value(), 0.25);
+  EXPECT_EQ(status->text(), "quiet");
+
+  // Only the floor needs the notice. Text ABOVE the maximum cannot grow into
+  // anything valid, so Qt refuses the keystroke: typing 60 into a box that
+  // stops at 50 leaves 6 - the digit that would have made it 60 visibly never
+  // arrives, and no value is silently substituted for another.
+  status->setText("quiet");
+  typeValue(*cell, "60");
+  sendFocusOut(*cell);
+  EXPECT_DOUBLE_EQ(cell->value(), 6.0);
+  EXPECT_EQ(status->text(), "quiet");
+}
+
+// The range itself: 0.01 m is enterable, and so is the millimetre floor that
+// three decimals makes displayable. The floor exists because the pre-flight
+// divides the box by the cell size, not to bound the allocation - the
+// max-nodes guard in the run does that, and offers a one-shot override.
+TEST_F(ExplorerWindowFixture, TheCellSizeRangeReachesMillimetres)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  auto * cell = window.findChild<QDoubleSpinBox *>("cube_cell_spin");
+  ASSERT_NE(cell, nullptr);
+  EXPECT_EQ(cell->decimals(), 3) << "sub-centimetre cells must be typeable";
+  EXPECT_DOUBLE_EQ(cell->minimum(), 0.001);
+  EXPECT_DOUBLE_EQ(cell->maximum(), 50.0);
+  // One step must be usable at the scale the floor now allows: a 0.05 m step
+  // from 0.01 m is five times the value.
+  EXPECT_LE(cell->singleStep(), 0.01);
+  EXPECT_GT(cell->singleStep(), 0.0);
 }
 
 }  // namespace

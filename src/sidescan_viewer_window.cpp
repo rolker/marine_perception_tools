@@ -88,6 +88,7 @@
 #include "sidescan_drape_loader.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_contacts/contact_store.hpp"
+#include "clamped_entry_spin.hpp"
 #include "coastline_data.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
@@ -681,14 +682,40 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   // CUBE-lab controls (#27) in their own row under the cloud pane's header:
   // cell size, IHO order, the explicit Run trigger (CUBE is expensive — no
   // auto-runs), and the surface's display controls.
-  cube_cell_spin_ = new QDoubleSpinBox(this);
+  // The floor is one display unit, not a judgement about what is worth
+  // gridding (#42). It used to be 0.02 m, which silently swallowed the 0.01 m
+  // the operator was deliberately testing with: Qt reverts out-of-range text
+  // to the last valid value on focus-out — i.e. on the click of Run CUBE.
+  // Nothing here needs to protect memory; the max-nodes pre-flight in
+  // runCubeLab() bounds the allocation and offers a one-shot override. What is
+  // left to protect is the arithmetic, which divides the box by the cell size,
+  // so the floor is simply the smallest number the box can display (1 mm at
+  // three decimals) — two orders of magnitude below any real beam footprint,
+  // and self-consistent in that every enterable value is also a showable one.
+  auto * cube_cell_spin = new ClampedEntryDoubleSpinBox(this);
+  cube_cell_spin_ = cube_cell_spin;
   cube_cell_spin_->setObjectName("cube_cell_spin");
-  cube_cell_spin_->setRange(0.02, 50.0);
-  cube_cell_spin_->setDecimals(2);
-  cube_cell_spin_->setSingleStep(0.05);
+  cube_cell_spin_->setDecimals(3);
+  cube_cell_spin_->setRange(0.001, 50.0);
+  cube_cell_spin_->setSingleStep(0.01);   // a centimetre: usable at 0.01 m
   cube_cell_spin_->setValue(0.1);
   cube_cell_spin_->setSuffix(" m");
-  cube_cell_spin_->setToolTip("CUBE node spacing");
+  cube_cell_spin_->setToolTip(
+    "CUBE node spacing, 0.001 - 50 m. Finer is not automatically better: a "
+    "2-degree beam in 5 m of water has a footprint of about 0.17 m at nadir, "
+    "so cells well below that are resolving the sounding pattern rather than "
+    "the seafloor. How big a grid a run may allocate is the separate "
+    "max-nodes limit in params....");
+  cube_cell_spin->setClampNotice(
+    [this](double typed, double applied) {
+      status_->setText(
+        QString(
+          "Cell size %1 m is outside %2 - %3 m - using %4 m.")
+        .arg(typed, 0, 'g', 4)
+        .arg(cube_cell_spin_->minimum())
+        .arg(cube_cell_spin_->maximum())
+        .arg(applied));
+    });
   cube_order_combo_ = new QComboBox(this);
   cube_order_combo_->setObjectName("cube_order_combo");
   for (const auto & order : iho_preset_names()) {
