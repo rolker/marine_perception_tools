@@ -229,6 +229,14 @@ private:
 
   void refreshContacts();   // push the store to the map overlay + the list
 
+  // Load the vendored world coastline into the map's bottom layer (#41), once
+  // per session and never over the network — the operator station and the
+  // boat have no route to one. A missing or unreadable dataset leaves the map
+  // without a coastline; it is a packaging fault, not an operator's problem,
+  // so it warns and carries on.
+  void loadCoastlineLayer();
+  bool coastline_loaded_ = false;
+
   // Populate the basemap layer combo from the store layers under `root`
   // (subdirectories holding GGGS *.tif tiles), selecting `initial_dir`.
   void discoverBasemapLayers(const std::string & root, const std::string & initial_dir);
@@ -388,6 +396,7 @@ private:
   QComboBox * basemap_cmap_ = nullptr;
   QCheckBox * show_track_check_ = nullptr;
   QCheckBox * show_grid_check_ = nullptr;
+  QCheckBox * show_coast_check_ = nullptr;
   QCheckBox * utc_check_ = nullptr;
 
   // Per-pane colour-range controls (#26): auto (default) or a manual lo/hi

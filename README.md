@@ -137,6 +137,13 @@ One window, two modes that compose:
   the 3D cloud (one golden-angle colour per pass, legend beside the pane,
   cross-bag reprojection through the `earth` anchor), and the **time bar**
   under the scrub controls fills with the selection's passes.
+  Underneath all of it is a built-in **world coastline** so a collection-wide
+  view is navigable at all: Natural Earth 1:50m, public domain, vendored into
+  the package (`data/coastline/`) and never fetched — the build and the
+  application touch the network nowhere. It is **orientation, not
+  navigation**: generalised to the kilometre, drawn under every real layer,
+  and faded out entirely before survey zoom, where the store imagery and the
+  index carry the answer. Never navigate by it.
   Both modes together (`--index` + a bag argument) place the open bag's
   coverage on the survey map through its earth anchor.
 
@@ -155,7 +162,8 @@ More explorer controls: the Map pane header carries a **basemap layer
 picker** (bathymetry / backscatter / sidescan store layers discovered next
 to the index) and a **basemap colormap** combo — contrast is
 percentile-scaled per layer so residual store outliers cannot blank the
-map — plus **track**/**grid** declutter toggles. The cloud legend's rows
+map — plus **track**/**grid**/**coast** declutter toggles (the coast
+toggle's state persists across restarts). The cloud legend's rows
 have **checkboxes** to show/hide individual passes, and **clip to
 contact** (+ margin) restricts a multi-pass load to the selected contact's
 neighbourhood. Contacts can be deleted from the list's context menu.

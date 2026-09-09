@@ -11,6 +11,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(grid_map_core REQUIRED)
@@ -162,8 +163,8 @@ target_link_libraries(survey_explorer
   Qt${QT_VERSION_MAJOR}::Gui
   Qt${QT_VERSION_MAJOR}::OpenGL)
 ament_target_dependencies(survey_explorer
-  cube_bathymetry marine_autonomy marine_colormap marine_sonar_widgets
-  marine_tiled_raster_store)
+  ament_index_cpp cube_bathymetry marine_autonomy marine_colormap
+  marine_sonar_widgets marine_tiled_raster_store)
 target_include_directories(survey_explorer SYSTEM PRIVATE
   ${CUBE_BATHYMETRY_INCLUDE_ROOT})
 
@@ -358,8 +359,8 @@ if(BUILD_TESTING)
     src/cube_export.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
   ament_target_dependencies(test_survey_explorer_window
-    cube_bathymetry marine_autonomy marine_colormap marine_sonar_widgets
-    marine_tiled_raster_store)
+    ament_index_cpp cube_bathymetry marine_autonomy marine_colormap
+    marine_sonar_widgets marine_tiled_raster_store)
   target_include_directories(test_survey_explorer_window SYSTEM PRIVATE
     ${CUBE_BATHYMETRY_INCLUDE_ROOT})
   target_link_libraries(test_survey_explorer_window

@@ -103,6 +103,32 @@ Auto-loading when only one pass is present is deliberately rejected: "sometimes
 it loads" is harder to learn than "it never loads until you ask", and it makes
 zoom occasionally destructive of pane state.
 
+### Orientation is not navigation
+
+A collection-wide view is a few specks of store imagery on black: the operator
+cannot tell one survey area from another without already knowing where they
+are. Every background source `camp` offers is a network service, and the
+explorer runs on the operator station and in the field, where none of them are
+reachable. So the coastline is **compiled into the application** — public-domain
+Natural Earth 1:50m, vendored under `data/coastline/`, never fetched at build
+or run time.
+
+What that buys is orientation, and nothing else. A generalised world coastline
+is wrong by hundreds of metres to a couple of kilometres at survey scale, and
+this is a tool whose other layers are trusted to the centimetre. The rule that
+keeps the two from being confused is a **scale rule, not a style choice**: the
+layer draws beneath every real layer, and its opacity falls to zero before the
+scales at which the store basemap and the index answer the question
+(`coastlineFadeAlpha`, `src/coastline_data.hpp`). Anything that would let it
+read as authoritative at survey zoom is a defect. The toggle beside track and
+grid is a declutter control, not the mechanism — an operator must not have to
+switch it off to be safe.
+
+The same reasoning is why a network chart layer is a separate question and not
+a variation on this one: a chart that is only sometimes reachable cannot carry
+orientation, and one that is reachable is authoritative enough to be drawn on
+its own terms.
+
 ### One window, docked panes
 
 Separate top-level windows were scaffolding. The end state is a single main

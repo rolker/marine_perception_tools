@@ -25,6 +25,7 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QDoubleSpinBox>
@@ -75,6 +76,7 @@
 #include <utility>
 #include <vector>
 
+#include "ament_index_cpp/get_package_share_directory.hpp"
 #include "basemap_contrast.hpp"
 #include "basemap_lod.hpp"
 #include "cube_bathymetry/angular_response_curve.h"
@@ -82,6 +84,7 @@
 #include "sidescan_drape_loader.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_contacts/contact_store.hpp"
+#include "coastline_data.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
 #include "map_geo_anchor.hpp"
@@ -1698,6 +1701,23 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   show_grid_check_->setToolTip(
     "Show the index-tile grid (selected tiles stay visible)");
   show_grid_check_->setVisible(false);
+  // Built-in world coastline (#41): orientation at collection zoom, where the
+  // store tiles are specks and nothing else says where you are. It fades out
+  // with zoom and is gone before survey scale — see coastline_data.hpp. Its
+  // state persists (written on toggle) because an operator who switched it
+  // off does not want it back at every launch.
+  show_coast_check_ = new QCheckBox("coast", this);
+  show_coast_check_->setToolTip(
+    "Show the built-in world coastline (Natural Earth 1:50m, offline).\n"
+    "Orientation only: generalised to the kilometre, drawn under every data "
+    "layer, and faded out before survey zoom. Never navigate by it.");
+  show_coast_check_->setVisible(false);
+  {
+    const QSettings settings("UNH-CCOM", "survey_explorer");
+    const bool on = settings.value("show_coastline", true).toBool();
+    show_coast_check_->setChecked(on);
+    canvas_->setCoastlineVisible(on);
+  }
   // Times display in the system local zone by default (#26); this switches
   // the time bar, tooltips, status messages and pass labels to UTC — the
   // zone of bag stamps and survey_index_query output.
@@ -1799,7 +1819,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     "Map", canvas_,
     {basemap_layer_, basemap_cmap_,
       map_range_.auto_check, map_range_.lo, map_range_.hi,
-      show_track_check_, show_grid_check_});
+      show_track_check_, show_grid_check_, show_coast_check_});
   outer_split_ = new QSplitter(Qt::Horizontal, this);
   outer_split_->addWidget(contacts_pane);
   outer_split_->addWidget(map_pane);
@@ -1952,6 +1972,11 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, [this](bool on) {canvas_->setNavTrackVisible(on);});
   connect(show_grid_check_, &QCheckBox::toggled,
     this, [this](bool on) {canvas_->setIndexTilesVisible(on);});
+  connect(show_coast_check_, &QCheckBox::toggled, this, [this](bool on) {
+      canvas_->setCoastlineVisible(on);
+      QSettings settings("UNH-CCOM", "survey_explorer");
+      settings.setValue("show_coastline", on);
+    });
   connect(utc_check_, &QCheckBox::toggled, this, [this](bool on) {
       time_bar_->setDisplayUtc(on);
       refreshPassLabels();
@@ -2954,6 +2979,35 @@ void SidescanViewerWindow::openSurveyIndex(
   requestBasemapLoad();
   show_track_check_->setVisible(true);
   show_grid_check_->setVisible(true);
+  show_coast_check_->setVisible(true);
+  loadCoastlineLayer();
+}
+
+void SidescanViewerWindow::loadCoastlineLayer()
+{
+  if (coastline_loaded_) {
+    return;   // the canvas keeps the data across index opens
+  }
+  coastline_loaded_ = true;   // one attempt per session, warning included
+  std::string share;
+  try {
+    share = ament_index_cpp::get_package_share_directory("marine_perception_tools");
+  } catch (const std::exception & e) {
+    qWarning() << "No coastline layer: package share directory not found —" << e.what();
+    return;
+  }
+  const std::string path =
+    (std::filesystem::path(share) / "data" / "coastline" / "ne_50m_coastline.txt").string();
+  // Decimate at ~55 m, half the milli-degree quantisation of the vendored
+  // data: it removes the collinear runs that quantisation leaves behind
+  // without moving the line anywhere the eye could follow.
+  auto coastline = loadCoastline(path, 0.0005);
+  if (coastline.empty()) {
+    qWarning() << "No coastline layer: nothing usable in"
+               << QString::fromStdString(path);
+    return;
+  }
+  canvas_->setCoastline(std::move(coastline));
 }
 
 void SidescanViewerWindow::discoverBasemapLayers(

@@ -23,6 +23,7 @@
 #include <gtest/gtest.h>
 
 #include <QApplication>
+#include <QImage>
 #include <QLabel>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
@@ -37,6 +38,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "coastline_data.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_survey_index/schema.hpp"
 #include "sidescan_canvas.hpp"
@@ -46,6 +48,7 @@
 namespace
 {
 
+using marine_perception_tools::Coastline;
 using marine_perception_tools::SidescanCanvas;
 using marine_perception_tools::SidescanViewerWindow;
 using marine_perception_tools::TimeBarWidget;
@@ -205,6 +208,60 @@ TEST_F(ExplorerWindowFixture, IndexModeSurvivesTileSelectionAndClear)
   EXPECT_EQ(legend->topLevelItemCount(), 0);
   EXPECT_TRUE(timeline->isVisible());
   EXPECT_EQ(timeline->passCount(), 0);
+}
+
+// Render the canvas over a geographic box with the coastline layer on or off.
+// The visibility toggle is applied LAST because it invalidates the static
+// layer cache: a plain zoom change would otherwise be served by the canvas's
+// scaled-blit fast path instead of a real repaint.
+QImage renderOverBox(
+  SidescanCanvas & canvas, double half_span_deg, bool coastline_on)
+{
+  canvas.fitGeo(kLat - half_span_deg, kLon - half_span_deg,
+    kLat + half_span_deg, kLon + half_span_deg);
+  canvas.setCoastlineVisible(coastline_on);
+  return canvas.grab().toImage();
+}
+
+// The scale rule of #41, at the pixel level: the coastline is orientation, so
+// it must be visible when the operator is looking at a region and must
+// contribute NOTHING once they are at survey scale — where it would be wrong
+// by hundreds of metres and would read as chart detail. Toggling it must then
+// change nothing at all on screen.
+TEST_F(ExplorerWindowFixture, CoastlineDrawsAtRegionZoomAndVanishesAtSurveyZoom)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanCanvas canvas;
+  canvas.resize(400, 300);
+  canvas.setGeoOrigin(kLat, kLon);
+
+  // A synthetic coastline through the fixture's position, so it is in view at
+  // both zooms and only the scale rule can remove it.
+  Coastline coastline;
+  marine_perception_tools::CoastlinePolyline line;
+  for (int i = -20; i <= 20; ++i) {
+    line.points.emplace_back(kLat + 0.002 * i, kLon + 0.001 * i * i);
+  }
+  line.south = line.points.front().first;
+  line.north = line.points.back().first;
+  line.west = kLon;
+  line.east = kLon + 0.4;
+  coastline.lines.push_back(line);
+  canvas.setCoastline(coastline);
+
+  // ~1 degree across the 400 px canvas: hundreds of metres per pixel, the
+  // zoom at which nothing else tells the operator where they are.
+  const QImage region_on = renderOverBox(canvas, 0.5, true);
+  const QImage region_off = renderOverBox(canvas, 0.5, false);
+  EXPECT_NE(region_on, region_off) << "the coastline never drew at region zoom";
+
+  // ~200 m across the same canvas: survey scale.
+  const QImage survey_on = renderOverBox(canvas, 0.001, true);
+  const QImage survey_off = renderOverBox(canvas, 0.001, false);
+  EXPECT_EQ(survey_on, survey_off) << "the coastline still draws at survey zoom";
 }
 
 }  // namespace
