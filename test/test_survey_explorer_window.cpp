@@ -1905,4 +1905,93 @@ TEST_F(ExplorerWindowFixture, EverySpatialPaneReadsOutItsOwnFramesPosition)
   reads_position("Water Column");
 }
 
+// A displayed position must always be a live one: leaving a pane clears the
+// readout rather than freezing the last value there indefinitely.
+TEST_F(ExplorerWindowFixture, LeavingAPaneClearsTheReadout)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  SidescanCanvas * canvas = prepareHoverWindow(window, db_path_);
+  ASSERT_NE(canvas, nullptr);
+  auto * geo = window.findChild<QLabel *>("hover_geo");
+  ASSERT_NE(geo, nullptr);
+
+  hoverAt(*canvas, geoPixel(*canvas, kLat, kLon));
+  ASSERT_FALSE(geo->text().isEmpty());
+
+  QEvent leave(QEvent::Leave);
+  QApplication::sendEvent(canvas, &leave);
+  EXPECT_TRUE(geo->text().isEmpty()) << geo->text().toStdString();
+
+  // And it comes back on the next move: leaving clears the readout, it does
+  // not switch it off.
+  hoverAt(*canvas, geoPixel(*canvas, kLat, kLon));
+  EXPECT_FALSE(geo->text().isEmpty());
+}
+
+// Qt sends the old widget's Leave as the pointer enters the new one, so the
+// leave can arrive after the pane the cursor moved TO has already reported.
+// It must not blank that live position.
+TEST_F(ExplorerWindowFixture, ALateLeaveDoesNotBlankThePaneTheCursorMovedTo)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  const std::string bag_uri = std::string(::testing::TempDir()) + "/explorer_leave_bag";
+  struct BagCleanup
+  {
+    std::string uri;
+    ~BagCleanup() {std::filesystem::remove_all(uri);}
+  } cleanup{bag_uri};
+  std::filesystem::remove_all(bag_uri);
+  constexpr std::int64_t kT0 = 1700000000000000000LL;
+  constexpr std::int64_t kT1 = kT0 + 20000000000LL;
+  writeSidescanBag(bag_uri, kT0, kT1);
+
+  SidescanViewerWindow window;
+  window.setCacheDir(std::string(::testing::TempDir()) + "/leave_cache");
+  window.resize(1200, 800);
+  window.openBag(bag_uri);
+  window.show();
+
+  auto * geo = window.findChild<QLabel *>("hover_geo");
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  auto * waterfall =
+    window.findChild<marine_sonar_widgets::WaterfallWidget *>("sidescan_waterfall");
+  auto * scrub = window.findChild<QSlider *>();
+  auto * cloud = window.findChild<PointCloudView *>("cloud_view");
+  ASSERT_NE(geo, nullptr);
+  ASSERT_NE(canvas, nullptr);
+  ASSERT_NE(waterfall, nullptr);
+  ASSERT_NE(scrub, nullptr);
+  ASSERT_NE(cloud, nullptr);
+  ASSERT_TRUE(process_until([scrub]() {return scrub->isEnabled() && scrub->maximum() > 1;}))
+    << "the bag never opened";
+  scrub->setValue(scrub->maximum());   // the scrub window trails the head
+  ASSERT_TRUE(process_until([cloud]() {return cloud->pointCount() > 0;}))
+    << "the bag's window never rendered into the panes";
+  ASSERT_TRUE(canvas->mapAnchor().has_value())
+    << "the bag never resolved a geographic anchor";
+  canvas->grab();
+
+  hoverAt(*canvas, QPoint(canvas->width() / 2, canvas->height() / 2));
+  ASSERT_TRUE(geo->text().startsWith("Map  ")) << geo->text().toStdString();
+
+  const QPoint p(waterfall->width() / 2, waterfall->height() / 2);
+  QMouseEvent move(
+    QEvent::MouseMove, QPointF(p), QPointF(waterfall->mapToGlobal(p)),
+    Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(waterfall, &move);
+  ASSERT_TRUE(geo->text().startsWith("Sidescan  ")) << geo->text().toStdString();
+
+  QEvent leave(QEvent::Leave);
+  QApplication::sendEvent(canvas, &leave);   // the map's leave, arriving late
+
+  EXPECT_TRUE(geo->text().startsWith("Sidescan  ")) << geo->text().toStdString();
+}
+
 }  // namespace

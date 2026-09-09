@@ -2593,8 +2593,29 @@ void SidescanViewerWindow::closeEvent(QCloseEvent * event)
   QMainWindow::closeEvent(event);
 }
 
+std::optional<HoverPane> SidescanViewerWindow::paneOf(const QObject * obj) const
+{
+  if (obj == canvas_) {return HoverPane::Map;}
+  if (obj == cloud_) {return HoverPane::Cloud;}
+  if (obj == waterfall_) {return HoverPane::Sidescan;}
+  if (obj == mbes_waterfall_) {return HoverPane::Mbes;}
+  if (obj == echogram_) {return HoverPane::Echogram;}
+  return std::nullopt;
+}
+
 bool SidescanViewerWindow::eventFilter(QObject * obj, QEvent * event)
 {
+  // The cursor left a pane: its position is no longer live, so it goes (#47).
+  // Handled here, on the application filter this window already installs,
+  // rather than in each pane: two of the five widgets come from
+  // marine_sonar_widgets, which emits no leave — and the alternative, a
+  // timer deciding a position had gone stale, would be a guess where Qt has
+  // the fact. Never consumed: leaving is the widgets' event too.
+  if (event->type() == QEvent::Leave) {
+    if (const auto pane = paneOf(obj)) {
+      onPaneLeave(*pane);
+    }
+  }
   if (event->type() == QEvent::KeyPress && scrub_ != nullptr && scrub_->isEnabled()) {
     // Don't steal navigation keys from widgets where they mean something else:
     // editing a spin box / combo / text field, navigating the contact list, or the
