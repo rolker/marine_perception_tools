@@ -176,8 +176,17 @@ More explorer controls: the Map pane header carries a **basemap layer
 picker** (bathymetry / backscatter / sidescan store layers discovered next
 to the index) and a **basemap colormap** combo — contrast is
 percentile-scaled per layer so residual store outliers cannot blank the
-map — plus **track**/**grid**/**coast** declutter toggles (the coast
-toggle's state persists across restarts). The cloud legend's rows
+map — plus **track**/**grid**/**coast**/**metric grid** declutter
+toggles. Two of those are grids and they are different layers: **grid**
+switches the cyan outlines of the ~54 m survey **index tiles** (the things
+you select to load passes), while **metric grid** switches the slate
+Cartesian **measuring grid** — lines at the spacing set by the Grid box in
+the bottom row, labelled in metres from the map origin. The measuring grid
+is a ruler for sizing a target on one bag, so it is **on for a bag and off
+when an index is open**, where the origin is arbitrary and the lines are
+just noise; the Grid spacing box greys out while it is hidden. The
+**coast** and **metric grid** toggles remember their state across restarts
+(**track** and **grid** do not). The cloud legend's rows
 have **checkboxes** to show/hide individual passes, and **clip to
 contact** (+ margin) restricts a multi-pass load to the selected contact's
 neighbourhood. Contacts can be deleted from the list's context menu.
