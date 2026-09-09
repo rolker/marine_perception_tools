@@ -237,6 +237,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_gesture test/test_map_gesture.cpp)
   target_include_directories(test_map_gesture PRIVATE src)
 
+  # The eased middle-click recentre glide (view_animation.hpp, #42) —
+  # header-only.
+  ament_add_gtest(test_view_animation test/test_view_animation.cpp)
+  target_include_directories(test_view_animation PRIVATE src)
+
   # The world-collection layout contract (world_layout.hpp, #40) — header-only.
   ament_add_gtest(test_world_layout test/test_world_layout.cpp)
   target_include_directories(test_world_layout PRIVATE src)
