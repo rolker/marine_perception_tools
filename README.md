@@ -131,7 +131,7 @@ One window, two modes that compose:
   time window once indexing completes.
 - **Explorer mode** — `survey_explorer --index survey_index.db [--stores DIR]`:
   the map becomes the survey index — store-tile basemap (GGGS GeoTIFFs;
-  `--stores` defaults to `<index dir>/bathymetry/survey`), per-bag nav track
+  `--stores` defaults to `<index dir>/depths/processed`), per-bag nav track
   with direction arrows, and the selectable index-tile grid. Left-drag on the
   map draws the **region** (#42), the map's one geographic selection: its exact
   bounds are the processing extent for CUBE, and every `mbes-bathy` pass of the

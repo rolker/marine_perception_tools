@@ -237,6 +237,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_gesture test/test_map_gesture.cpp)
   target_include_directories(test_map_gesture PRIVATE src)
 
+  # The world-collection layout contract (world_layout.hpp, #40) — header-only.
+  ament_add_gtest(test_world_layout test/test_world_layout.cpp)
+  target_include_directories(test_world_layout PRIVATE src)
+
   # Pure tile-selection math (tile_selection.hpp, #24) — header-only.
   ament_add_gtest(test_tile_selection test/test_tile_selection.cpp)
   target_include_directories(test_tile_selection PRIVATE src)
