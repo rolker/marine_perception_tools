@@ -180,6 +180,11 @@ public:
   // empty.
   void openStartupIndex();
 
+  // The CUBE tuning the next Run CUBE will use — including the uncertainty
+  // budget the order dropdown seeds and the params dialog edits (#45).
+  // Read-only: the dropdown and the dialog are the ways it changes.
+  const CubeTuning & cubeTuning() const {return cube_tuning_;}
+
 protected:
   // Persist window geometry + splitter sizes on close (QSettings).
   void closeEvent(QCloseEvent * event) override;

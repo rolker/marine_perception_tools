@@ -24,6 +24,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QImage>
 #include <QLabel>
@@ -56,6 +57,7 @@
 #include "tf2_msgs/msg/tf_message.hpp"
 
 #include "coastline_data.hpp"
+#include "cube_lab.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_survey_index/schema.hpp"
 #include "sidescan_canvas.hpp"
@@ -946,6 +948,61 @@ TEST_F(ExplorerWindowFixture, RegisteredContextMenuEntriesAreOffered)
   EXPECT_TRUE(entry->isEnabled());
   entry->trigger();
   EXPECT_EQ(runs, 1);
+}
+
+// --- CUBE uncertainty budget: presets seed, editing goes custom (#45) --------
+
+// The order dropdown is a preset that seeds the two thresholds the run reads,
+// so the window's tuning must move with it — and "custom" must never seed
+// anything, because it is only ever arrived at by editing a threshold.
+TEST_F(ExplorerWindowFixture, CubeOrderPresetsSeedTheUncertaintyBudget)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  auto * combo = window.findChild<QComboBox *>("cube_order_combo");
+  ASSERT_NE(combo, nullptr);
+
+  // Every preset is offered, plus custom, and nothing else.
+  const auto presets = marine_perception_tools::iho_preset_names();
+  ASSERT_EQ(combo->count(), static_cast<int>(presets.size()) + 1);
+  for (std::size_t i = 0; i < presets.size(); ++i) {
+    EXPECT_EQ(combo->itemText(static_cast<int>(i)).toStdString(), presets[i]);
+  }
+  EXPECT_EQ(
+    combo->itemText(combo->count() - 1).toStdString(),
+    std::string(marine_perception_tools::kCustomIhoOrder));
+  // The order1a/order1b no-op pair is gone: no two entries are one budget.
+  EXPECT_EQ(combo->findText("order1b"), -1);
+
+  // It opens on whichever preset the library's own defaults are.
+  const auto defaults = marine_perception_tools::default_cube_tuning();
+  EXPECT_EQ(
+    combo->currentText().toStdString(),
+    marine_perception_tools::iho_order_for_limits(
+      defaults.iho_fixed, defaults.iho_percent));
+
+  // Picking a preset restores that preset's pair, in the tuning the next run
+  // reads — not just in the label.
+  for (const auto & name : presets) {
+    const auto limits = marine_perception_tools::iho_preset_limits(name);
+    ASSERT_TRUE(limits.has_value());
+    combo->setCurrentText(QString::fromStdString(name));
+    QCoreApplication::processEvents();
+    EXPECT_FLOAT_EQ(window.cubeTuning().iho_fixed, limits->first) << name;
+    EXPECT_FLOAT_EQ(window.cubeTuning().iho_percent, limits->second) << name;
+  }
+
+  // Selecting custom itself seeds nothing: the thresholds stay where the last
+  // preset (or the operator's edit) left them.
+  const float held_fixed = window.cubeTuning().iho_fixed;
+  const float held_percent = window.cubeTuning().iho_percent;
+  combo->setCurrentText(marine_perception_tools::kCustomIhoOrder);
+  QCoreApplication::processEvents();
+  EXPECT_FLOAT_EQ(window.cubeTuning().iho_fixed, held_fixed);
+  EXPECT_FLOAT_EQ(window.cubeTuning().iho_percent, held_percent);
 }
 
 }  // namespace

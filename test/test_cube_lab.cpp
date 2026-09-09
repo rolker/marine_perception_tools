@@ -16,11 +16,13 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cube_lab.hpp"
@@ -138,10 +140,10 @@ TEST(RunCube, AraCurveCorrectsSettledBackscatter)
   }
   marine_perception_tools::CubeTuning tuning;
   tuning.ara_curve_path = csv;
-  const auto surface = run_cube(flatPatch(-10.0f, -27.5f), 0.5, "order1a",
+  const auto surface = run_cube(flatPatch(-10.0f, -27.5f), 0.5,
       tuning);
   // (Baseline patch has NaN beam angles -> correction identity.)
-  const auto corrected = run_cube(soundings, 0.5, "order1a", tuning);
+  const auto corrected = run_cube(soundings, 0.5, tuning);
   std::remove(csv.c_str());
   ASSERT_TRUE(corrected.ok()) << corrected.note;
   EXPECT_NE(corrected.note.find("ARA corrected"), std::string::npos);
@@ -192,7 +194,7 @@ TEST(RunCube, SelfCalCurveFlattensArbitraryGainBehaviour)
     marine_perception_tools::derive_box_curve(soundings, alpha, csv), "");
   marine_perception_tools::CubeTuning tuning;
   tuning.ara_curve_path = csv;
-  const auto surface = run_cube(soundings, 0.5, "order1a", tuning);
+  const auto surface = run_cube(soundings, 0.5, tuning);
   std::remove(csv.c_str());
   ASSERT_TRUE(surface.ok()) << surface.note;
   EXPECT_NE(surface.note.find("tier-2 TL"), std::string::npos);
@@ -214,10 +216,135 @@ TEST(RunCube, MaxNodesIsOperatorOwnedNotHidden)
   // with the limit named, and raising it lets the same input run.
   marine_perception_tools::CubeTuning tight;
   tight.max_nodes = 10;
-  const auto refused = run_cube(flatPatch(), 0.5, "order1a", tight);
+  const auto refused = run_cube(flatPatch(), 0.5, tight);
   EXPECT_FALSE(refused.ok());
   EXPECT_NE(refused.note.find("max-nodes limit"), std::string::npos);
   EXPECT_TRUE(run_cube(flatPatch(), 0.5).ok());   // default limit admits it
+}
+
+// --- the uncertainty budget, set directly (#45) ------------------------------
+
+TEST(IhoBudget, PresetsSeedTheTwoThresholds)
+{
+  using marine_perception_tools::iho_preset_limits;
+  using marine_perception_tools::iho_preset_names;
+  const auto names = iho_preset_names();
+  // Every offered name is a preset, and no two presets carry the same pair:
+  // that is the order1a/order1b collapse, enforced rather than remembered — a
+  // dropdown entry that changes nothing is misleading.
+  ASSERT_FALSE(names.empty());
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    const auto a = iho_preset_limits(names[i]);
+    ASSERT_TRUE(a.has_value()) << names[i];
+    for (std::size_t j = i + 1; j < names.size(); ++j) {
+      const auto b = iho_preset_limits(names[j]);
+      ASSERT_TRUE(b.has_value()) << names[j];
+      EXPECT_FALSE(a->first == b->first && a->second == b->second)
+        << names[i] << " and " << names[j] << " are the same budget";
+    }
+  }
+  // The S-44 values, from cube::Parameters::setIHOLimits.
+  EXPECT_EQ(
+    iho_preset_limits("exclusive"), (std::pair<float, float>{0.15f, 0.0075f}));
+  EXPECT_EQ(
+    iho_preset_limits("special"), (std::pair<float, float>{0.25f, 0.0075f}));
+  EXPECT_EQ(
+    iho_preset_limits("order1a/1b"), (std::pair<float, float>{0.5f, 0.013f}));
+  EXPECT_EQ(
+    iho_preset_limits("order2"), (std::pair<float, float>{1.0f, 0.023f}));
+  // The library's own vocabulary still resolves to the budget it names.
+  EXPECT_EQ(iho_preset_limits("order1a"), iho_preset_limits("order1a/1b"));
+  EXPECT_EQ(iho_preset_limits("order1b"), iho_preset_limits("order1a/1b"));
+  // "custom" is a selection state, never a preset to seed from.
+  EXPECT_FALSE(
+    iho_preset_limits(marine_perception_tools::kCustomIhoOrder).has_value());
+  EXPECT_FALSE(iho_preset_limits("order3").has_value());
+  EXPECT_FALSE(iho_preset_limits("").has_value());
+}
+
+TEST(IhoBudget, EditingEitherThresholdFallsOffThePresets)
+{
+  using marine_perception_tools::iho_order_for_limits;
+  using marine_perception_tools::iho_preset_limits;
+  using marine_perception_tools::iho_preset_names;
+  const std::string custom = marine_perception_tools::kCustomIhoOrder;
+  // A preset's own pair maps back to its name (the round trip the dropdown
+  // rides when the dialog is accepted unchanged).
+  for (const auto & name : iho_preset_names()) {
+    const auto limits = iho_preset_limits(name);
+    ASSERT_TRUE(limits.has_value());
+    EXPECT_EQ(iho_order_for_limits(limits->first, limits->second), name);
+  }
+  // Editing either number alone takes the selection to custom.
+  EXPECT_EQ(iho_order_for_limits(0.6f, 0.013f), custom);
+  EXPECT_EQ(iho_order_for_limits(0.5f, 0.02f), custom);
+  // Including looser than any order — the sparse geological-mapping case.
+  EXPECT_EQ(iho_order_for_limits(3.0f, 0.1f), custom);
+}
+
+TEST(IhoBudget, DefaultTuningTakesTheBudgetFromTheLibrary)
+{
+  // default_cube_tuning() reads a real cube::Parameters, so the seeded budget
+  // cannot drift from upstream; the library's default order is order1a.
+  const auto d = marine_perception_tools::default_cube_tuning();
+  const auto order1 = marine_perception_tools::iho_preset_limits("order1a/1b");
+  ASSERT_TRUE(order1.has_value());
+  EXPECT_NEAR(d.iho_fixed, order1->first, 1e-6f);
+  EXPECT_NEAR(d.iho_percent, order1->second, 1e-6f);
+  EXPECT_EQ(
+    marine_perception_tools::iho_order_for_limits(d.iho_fixed, d.iho_percent),
+    "order1a/1b");
+}
+
+TEST(RunCube, UsesTheBudgetInTheTuningNotAPresetName)
+{
+  // Sparse soundings at 1 m spacing on a 0.25 m grid: whether a node gets an
+  // estimate depends on how far each sounding spreads, and the budget scales
+  // that radius. A loose hand-set budget must fill more nodes than a tight
+  // one — the property the operator is steering by when they set the numbers
+  // themselves instead of picking an order.
+  std::vector<MbesSounding> sparse;
+  for (int i = 0; i <= 8; ++i) {
+    for (int j = 0; j <= 8; ++j) {
+      MbesSounding s;
+      s.x = 100.0 + 1.0 * i;
+      s.y = 200.0 + 1.0 * j;
+      s.z = -5.0;
+      s.intensity = -30.0f;
+      sparse.push_back(s);
+    }
+  }
+  const auto estimated = [](const CubeSurface & c) {
+      std::size_t n = 0;
+      for (const auto d : c.depth) {
+        if (std::isfinite(d)) {++n;}
+      }
+      return n;
+    };
+  marine_perception_tools::CubeTuning tight;
+  tight.iho_fixed = 0.05f;
+  tight.iho_percent = 0.001f;
+  marine_perception_tools::CubeTuning loose;
+  loose.iho_fixed = 5.0f;
+  loose.iho_percent = 0.25f;
+  const auto tight_surface = run_cube(sparse, 0.25, tight);
+  const auto loose_surface = run_cube(sparse, 0.25, loose);
+  ASSERT_TRUE(tight_surface.ok()) << tight_surface.note;
+  ASSERT_TRUE(loose_surface.ok()) << loose_surface.note;
+  EXPECT_GT(estimated(loose_surface), estimated(tight_surface));
+  // The same pair reached through a preset gives the same run: the preset is
+  // only a seed, the two numbers are the whole of what the run reads.
+  const auto order2 = marine_perception_tools::iho_preset_limits("order2");
+  ASSERT_TRUE(order2.has_value());
+  marine_perception_tools::CubeTuning by_preset;
+  by_preset.iho_fixed = order2->first;
+  by_preset.iho_percent = order2->second;
+  marine_perception_tools::CubeTuning by_hand;
+  by_hand.iho_fixed = 1.0f;
+  by_hand.iho_percent = 0.023f;
+  EXPECT_EQ(
+    estimated(run_cube(sparse, 0.25, by_preset)),
+    estimated(run_cube(sparse, 0.25, by_hand)));
 }
 
 TEST(BuildCubeMesh, TriangulatesEstimatedCellsOnly)
@@ -339,7 +466,7 @@ TEST(BuildCubeMesh, ManualRangeOverridesTheAutoRamp)
 TEST(RunCube, CancelledRunYieldsNoSurface)
 {
   const auto cancel = std::make_shared<std::atomic<bool>>(true);
-  const auto surface = run_cube(flatPatch(), 0.5, "order1a",
+  const auto surface = run_cube(flatPatch(), 0.5,
     marine_perception_tools::CubeTuning{}, cancel);
   EXPECT_FALSE(surface.ok());
   EXPECT_EQ(surface.note, "cancelled");
@@ -353,7 +480,7 @@ TEST(RunCube, CancelledRunYieldsNoSurface)
 TEST(RunCube, UnsetCancelTokenEstimatesNormally)
 {
   const auto cancel = std::make_shared<std::atomic<bool>>(false);
-  const auto surface = run_cube(flatPatch(), 0.5, "order1a",
+  const auto surface = run_cube(flatPatch(), 0.5,
     marine_perception_tools::CubeTuning{}, cancel);
   ASSERT_TRUE(surface.ok()) << surface.note;
   EXPECT_EQ(surface.depth.size(), run_cube(flatPatch(), 0.5).depth.size());

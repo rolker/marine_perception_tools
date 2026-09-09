@@ -20,7 +20,9 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "basemap_contrast.hpp"
@@ -45,7 +47,70 @@ CubeTuning default_cube_tuning()
   t.bayes_factor_threshold = params.bayes_factor_threshold;
   t.runlength_threshold = params.runlength_threshold;
   t.extractor = static_cast<int>(params.extractor);
+  // The library stores the SQUARED budget (setIHOLimits squares both on the
+  // way in); the operator edits the un-squared metres and fraction of depth.
+  t.iho_fixed = static_cast<float>(std::sqrt(params.iho_fixed));
+  t.iho_percent = static_cast<float>(std::sqrt(params.iho_percent));
   return t;
+}
+
+namespace
+{
+// The preset table, in the order the dropdown offers them. Values are S-44's
+// (and the library's) un-squared budget: metres, then fraction of depth.
+// order1a and order1b share this pair in cube::Parameters::setIHOLimits, so
+// they are ONE entry here (see iho_preset_names in the header).
+const std::vector<std::pair<std::string, std::pair<float, float>>> & presets()
+{
+  static const std::vector<std::pair<std::string, std::pair<float, float>>> kP{
+    {"exclusive", {0.15f, 0.0075f}},
+    {"special", {0.25f, 0.0075f}},
+    {"order1a/1b", {0.5f, 0.013f}},
+    {"order2", {1.0f, 0.023f}}};
+  return kP;
+}
+}  // namespace
+
+std::vector<std::string> iho_preset_names()
+{
+  std::vector<std::string> names;
+  names.reserve(presets().size());
+  for (const auto & p : presets()) {
+    names.push_back(p.first);
+  }
+  return names;
+}
+
+std::optional<std::pair<float, float>> iho_preset_limits(const std::string & name)
+{
+  for (const auto & p : presets()) {
+    if (p.first == name) {
+      return p.second;
+    }
+  }
+  // The library's own vocabulary still resolves, so a caller (or a saved
+  // session) naming "order1a"/"order1b" gets the budget it asked for rather
+  // than silently falling through to custom.
+  if (name == "order1a" || name == "order1b") {
+    return std::pair<float, float>{0.5f, 0.013f};
+  }
+  return std::nullopt;
+}
+
+std::string iho_order_for_limits(float iho_fixed, float iho_percent)
+{
+  // Tolerance is a display-precision epsilon, not a physical one: the spins
+  // hand back the same values the presets seeded, so this only absorbs the
+  // float round trip.
+  constexpr float kEps = 1e-6f;
+  for (const auto & p : presets()) {
+    if (std::fabs(iho_fixed - p.second.first) <= kEps &&
+      std::fabs(iho_percent - p.second.second) <= kEps)
+    {
+      return p.first;
+    }
+  }
+  return kCustomIhoOrder;
 }
 
 std::string derive_box_curve(
@@ -122,7 +187,7 @@ std::string derive_box_curve(
 
 CubeSurface run_cube(
   const std::vector<MbesSounding> & soundings, double cell_m,
-  const std::string & iho_order, const CubeTuning & tuning,
+  const CubeTuning & tuning,
   const std::shared_ptr<std::atomic<bool>> & cancel)
 {
   const auto stop = [&cancel]() {
@@ -182,10 +247,17 @@ CubeSurface run_cube(
   }
 
   const cube::CellSizes sizes(static_cast<float>(cell_m));   // square cells
-  cube::Parameters params(sizes, iho_order);
+  cube::Parameters params(sizes);
   // Operator tuning (#27): the exposed subset only — the derived scales
   // (distance_scale etc.) stay as the ctor computed them from the cell size.
   params.capture_distance_scale = tuning.capture_distance_scale;
+  // The uncertainty budget is the operator's two numbers, squared into the
+  // library's storage convention (#45). Overwriting what the ctor's order name
+  // seeded is the point: a run can only ever use the current values.
+  params.iho_fixed = static_cast<double>(tuning.iho_fixed) * tuning.iho_fixed;
+  params.iho_percent =
+    static_cast<double>(tuning.iho_percent) * tuning.iho_percent;
+  params.iho_order = iho_order_for_limits(tuning.iho_fixed, tuning.iho_percent);
   params.median_length = std::max<std::uint32_t>(1, tuning.median_length);
   params.quotient_limit = tuning.quotient_limit;
   params.discount = tuning.discount;

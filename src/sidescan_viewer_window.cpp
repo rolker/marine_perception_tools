@@ -33,6 +33,7 @@
 #include <QFormLayout>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QImage>
@@ -51,6 +52,7 @@
 #include <QPushButton>
 #include <QRectF>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QSplitter>
@@ -621,11 +623,21 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_cell_spin_->setSuffix(" m");
   cube_cell_spin_->setToolTip("CUBE node spacing");
   cube_order_combo_ = new QComboBox(this);
-  for (const auto * order : {"exclusive", "special", "order1a", "order1b", "order2"}) {
-    cube_order_combo_->addItem(order);
+  cube_order_combo_->setObjectName("cube_order_combo");
+  for (const auto & order : iho_preset_names()) {
+    cube_order_combo_->addItem(QString::fromStdString(order));
   }
-  cube_order_combo_->setCurrentText("order1a");
-  cube_order_combo_->setToolTip("IHO order (CUBE capture/hypothesis limits)");
+  // "custom" is not a preset — it is where the selection lands when the two
+  // thresholds are edited to a pair no named order carries (#45).
+  cube_order_combo_->addItem(kCustomIhoOrder);
+  cube_order_combo_->setToolTip(
+    "IHO order — a PRESET for the vertical-uncertainty budget, not the thing "
+    "the run reads: it seeds the two thresholds (fixed m + % of depth) in "
+    "params…, and the run uses whatever those are. Editing either one moves "
+    "this to custom. S-44 order 1a and 1b share one budget (they differ in "
+    "the seafloor-search requirement, which CUBE does not model), so they are "
+    "one entry here. NOTE: the budget is compared against a PLACEHOLDER "
+    "per-sounding error — see params….");
   cube_run_btn_ = new QPushButton("Run CUBE", this);
   cube_run_btn_->setEnabled(false);   // until a region has been drawn
   cube_run_btn_->setToolTip(
@@ -639,10 +651,16 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     cube_tuning_.ara_curve_path =
       settings.value("ara_curve_path").toString().toStdString();
   }
+  // The dropdown follows the tuning, never the other way round: it opens on
+  // whichever preset the library's own defaults happen to be (#45).
+  cube_order_combo_->setCurrentText(
+    QString::fromStdString(
+      iho_order_for_limits(cube_tuning_.iho_fixed, cube_tuning_.iho_percent)));
   cube_params_btn_ = new QPushButton("params…", this);
   cube_params_btn_->setToolTip(
-    "CUBE algorithm parameters (capture scale, median filter, intervention "
-    "thresholds, extractor) — applied on the next Run CUBE");
+    "CUBE algorithm parameters (capture scale, uncertainty budget, median "
+    "filter, intervention thresholds, extractor) — applied on the next "
+    "Run CUBE");
   cube_selfcal_btn_ = new QPushButton("self-cal BS", this);
   cube_selfcal_btn_->setEnabled(false);   // needs a completed run's beams
   cube_selfcal_btn_->setToolTip(
@@ -739,6 +757,18 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     v->insertLayout(1, row);
   }
 
+  // Picking a preset restores that preset's pair; "custom" is only ever
+  // arrived at by editing a threshold, so selecting it changes nothing (#45).
+  connect(cube_order_combo_, &QComboBox::currentTextChanged, this,
+    [this](const QString & name) {
+      const auto limits = iho_preset_limits(name.toStdString());
+      if (!limits) {
+        return;
+      }
+      cube_tuning_.iho_fixed = limits->first;
+      cube_tuning_.iho_percent = limits->second;
+    });
+
   connect(cube_run_btn_, &QPushButton::clicked, this, [this]() {runCubeLab();});
   connect(cube_selfcal_btn_, &QPushButton::clicked,
     this, [this]() {selfCalibrateBackscatter();});
@@ -769,6 +799,42 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       capture->setToolTip(
         "Scale on depth for how far out a sounding is accepted "
         "(hydrography ~0.05; larger for sparse/flat areas)");
+      // The uncertainty budget, set directly (#45). The order dropdown in the
+      // lab row is a preset that seeds these two; editing either takes the
+      // selection to "custom", and the run reads these numbers, not the label.
+      const QString budget_tip =
+      "Vertical-uncertainty budget: max allowed variance at a depth is "
+      "(fixed^2 + (percent*depth)^2) / 1.96^2, and its ratio against a "
+      "sounding's own error scales the RADIUS over which that sounding "
+      "spreads its influence — looser fills in and smooths, tighter is "
+      "crisper and holier. Not a pass/fail gate. Editing either value moves "
+      "the order dropdown to \"custom\".";
+      auto * iho_fixed = make_dspin(
+        0.001, 20.0, 0.05, 3, cube_tuning_.iho_fixed);
+      iho_fixed->setSuffix(" m");
+      iho_fixed->setToolTip(
+        budget_tip + "  Fixed part, metres at 95% confidence "
+        "(S-44: 0.15 exclusive … 1.0 order 2).");
+      auto * iho_percent = make_dspin(
+        0.0, 0.5, 0.001, 4, cube_tuning_.iho_percent);
+      iho_percent->setToolTip(
+        budget_tip + "  Depth-proportional part, as a FRACTION of depth "
+        "(S-44: 0.0075 … 0.023).");
+      // The caveat belongs where the numbers are set, not only in a header
+      // comment (#45): the budget is being compared against a stand-in.
+      auto * iho_note = new QLabel(
+        "Compared against a PLACEHOLDER per-sounding error — vertical "
+        "0.1 m + 0.7% of depth, horizontal 0.2 m + 1% of depth. The "
+        "explorer's cloud path does not carry the raw detections the real "
+        "CUBE error model needs, so these thresholds are applied against "
+        "synthetic uncertainty (mpt#27 follow-up).", &dialog);
+      iho_note->setWordWrap(true);
+      iho_note->setMaximumWidth(420);
+      {
+        QFont f = iho_note->font();
+        f.setItalic(true);
+        iho_note->setFont(f);
+      }
       auto * median = make_ispin(
         1, 101, static_cast<int>(cube_tuning_.median_length));
       median->setToolTip("Median pre-filter sort queue length");
@@ -822,6 +888,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         "+ per-populated-node CUBE state; 100 M ≈ 2 GB). The run "
         "confirmation can override this per run.");
       form->addRow("Capture distance scale", capture);
+      form->addRow("Uncertainty budget, fixed", iho_fixed);
+      form->addRow("Uncertainty budget, % of depth", iho_percent);
+      form->addRow(iho_note);
       form->addRow("Median filter length", median);
       form->addRow("Outlier quotient limit", quotient);
       form->addRow("Evolution discount", discount);
@@ -842,6 +911,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         &QPushButton::clicked, &dialog, [&]() {
           const CubeTuning d = default_cube_tuning();
           capture->setValue(d.capture_distance_scale);
+          iho_fixed->setValue(d.iho_fixed);
+          iho_percent->setValue(d.iho_percent);
           median->setValue(static_cast<int>(d.median_length));
           quotient->setValue(d.quotient_limit);
           discount->setValue(d.discount);
@@ -857,6 +928,18 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       }
       cube_tuning_.capture_distance_scale =
       static_cast<float>(capture->value());
+      cube_tuning_.iho_fixed = static_cast<float>(iho_fixed->value());
+      cube_tuning_.iho_percent = static_cast<float>(iho_percent->value());
+      // Values that are no named order's pair land on "custom"; values that
+      // are one restore that preset's name. Guarded so the combo's own
+      // preset-seeding slot cannot fight the edit that just happened.
+      {
+        const QSignalBlocker block(cube_order_combo_);
+        cube_order_combo_->setCurrentText(
+          QString::fromStdString(
+            iho_order_for_limits(
+              cube_tuning_.iho_fixed, cube_tuning_.iho_percent)));
+      }
       cube_tuning_.median_length = static_cast<std::uint32_t>(median->value());
       cube_tuning_.quotient_limit = static_cast<float>(quotient->value());
       cube_tuning_.discount = static_cast<float>(discount->value());
@@ -1086,8 +1169,7 @@ void SidescanViewerWindow::runCubeLab()
     kMetersPerDegLat * std::max(0.01, std::cos(clip.lat * M_PI / 180.0));
 
   const double cell_m = cube_cell_spin_->value();
-  const std::string order = cube_order_combo_->currentText().toStdString();
-  CubeTuning tuning = cube_tuning_;
+  CubeTuning tuning = cube_tuning_;   // the budget rides here, not the label
   // Pre-flight grid estimate from the box itself (known before any loading):
   // over the operator's max-nodes limit, ask — with the real numbers — and
   // let them run anyway (one-shot override; the limit itself is editable in
@@ -1124,7 +1206,7 @@ void SidescanViewerWindow::runCubeLab()
     .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
   const auto cancel = worker_cancel_;
   cube_watcher_.setFuture(
-    QtConcurrent::run([passes, clip, cell_m, order, tuning, gen, cancel]() {
+    QtConcurrent::run([passes, clip, cell_m, tuning, gen, cancel]() {
       CubeLabTicket ticket;
       ticket.generation = gen;
       QElapsedTimer timer;
@@ -1147,7 +1229,7 @@ void SidescanViewerWindow::runCubeLab()
         for (auto & pc : outcome.pass_clouds) {
           ticket.soundings.insert(ticket.soundings.end(), pc.begin(), pc.end());
         }
-        ticket.surface = run_cube(ticket.soundings, cell_m, order, tuning, cancel);
+        ticket.surface = run_cube(ticket.soundings, cell_m, tuning, cancel);
         if (cancel->load(std::memory_order_relaxed)) {
           ticket.cancelled = true;
           ticket.soundings.clear();
