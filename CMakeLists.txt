@@ -236,6 +236,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_tile_selection test/test_tile_selection.cpp)
   target_include_directories(test_tile_selection PRIVATE src)
 
+  # Vendored coastline loading, decimation and the scale-fade rule
+  # (coastline_data.hpp, #41) — header-only; covers the empty and malformed
+  # dataset paths that must degrade to "no coastline".
+  ament_add_gtest(test_coastline_data test/test_coastline_data.cpp)
+  target_include_directories(test_coastline_data PRIVATE src)
+
   # Pure multi-resolution tick ladder for the GeoZui-style time bar
   # (time_bar_model.hpp, #24) — header-only.
   ament_add_gtest(test_time_bar_model test/test_time_bar_model.cpp)
