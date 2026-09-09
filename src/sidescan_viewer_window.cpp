@@ -885,6 +885,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     });
   connect(&drape_watcher_, &QFutureWatcher<DrapeTicket>::finished, this, [this]() {
       DrapeTicket ticket = drape_watcher_.result();
+      if (ticket.cancelled) {
+        return;   // the window is closing (#44): the widgets below are going away
+      }
       if (ticket.generation != drape_gen_) {
         return;   // a newer drape (or a new CUBE run) superseded this one
       }
@@ -1536,9 +1539,10 @@ void SidescanViewerWindow::requestDrape()
     QString("Draping %1 …")
     .arg(QFileInfo(QString::fromStdString(targets.front().bag_path)).fileName()) :
     QString("Draping composite of %1 passes …").arg(targets.size()));
+  const auto cancel = worker_cancel_;
   drape_watcher_.setFuture(QtConcurrent::run(
       [targets, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor,
-      max_nodes, range_mode, gen]() {
+      max_nodes, range_mode, gen, cancel]() {
         DrapeTicket ticket;
         ticket.generation = gen;
         QElapsedTimer timer;
@@ -1547,7 +1551,11 @@ void SidescanViewerWindow::requestDrape()
         for (const auto & entry : targets) {
           const auto loaded = load_drape_pings(
             entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
-            ref_bag, ref_has_geo, ref_anchor);
+            ref_bag, ref_has_geo, ref_anchor, cancel);
+          if (loaded.cancelled) {
+            ticket.cancelled = true;
+            return ticket;   // the window is closing: nothing to march on
+          }
           for (const auto & n : loaded.notes) {
             ticket.notes << QString::fromStdString(n);
           }
@@ -1561,11 +1569,22 @@ void SidescanViewerWindow::requestDrape()
           // terrain to land on beyond the bathymetry.
           std::string grow_note;
           ticket.terrain = extend_surface_for_drape(
-            surface, pings, max_nodes, grow_note);
+            surface, pings, max_nodes, grow_note, cancel);
+          if (cancel->load(std::memory_order_relaxed)) {
+            ticket.cancelled = true;
+            ticket.terrain = CubeSurface{};
+            return ticket;
+          }
           if (!grow_note.empty()) {
             ticket.notes << QString::fromStdString(grow_note);
           }
-          ticket.drape = drape_pass(ticket.terrain, pings, range_mode);
+          ticket.drape = drape_pass(ticket.terrain, pings, range_mode, cancel);
+          if (cancel->load(std::memory_order_relaxed)) {
+            ticket.cancelled = true;
+            ticket.terrain = CubeSurface{};
+            ticket.drape = SidescanDrape{};
+            return ticket;
+          }
           if (ticket.drape.pings_skipped > 0) {
             ticket.notes << QString("%1 pings unusable (no altitude/side or "
               "off the surface)").arg(ticket.drape.pings_skipped);

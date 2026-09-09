@@ -25,7 +25,9 @@
 // by translation + yaw to display grade); altitude is height above bottom
 // and rides through unchanged.
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -40,6 +42,7 @@ struct DrapePingsResult
   std::vector<WindowPing> pings;   // reference world frame
   std::vector<std::string> notes;  // human-readable problems
   bool ok = false;
+  bool cancelled = false;   // abandoned mid-load (#44): ok stays false
 };
 
 // `cache_dir` empty disables the bag-index cache (full scan every time).
@@ -47,11 +50,18 @@ struct DrapePingsResult
 // frame (CloudLoadOutcome's ref_* fields). A pass from the reference bag
 // needs no reprojection; another bag composes through the earth anchors,
 // falling back to identity (with a note) when either anchor is missing.
+//
+// `cancel` (optional) rides into the whole-bag index scan and the window
+// re-read, both of which poll it per bag message (#44) — on a cache miss this
+// call is a full scan of a multi-GB recording, so a check only around the
+// phases would bound nothing. A cancelled load returns `cancelled` with
+// ok = false, and never writes its partial index to the cache.
 DrapePingsResult load_drape_pings(
   const std::string & bag_path, std::int64_t t0_ns, std::int64_t t1_ns,
   const std::string & cache_dir,
   const std::string & ref_bag, bool ref_has_geo,
-  const geometry_msgs::msg::TransformStamped & ref_earth_from_world);
+  const geometry_msgs::msg::TransformStamped & ref_earth_from_world,
+  const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
 }  // namespace marine_perception_tools
 

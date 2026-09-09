@@ -14,7 +14,9 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cmath>
+#include <memory>
 #include <vector>
 
 #include "sidescan_drape.hpp"
@@ -348,6 +350,57 @@ TEST(SidescanDrape, UnusablePingsAreCountedSkipped)
   const auto drape = drape_pass(surface, {no_altitude, off_surface});
   EXPECT_EQ(drape.pings_used, 0u);
   EXPECT_EQ(drape.pings_skipped, 2u);
+}
+
+// Cancellation (#44). The same pings that paint a drape above must paint
+// nothing once the token is set — not a thinner drape, not an empty grid that
+// ok() would still wave through to the surface shading.
+TEST(SidescanDrape, CancelledMarchPaintsNothing)
+{
+  const auto surface = flatSurface(40, 40, -10.0f);
+  std::vector<WindowPing> pings;
+  for (int i = -1; i <= 1; ++i) {
+    pings.push_back(makePing(10.0 + 0.5 * i, 18.0));
+  }
+  ASSERT_TRUE(drape_pass(surface, pings).ok());   // it does paint uncancelled
+
+  const auto cancel = std::make_shared<std::atomic<bool>>(true);
+  const auto drape = drape_pass(
+    surface, pings, marine_perception_tools::RangeScoreMode::Nearest, cancel);
+  EXPECT_FALSE(drape.ok());
+  EXPECT_EQ(drape.pings_used, 0u);
+  EXPECT_TRUE(drape.amplitude.empty());
+}
+
+// The terrain extension is the other half of a drape run, and it grows with
+// the grid rather than the pings: cancelled, it must hand back no terrain and
+// say why, because "every node finite" would otherwise be a false promise
+// about a half-relaxed membrane.
+TEST(SidescanDrape, CancelledExtensionYieldsNoTerrain)
+{
+  const auto surface = flatSurface(20, 20, -10.0f);
+  auto ping = makePing(5.0, 5.0);
+  std::string note;
+  const auto cancel = std::make_shared<std::atomic<bool>>(true);
+  const auto ext = marine_perception_tools::extend_surface_for_drape(
+    surface, {ping}, 100000, note, cancel);
+  EXPECT_FALSE(ext.ok());
+  EXPECT_EQ(note, "cancelled");
+}
+
+// The token is a cancellation signal, not a switch that refuses work: an
+// un-set token must march exactly as no token at all.
+TEST(SidescanDrape, UnsetCancelTokenMarchesNormally)
+{
+  const auto surface = flatSurface(40, 40, -10.0f);
+  const auto ping = makePing(10.0, 18.0);
+  const auto cancel = std::make_shared<std::atomic<bool>>(false);
+  const auto drape = drape_pass(
+    surface, {ping}, marine_perception_tools::RangeScoreMode::Nearest, cancel);
+  const auto plain = drape_pass(surface, {ping});
+  ASSERT_TRUE(drape.ok());
+  EXPECT_EQ(drape.pings_used, plain.pings_used);
+  EXPECT_EQ(drape.amplitude.size(), plain.amplitude.size());
 }
 
 }  // namespace

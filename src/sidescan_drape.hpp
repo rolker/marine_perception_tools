@@ -28,8 +28,10 @@
 // range (better across-track resolution) wins. Qt-free and bag-free —
 // unit-testable with synthetic terrain and pings.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -81,9 +83,13 @@ struct SidescanDrape
 //    mosaicking preference.
 enum class RangeScoreMode { Nearest, MidRange };
 
+// `cancel` (optional) is polled per ping — the unit the march is built from,
+// and the one a composite of several passes has tens of thousands of (#44).
+// A cancelled march returns a drape that is not ok(): nothing to paint.
 SidescanDrape drape_pass(
   const CubeSurface & surface, const std::vector<WindowPing> & pings,
-  RangeScoreMode range_mode = RangeScoreMode::Nearest);
+  RangeScoreMode range_mode = RangeScoreMode::Nearest,
+  const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
 // Drape terrain (#29 follow-up): the sidescan reaches past the MBES, so the
 // surface is extended to the pass's swath before marching — the grid grows
@@ -93,9 +99,15 @@ SidescanDrape drape_pass(
 // of the result is finite; `uncertainty` stays NaN on interpolated nodes so
 // callers can tell measured from inferred terrain. Growth is capped by
 // `max_nodes` (clamped proportionally, noted) — the operator's grid guard.
+// `cancel` (optional) is polled per ping while the swath bounds are gathered,
+// per BFS wave while the membrane seeds, and per relaxation sweep (#44) — the
+// three loops that scale with the grid. A cancelled extension returns a
+// surface that is not ok() and notes "cancelled", so no caller mistakes a
+// half-relaxed membrane for terrain.
 CubeSurface extend_surface_for_drape(
   const CubeSurface & surface, const std::vector<WindowPing> & pings,
-  std::uint64_t max_nodes, std::string & note);
+  std::uint64_t max_nodes, std::string & note,
+  const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
 }  // namespace marine_perception_tools
 

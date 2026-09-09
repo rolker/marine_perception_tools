@@ -14,6 +14,7 @@
 
 #include "sidescan_drape_loader.hpp"
 
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <memory>
@@ -31,9 +32,19 @@ DrapePingsResult load_drape_pings(
   const std::string & bag_path, std::int64_t t0_ns, std::int64_t t1_ns,
   const std::string & cache_dir,
   const std::string & ref_bag, bool ref_has_geo,
-  const geometry_msgs::msg::TransformStamped & ref_earth_from_world)
+  const geometry_msgs::msg::TransformStamped & ref_earth_from_world,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
 {
   DrapePingsResult out;
+  const auto stop = [&cancel]() {
+      return cancel && cancel->load(std::memory_order_relaxed);
+    };
+  const auto abandon = []() {
+      DrapePingsResult c;
+      c.cancelled = true;   // ok stays false: nothing here may be drawn
+      return c;
+    };
+  if (stop()) {return abandon();}
   try {
     SidescanBagSession session(bag_path);
 
@@ -50,7 +61,10 @@ DrapePingsResult load_drape_pings(
       }
     }
     if (!adopted) {
-      session.buildIndex();
+      session.buildIndex({}, cancel);
+      if (stop()) {
+        return abandon();   // a partial index must never poison the cache
+      }
       if (!cache_path.empty()) {
         if (const auto snap = session.snapshot()) {
           const auto identity = bagIdentity(bag_path);
@@ -72,7 +86,10 @@ DrapePingsResult load_drape_pings(
     }
     // Both channels of the interval, uncapped (the drape decimates onto the
     // grid itself; a cap here would thin the near-nadir coverage).
-    out.pings = session.readWindow(interval->first, interval->second, 0);
+    out.pings = session.readWindow(interval->first, interval->second, 0, false, cancel);
+    if (stop()) {
+      return abandon();
+    }
     if (out.pings.empty()) {
       out.notes.push_back("no paintable pings in the interval");
       return out;
