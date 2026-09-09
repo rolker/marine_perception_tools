@@ -16,6 +16,7 @@
 
 #include <limits>
 #include <optional>
+#include <string>
 
 #include "hover_geo_readout.hpp"
 
@@ -26,6 +27,7 @@ using marine_perception_tools::GeoPoint;
 using marine_perception_tools::HoverGeoReadout;
 using marine_perception_tools::HoverPane;
 using marine_perception_tools::MapGeoAffine;
+using marine_perception_tools::format_geo_coords;
 using marine_perception_tools::format_hover_geo;
 using marine_perception_tools::geo_from_map;
 using marine_perception_tools::hover_pane_label;
@@ -82,6 +84,23 @@ TEST(HoverGeoFormat, NamesThePaneAndKeepsSixDecimals)
   EXPECT_EQ(
     format_hover_geo(HoverPane::Cloud, GeoPoint{43.0, -71.0}),
     "MBES 3D  43.000000, -71.000000");
+}
+
+// The bare coordinates the clipboard gets (#42). They must be the readout's
+// own numbers with the pane tag taken off — one format, so a pasted position
+// and the one on screen can never differ in a digit.
+TEST(HoverGeoFormat, TheBareCoordinatesAreTheReadoutsNumbersWithoutThePaneTag)
+{
+  const GeoPoint p{43.0203045, -71.3600001};
+  EXPECT_EQ(format_geo_coords(p), "43.020305, -71.360000");
+  for (const auto pane : {HoverPane::Map, HoverPane::Cloud, HoverPane::Sidescan,
+      HoverPane::Mbes, HoverPane::Echogram})
+  {
+    const std::string shown = format_hover_geo(pane, p);
+    const std::string tag = std::string(hover_pane_label(pane)) + "  ";
+    ASSERT_EQ(shown.rfind(tag, 0), 0u) << shown;
+    EXPECT_EQ(shown.substr(tag.size()), format_geo_coords(p)) << shown;
+  }
 }
 
 TEST(HoverGeoFormat, EveryPaneHasAName)

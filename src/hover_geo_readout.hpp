@@ -88,15 +88,25 @@ inline std::optional<GeoPoint> geo_from_map(
   return p;
 }
 
-// "Map  43.123456, -70.123456" — the six-decimal degrees the map readout has
-// always shown (~0.1 m, finer than any position here is good to), with the
-// source pane in front of them.
+// "43.123456, -70.123456" — the six-decimal degrees the map readout has
+// always shown (~0.1 m, finer than any position here is good to), and nothing
+// else. The bare numbers are their own caller: the context menu's `Copy
+// Position` (#42) puts exactly this on the clipboard, so what the operator
+// pastes is character-for-character what the readout showed him.
+inline std::string format_geo_coords(const GeoPoint & p)
+{
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.6f, %.6f", p.lat, p.lon);
+  return std::string(buf);
+}
+
+// "Map  43.123456, -70.123456" — the same degrees with the source pane in
+// front of them. The provenance tag is the readout's alone: four panes feed
+// one label, and an unattributed number is a position the operator cannot
+// act on. One number format underneath, so the two can never drift apart.
 inline std::string format_hover_geo(HoverPane pane, const GeoPoint & p)
 {
-  char buf[96];
-  std::snprintf(
-    buf, sizeof(buf), "%s  %.6f, %.6f", hover_pane_label(pane), p.lat, p.lon);
-  return std::string(buf);
+  return std::string(hover_pane_label(pane)) + "  " + format_geo_coords(p);
 }
 
 // Which pane owns the readout, and what it reads.
