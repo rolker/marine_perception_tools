@@ -143,14 +143,35 @@ One window, two modes that compose:
   modifiers: **left-drag** draws or replaces the region, **middle-click**
   centres the view on the point (and seeks the time cursor there when a bag is
   open), **middle-drag** pans, and the wheel zooms. A **left-click** with no
-  drag does nothing: clicking the map to pick out a nav-track line is not a
-  gesture this map has (passes are chosen from the time bar or the pass list),
-  and a click that silently threw the region away was the one destructive thing
-  it could do. Clearing is now asked for by name — **right-click** the map for
-  its context menu and choose **Clear Selection**, which is greyed out when
-  there is nothing selected. That menu is where further map actions will
-  appear. While *Mark contact* is on, that visible mode takes left-drag for
-  marking.
+  drag never touches the region — a click that silently threw the region away
+  was the one destructive thing it could do, so clearing is asked for by name:
+  **right-click** the map for its context menu and choose **Clear Selection**,
+  which is greyed out when there is nothing selected. That menu is where
+  further map actions will appear. While *Mark contact* is on, that visible
+  mode takes left-drag for marking.
+
+  What a bare left-click *does* do is **cue the time bar from the map** (#46).
+  **Hover** within a few pixels of a nav track and the nearest fix on it is
+  marked with a yellow disc, with the time the boat was there in the status
+  row beside the lat/lon (in whichever zone the **UTC** toggle is showing).
+  Click it and the scrub and the trackline views cue to that instant, by the
+  same path a committed time on the time bar takes. This is the map answering
+  the one question the time bar cannot — *when did **that** pass happen* —
+  which is what you need in an area worked over many times, where the passes
+  span several recordings and you should not have to know which. The hit
+  radius is in **screen pixels**, not ground metres, so "close enough" means
+  the same thing at every zoom. Beyond it nothing highlights, and the
+  highlight stays out of the way of every other gesture: no marker during a
+  region drag, a pan, a recentre glide, a zoom, or contact marking. With no
+  highlighted fix the click is still the complete no-op #42 made it.
+
+  Cueing to an instant in a recording that is not open reopens and re-indexes
+  that whole bag, and the status line says so while it happens. In a revisited
+  area most clicks land in another recording and pay it: underneath, the
+  cursor the trackline views follow is a distance along the open bag's track,
+  not an absolute time, and only the time bar spans every recording. Promoting
+  that cursor to absolute time is the larger piece of work, tracked against
+  #36.
   The recentre **glides** to the point over about three quarters of a second,
   easing in and out, so the eye can follow the map across instead of having to
   re-find the survey after a jump. The seek is not delayed by it — the time
