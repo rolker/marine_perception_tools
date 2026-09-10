@@ -2824,8 +2824,17 @@ void SidescanViewerWindow::openIndexWithDefaults(const std::string & index_path)
 {
   // Same stores default as the --stores CLI option: the authoritative depth
   // product beside the index (discovery finds the rest). #40.
+  //
+  // Through the SHARED helper, not a second copy of the derivation: this path
+  // had its own `path(index_path).parent_path()`, which is empty for a bare
+  // relative filename and so reproduced the no-basemap failure the CLI fix had
+  // just closed. A remembered `last_index` can be relative, so the GUI reaches
+  // it too. Found by Copilot after the CLI site was fixed — the same
+  // fixed-one-site-missed-another shape as the supersede tokens earlier in this
+  // branch, which is a good argument for the derivation living in exactly one
+  // place.
   const std::string stores_dir =
-    defaultStoresDir(std::filesystem::path(index_path).parent_path()).string();
+    defaultStoresDirForIndex(index_path).string();
   try {
     openSurveyIndex(index_path, stores_dir);
   } catch (const std::exception & e) {
