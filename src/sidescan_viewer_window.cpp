@@ -1170,6 +1170,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         // surface, scalar modes + range controls live.
         selection_cloud_ = false;
         ++cloud_gen_;   // any tile-selection load in flight is stale
+        supersede_token(cloud_cancel_);   // ...and the job serving it stops
         cloud_pass_clouds_.clear();
         cloud_legend_->clear();
         cloud_legend_->setVisible(false);
@@ -1191,6 +1192,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_ref_has_geo_ = ticket.ref_has_geo;
       cube_ref_anchor_ = ticket.ref_earth_from_world;
       ++drape_gen_;
+      supersede_token(drape_cancel_);   // ...and the job serving it stops
       cube_drape_ = SidescanDrape{};
       cube_drape_terrain_ = CubeSurface{};
       populateDrapePasses();
@@ -1266,6 +1268,12 @@ void SidescanViewerWindow::selfCalibrateBackscatter()
 
 void SidescanViewerWindow::runCubeLab()
 {
+  // Never launch into a teardown (#42 review): closeEvent() sets the teardown
+  // token before the destructor's waits, and a job started after that would
+  // read its whole bag while the operator waits for the window to go away.
+  // `worker_cancel_` is the right flag here precisely because it never resets;
+  // the per-job tokens do, so they cannot answer "is this window closing".
+  if (worker_cancel_->load(std::memory_order_relaxed)) {return;}
   if (!bridge_ || !cube_box_) {
     return;
   }
@@ -1336,11 +1344,12 @@ void SidescanViewerWindow::runCubeLab()
     }
   }
   ++cube_gen_;
+  supersede_token(cube_cancel_);   // ...and the job serving it stops
   const auto gen = cube_gen_;
   cube_run_btn_->setEnabled(false);
   status_->setText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
     .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
-  const auto cancel = supersede_token(cube_cancel_);
+  const auto cancel = cube_cancel_;
   cube_watcher_.setFuture(
     QtConcurrent::run([passes, clip, cell_m, tuning, gen, cancel]() {
       CubeLabTicket ticket;
@@ -1375,6 +1384,12 @@ void SidescanViewerWindow::runCubeLab()
       } catch (const std::exception & e) {
         ticket.surface = CubeSurface{};
         ticket.surface.note = e.what();
+      } catch (...) {
+        // A non-std exception escaping a QtConcurrent task std::terminates on
+        // Qt5 just as a std::exception does, so the guard is only a guard with
+        // both arms (#42 review).
+        ticket.surface = CubeSurface{};
+        ticket.surface.note = "CUBE run failed: unknown exception";
       }
       ticket.elapsed_ms = timer.elapsed();
       return ticket;
@@ -1840,6 +1855,12 @@ void SidescanViewerWindow::populateDrapePasses()
 
 void SidescanViewerWindow::requestDrape()
 {
+  // Never launch into a teardown (#42 review): closeEvent() sets the teardown
+  // token before the destructor's waits, and a job started after that would
+  // read its whole bag while the operator waits for the window to go away.
+  // `worker_cancel_` is the right flag here precisely because it never resets;
+  // the per-job tokens do, so they cannot answer "is this window closing".
+  if (worker_cancel_->load(std::memory_order_relaxed)) {return;}
   const int idx = cube_drape_combo_ ? cube_drape_combo_->currentIndex() : 0;
   if (idx <= 0 || !cube_surface_.ok()) {
     return;
@@ -1866,12 +1887,13 @@ void SidescanViewerWindow::requestDrape()
     (cube_range_score_combo_ && cube_range_score_combo_->currentIndex() == 1) ?
     RangeScoreMode::MidRange : RangeScoreMode::Nearest;
   ++drape_gen_;
+  supersede_token(drape_cancel_);   // ...and the job serving it stops
   const auto gen = drape_gen_;
   status_->setText(targets.size() == 1 ?
     QString("Draping %1 …")
     .arg(QFileInfo(QString::fromStdString(targets.front().bag_path)).fileName()) :
     QString("Draping composite of %1 passes …").arg(targets.size()));
-  const auto cancel = supersede_token(drape_cancel_);
+  const auto cancel = drape_cancel_;
   drape_watcher_.setFuture(QtConcurrent::run(
       [targets, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor,
       max_nodes, range_mode, gen, cancel]() {
@@ -2940,6 +2962,12 @@ void SidescanViewerWindow::openBag(
       } catch (const std::exception & e) {
         Q_EMIT openFailed(epoch, QString::fromStdString(e.what()));
         return;
+      } catch (...) {
+        // Both arms, for the same reason as the std::exception one above: on
+        // Qt5 a non-QException of ANY type escaping the task terminates the
+        // process (#42 review).
+        Q_EMIT openFailed(epoch, "bag open failed: unknown exception");
+        return;
       }
       {
         QMutexLocker lock(&pending_open_mutex_);
@@ -2977,6 +3005,8 @@ void SidescanViewerWindow::openBag(
           }, cancel);
       } catch (const std::exception &) {
         Q_EMIT indexProgress(epoch, 0.0, true);   // surface as an empty done
+      } catch (...) {
+        Q_EMIT indexProgress(epoch, 0.0, true);   // ditto, for a non-std throw
       }
     }));
 }
@@ -3356,6 +3386,9 @@ void SidescanViewerWindow::requestRender()
         } catch (const std::exception &) {
           r.ok = false;   // e.g. the bag became unreadable mid-session
           r.cancelled = cancel->load(std::memory_order_relaxed);
+        } catch (...) {
+          r.ok = false;   // a non-std throw terminates just as surely on Qt5
+          r.cancelled = cancel->load(std::memory_order_relaxed);
         }
         r.epoch = epoch;
         return r;
@@ -3722,6 +3755,12 @@ void SidescanViewerWindow::pushBasemapView()
 
 void SidescanViewerWindow::onTileSelectionChanged()
 {
+  // Never launch into a teardown (#42 review): closeEvent() sets the teardown
+  // token before the destructor's waits, and a job started after that would
+  // read its whole bag while the operator waits for the window to go away.
+  // `worker_cancel_` is the right flag here precisely because it never resets;
+  // the per-job tokens do, so they cannot answer "is this window closing".
+  if (worker_cancel_->load(std::memory_order_relaxed)) {return;}
   if (!bridge_) {
     return;
   }
@@ -3785,6 +3824,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
   cube_soundings_.clear();
   if (cube_selfcal_btn_) {cube_selfcal_btn_->setEnabled(false);}
   ++drape_gen_;
+  supersede_token(drape_cancel_);   // ...and the job serving it stops
   cloud_->clearSurface();
   // Entering multi-pass mode from anything else defaults the colouring to
   // Pass once the load lands (#36); re-selecting while already in a
@@ -3801,6 +3841,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
   cloud_legend_->clear();
   cloud_legend_->setVisible(true);
   ++cloud_gen_;   // any load in flight is for a stale selection
+  supersede_token(cloud_cancel_);   // ...and the job serving it stops
 
   if (cloud_passes.empty()) {
     cloud_->resetView();
@@ -3844,7 +3885,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
     QString()));
   const auto gen = cloud_gen_;
   const auto snapshot = std::move(cloud_passes);   // worker owns its own copy
-  const auto cancel = supersede_token(cloud_cancel_);
+  const auto cancel = cloud_cancel_;
   cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen, clip, cancel]() {
       CloudLoadTicket ticket;
       ticket.generation = gen;
@@ -3895,6 +3936,7 @@ void SidescanViewerWindow::exitSelectionCloud()
   cube_drape_ = SidescanDrape{};
   cube_drape_terrain_ = CubeSurface{};
   ++drape_gen_;
+  supersede_token(drape_cancel_);   // ...and the job serving it stops
   cloud_->clearSurface();
   if (time_bar_) {
     time_bar_->clearPasses();
@@ -3921,6 +3963,7 @@ void SidescanViewerWindow::exitSelectionCloud()
   }
   selection_cloud_ = false;
   ++cloud_gen_;   // an in-flight selection load must not apply any more
+  supersede_token(cloud_cancel_);   // ...and the job serving it stops
   cloud_pass_clouds_.clear();
   selection_ref_bag_.clear();
   selection_ref_frame_.clear();

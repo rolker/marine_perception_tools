@@ -83,14 +83,21 @@ TEST(WorkerCancel, EveryAbandonedJobIsCancelledNotJustTheLast)
   EXPECT_FALSE(issued.back()->load());
 }
 
-// Teardown sets whatever token is live; a job dispatched after that is a
-// separate question (the callers guard it), but the live one must stop.
-TEST(WorkerCancel, TeardownCanStopTheLiveJobThroughTheSameToken)
+// A token already cancelled by teardown is REPLACED by a supersede, not
+// preserved — which is why the dispatchers check the teardown token
+// (`worker_cancel_`, which never resets) rather than relying on this one. The
+// asymmetry is deliberate and pinned here so nobody 'fixes' it by making
+// supersede sticky: a sticky token would hand every later job a cancelled flag
+// and the window would silently stop working after any close that was
+// cancelled.
+TEST(WorkerCancel, SupersedingReplacesEvenATokenTeardownAlreadySet)
 {
   std::shared_ptr<std::atomic<bool>> token;
   const auto live = supersede_token(token);
-
   token->store(true);   // what cancelWorkers() does
 
-  EXPECT_TRUE(live->load());
+  const auto next = supersede_token(token);
+
+  EXPECT_TRUE(live->load()) << "the job running at teardown must still stop";
+  EXPECT_FALSE(next->load());
 }

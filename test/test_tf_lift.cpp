@@ -92,8 +92,12 @@ TEST(TfLift, PositionIsRotatedThenTranslated)
   EXPECT_NEAR(7.0 + 3.0, w.z, 1e-9);
 }
 
-// A sounding whose geometry was never measured stays unmeasured — the lift
-// must not fabricate a finite angle for it.
+// A sounding whose geometry was never measured stays unmeasured. NOTE: this
+// one does not discriminate against the pre-fix field-by-field lift, since
+// MbesSounding already defaults both fields to NaN — it pins the property
+// rather than the regression, and is kept because a future lift that
+// substituted a sentinel (0, or the transform's own angle) for an unmeasured
+// beam would hand the estimator a fabricated confidence.
 TEST(TfLift, UnknownGeometryStaysUnknown)
 {
   MbesSounding s;
