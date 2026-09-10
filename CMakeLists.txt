@@ -214,6 +214,10 @@ if(BUILD_TESTING)
   target_include_directories(test_tf_lift PRIVATE src)
   ament_target_dependencies(test_tf_lift geometry_msgs marine_acoustic_msgs tf2)
 
+  # Supersede semantics for the background-worker cancel tokens (#42).
+  ament_add_gtest(test_worker_cancel test/test_worker_cancel.cpp)
+  target_include_directories(test_worker_cancel PRIVATE src)
+
   # Pure rolling-distance scrub policy (distance_buffer_policy.hpp) — header-only.
   ament_add_gtest(test_distance_buffer_policy test/test_distance_buffer_policy.cpp)
   target_include_directories(test_distance_buffer_policy PRIVATE src)

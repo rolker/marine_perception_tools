@@ -94,6 +94,7 @@
 #include "distance_buffer_policy.hpp"
 #include "map_geo_anchor.hpp"
 #include "tf_lift.hpp"   // rotate_by_quat (the export anchor probe)
+#include "worker_cancel.hpp"   // supersede_token
 #include "world_layout.hpp"
 #include "marine_colormap/colormap.hpp"
 #include "marine_colormap/palette.hpp"
@@ -1339,7 +1340,7 @@ void SidescanViewerWindow::runCubeLab()
   cube_run_btn_->setEnabled(false);
   status_->setText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
     .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
-  const auto cancel = worker_cancel_;
+  const auto cancel = supersede_token(cube_cancel_);
   cube_watcher_.setFuture(
     QtConcurrent::run([passes, clip, cell_m, tuning, gen, cancel]() {
       CubeLabTicket ticket;
@@ -1870,58 +1871,74 @@ void SidescanViewerWindow::requestDrape()
     QString("Draping %1 …")
     .arg(QFileInfo(QString::fromStdString(targets.front().bag_path)).fileName()) :
     QString("Draping composite of %1 passes …").arg(targets.size()));
-  const auto cancel = worker_cancel_;
+  const auto cancel = supersede_token(drape_cancel_);
   drape_watcher_.setFuture(QtConcurrent::run(
       [targets, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor,
       max_nodes, range_mode, gen, cancel]() {
         DrapeTicket ticket;
         ticket.generation = gen;
-        QElapsedTimer timer;
-        timer.start();
-        std::vector<WindowPing> pings;
-        for (const auto & entry : targets) {
-          const auto loaded = load_drape_pings(
-            entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
-            ref_bag, ref_has_geo, ref_anchor, cancel);
-          if (loaded.cancelled) {
-            ticket.cancelled = true;
-            return ticket;   // the window is closing: nothing to march on
+        // A non-QException escaping a QtConcurrent task std::terminates on
+        // Qt5, and the throw resurfaces on the UI thread out of result() --
+        // or out of the destructor's waitForFinished(), i.e. a throw from a
+        // destructor. extend_surface_for_drape() sizes a grid bounded by the
+        // operator's own "Run anyway" override, so bad_alloc here is the case
+        // the dialog invites rather than a pathological one (#42 review).
+        try {
+          QElapsedTimer timer;
+          timer.start();
+          std::vector<WindowPing> pings;
+          for (const auto & entry : targets) {
+            const auto loaded = load_drape_pings(
+              entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
+              ref_bag, ref_has_geo, ref_anchor, cancel);
+            if (loaded.cancelled) {
+              ticket.cancelled = true;
+              return ticket;   // the window is closing: nothing to march on
+            }
+            for (const auto & n : loaded.notes) {
+              ticket.notes << QString::fromStdString(n);
+            }
+            if (loaded.ok) {
+              pings.insert(pings.end(), loaded.pings.begin(), loaded.pings.end());
+            }
           }
-          for (const auto & n : loaded.notes) {
-            ticket.notes << QString::fromStdString(n);
+          if (!pings.empty()) {
+            // The sidescan outreaches the MBES: extend the surface to the
+            // swath (holes filled, edges extrapolated) so the drape has
+            // terrain to land on beyond the bathymetry.
+            std::string grow_note;
+            ticket.terrain = extend_surface_for_drape(
+              surface, pings, max_nodes, grow_note, cancel);
+            if (cancel->load(std::memory_order_relaxed)) {
+              ticket.cancelled = true;
+              ticket.terrain = CubeSurface{};
+              return ticket;
+            }
+            if (!grow_note.empty()) {
+              ticket.notes << QString::fromStdString(grow_note);
+            }
+            ticket.drape = drape_pass(ticket.terrain, pings, range_mode, cancel);
+            if (cancel->load(std::memory_order_relaxed)) {
+              ticket.cancelled = true;
+              ticket.terrain = CubeSurface{};
+              ticket.drape = SidescanDrape{};
+              return ticket;
+            }
+            if (ticket.drape.pings_skipped > 0) {
+              ticket.notes << QString("%1 pings unusable (no altitude/side or "
+                "off the surface)").arg(ticket.drape.pings_skipped);
+            }
           }
-          if (loaded.ok) {
-            pings.insert(pings.end(), loaded.pings.begin(), loaded.pings.end());
-          }
+          ticket.elapsed_ms = timer.elapsed();
+        } catch (const std::exception & e) {
+          ticket.drape = SidescanDrape{};
+          ticket.terrain = CubeSurface{};
+          ticket.notes << QString("drape failed: %1").arg(e.what());
+        } catch (...) {
+          ticket.drape = SidescanDrape{};
+          ticket.terrain = CubeSurface{};
+          ticket.notes << QString("drape failed: unknown exception");
         }
-        if (!pings.empty()) {
-          // The sidescan outreaches the MBES: extend the surface to the
-          // swath (holes filled, edges extrapolated) so the drape has
-          // terrain to land on beyond the bathymetry.
-          std::string grow_note;
-          ticket.terrain = extend_surface_for_drape(
-            surface, pings, max_nodes, grow_note, cancel);
-          if (cancel->load(std::memory_order_relaxed)) {
-            ticket.cancelled = true;
-            ticket.terrain = CubeSurface{};
-            return ticket;
-          }
-          if (!grow_note.empty()) {
-            ticket.notes << QString::fromStdString(grow_note);
-          }
-          ticket.drape = drape_pass(ticket.terrain, pings, range_mode, cancel);
-          if (cancel->load(std::memory_order_relaxed)) {
-            ticket.cancelled = true;
-            ticket.terrain = CubeSurface{};
-            ticket.drape = SidescanDrape{};
-            return ticket;
-          }
-          if (ticket.drape.pings_skipped > 0) {
-            ticket.notes << QString("%1 pings unusable (no altitude/side or "
-              "off the surface)").arg(ticket.drape.pings_skipped);
-          }
-        }
-        ticket.elapsed_ms = timer.elapsed();
         return ticket;
       }));
 }
@@ -2581,6 +2598,12 @@ void SidescanViewerWindow::cancelWorkers()
   // teardown token. Both are only ever set here, never cleared.
   if (scan_cancel_) {scan_cancel_->store(true);}
   worker_cancel_->store(true);
+  // The per-job supersede tokens are what the cloud / CUBE / drape workers
+  // actually hold, so teardown has to set them too — worker_cancel_ alone
+  // would leave an in-flight job reading its bag to the end.
+  if (cloud_cancel_) {cloud_cancel_->store(true);}
+  if (cube_cancel_) {cube_cancel_->store(true);}
+  if (drape_cancel_) {drape_cancel_->store(true);}
   // basemap_lod_ carries its own cancel_, set by its destructor during the
   // QObject teardown that follows ~SidescanViewerWindow's body.
 }
@@ -3821,11 +3844,24 @@ void SidescanViewerWindow::onTileSelectionChanged()
     QString()));
   const auto gen = cloud_gen_;
   const auto snapshot = std::move(cloud_passes);   // worker owns its own copy
-  const auto cancel = worker_cancel_;
+  const auto cancel = supersede_token(cloud_cancel_);
   cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen, clip, cancel]() {
       CloudLoadTicket ticket;
       ticket.generation = gen;
-      ticket.outcome = load_cloud_passes(snapshot, clip, cancel);
+      // A non-QException escaping a QtConcurrent task std::terminates on Qt5,
+      // and the throw resurfaces on the UI thread out of result() -- or out of
+      // the destructor's waitForFinished(), i.e. a throw from a destructor.
+      // The index and CUBE workers already guard; these two did not (#42
+      // review). A multi-bag load is exactly where bad_alloc lives.
+      try {
+        ticket.outcome = load_cloud_passes(snapshot, clip, cancel);
+      } catch (const std::exception & e) {
+        ticket.outcome = CloudLoadOutcome();
+        ticket.outcome.notes << QString("cloud load failed: %1").arg(e.what());
+      } catch (...) {
+        ticket.outcome = CloudLoadOutcome();
+        ticket.outcome.notes << QString("cloud load failed: unknown exception");
+      }
       return ticket;
     }));
 }

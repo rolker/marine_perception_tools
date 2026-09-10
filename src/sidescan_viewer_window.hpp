@@ -436,6 +436,22 @@ private:
   // is superseded" (supersede is the generation counters' job).
   std::shared_ptr<std::atomic<bool>> worker_cancel_ =
     std::make_shared<std::atomic<bool>>(false);
+  // Per-job SUPERSEDE tokens (#42 review). `worker_cancel_` above covers
+  // teardown; it deliberately never resets, so it cannot also mean "this job
+  // was replaced". Without that second meaning a superseded cloud / CUBE /
+  // drape ran its multi-GB bag read to completion and threw the result away:
+  // holding the margin spin or dragging a new region starts a fresh load per
+  // valueChanged, and every abandoned one keeps its whole pass set resident
+  // AND occupies a slot in the GLOBAL QThreadPool that the scrub render, the
+  // basemap and the next real job all queue behind. Each dispatch cancels the
+  // previous token and installs a fresh one (see supersedeToken); the render
+  // worker needs none, since it coalesces through rendering_/render_pending_.
+  std::shared_ptr<std::atomic<bool>> cloud_cancel_;
+  std::shared_ptr<std::atomic<bool>> cube_cancel_;
+  std::shared_ptr<std::atomic<bool>> drape_cancel_;
+
+  // Superseding is supersede_token() in worker_cancel.hpp — a free function so
+  // its semantics are unit-testable without a window.
   // Session handoff worker -> UI (the constructor runs in the worker so the
   // UI never touches a multi-GB bag synchronously): the worker parks the
   // session + its epoch here, then emits sessionOpened.
