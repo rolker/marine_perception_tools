@@ -126,8 +126,8 @@ One window, two modes that compose:
   recording along distance travelled; the rolling window paints georeferenced
   sidescan coverage on the map beside the slant-range waterfall, MBES
   backscatter, water-column echogram, and 3D point cloud (linked cursor,
-  middle-click seek, contact marking with Contact-store save/load + GeoJSON
-  export). `--start/--end` (UNIX ns or ISO-8601 UTC) cue the scrub to that
+  middle-click to recentre and seek, contact marking with Contact-store
+  save/load + GeoJSON export). `--start/--end` (UNIX ns or ISO-8601 UTC) cue the scrub to that
   time window once indexing completes.
 - **Explorer mode** — `survey_explorer --index survey_index.db [--stores DIR]`:
   the map becomes the survey index — store-tile basemap (GGGS GeoTIFFs;
