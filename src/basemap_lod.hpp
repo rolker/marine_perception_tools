@@ -28,8 +28,10 @@
 //  - progressive refinement: stale levels stay resident until the selected
 //    level's visible set has fully landed, then they are released — except
 //    the coarsest level, which stays as the permanent cheap backdrop. Every
-//    resident level is drawn, finer over coarser (uma-ADR-0013 D3
-//    corollary), whichever level is selected.
+//    resident level is drawn, finer over coarser (uma-ADR-0013 D5's
+//    ascending guarantee: still-resident finer tiles keep drawing until the
+//    coarser selection's visible set has finished loading), whichever level
+//    is selected.
 // The contrast range and colormap LUT are fixed per open() across every
 // level (the overview fold is MEAN — uma ADR-0011 — so overview values are
 // contained in the fine range), keeping colours stable across LOD switches.
@@ -90,8 +92,8 @@ public:
   void viewChanged(const GeoRect & viewport, double ground_metres_per_pixel);
 
   // Resident tiles in paint order: every resident level, coarse->fine, so
-  // finer tiles always composite OVER coarser ones (uma-ADR-0013 D3
-  // corollary). The selected level is not special-cased — the selection
+  // finer tiles always composite OVER coarser ones (uma-ADR-0013 D5's
+  // ascending guarantee). The selected level is not special-cased — the selection
   // decides what to load, never what to overlay (#43).
   std::vector<OverviewTile> renderTiles() const;
 

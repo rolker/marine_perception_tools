@@ -88,12 +88,12 @@ TEST(SelectLodLevel, DegenerateInputsFallToTheGuard)
 
 // --- Composite order (#43) -------------------------------------------------
 //
-// uma-ADR-0013 D3's corollary: a consumer composites every level at or below
-// its selection with FINER OVER COARSER, always. The selection decides what to
-// LOAD, never what to overlay. renderTiles() returns back-to-front paint
-// order, so the level numbers it yields must be non-decreasing (lower level
-// numbers are coarser — level 0 is the apex) regardless of which level is
-// selected.
+// uma-ADR-0013 D5's ascending guarantee: a consumer composites every level at
+// or below its selection with FINER OVER COARSER, always. The selection
+// decides what to LOAD, never what to overlay. renderTiles() returns
+// back-to-front paint order, so the level numbers it yields must be
+// non-decreasing (lower numbers are coarser — level 0 is the apex) regardless
+// of which level is selected.
 
 // A synthetic resident tile carrying its level in a 1x1 image, so the paint
 // order can be read back from renderTiles()'s output.

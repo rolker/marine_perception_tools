@@ -377,11 +377,13 @@ void BasemapLod::viewChanged(
 
 std::vector<OverviewTile> BasemapLod::renderTiles() const
 {
-  // Paint order (uma-ADR-0013 D3 corollary): a consumer composites every
-  // resident level FINER OVER COARSER, always. `resident_` is keyed by level
-  // and lower level numbers are coarser (level 0 is the apex), so ascending
-  // iteration IS the paint order and the selected level takes no special
-  // place: the selection decides what to LOAD, never what to overlay.
+  // Paint order (uma-ADR-0013 D5's ascending guarantee): still-resident finer
+  // tiles keep drawing until the coarser selection's visible set has finished
+  // loading, so a consumer composites every resident level FINER OVER
+  // COARSER, always. `resident_` is keyed by level and lower numbers are
+  // coarser (level 0 is the apex), so ascending iteration IS the paint order
+  // and the selected level takes no special place: the selection decides what
+  // to LOAD, never what to overlay.
   //
   // Painting the selection last was right only while it was the finest
   // resident level — true zooming in, false zooming out, where
