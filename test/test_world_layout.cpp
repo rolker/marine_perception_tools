@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 
 #include "world_layout.hpp"
@@ -107,4 +108,39 @@ TEST(WorldLayout, PreferredPathsAreUnique)
   auto paths = preferredLayerPaths();
   std::sort(paths.begin(), paths.end());
   EXPECT_EQ(paths.end(), std::unique(paths.begin(), paths.end()));
+}
+
+// A BARE RELATIVE index path must still yield a stores directory (#42 review,
+// independently flagged by Copilot). `path("survey_index.db").parent_path()` is
+// empty and defaultStoresDir({}) is {} by design, so the unresolved form opened
+// the explorer with no basemap and no explanation.
+TEST(WorldLayout, ABareRelativeIndexPathStillResolvesAStoresDir)
+{
+  const auto stores =
+    marine_perception_tools::defaultStoresDirForIndex("survey_index.db");
+
+  EXPECT_FALSE(stores.empty()) << "a bare filename lost its stores directory";
+  EXPECT_TRUE(stores.is_absolute());
+  EXPECT_EQ(std::filesystem::current_path() / "depths" / "processed", stores);
+}
+
+// An absolute index path is unchanged by the resolution.
+TEST(WorldLayout, AnAbsoluteIndexPathIsUnaffected)
+{
+  const auto stores = marine_perception_tools::defaultStoresDirForIndex(
+    "/data/world/survey_index.db");
+
+  EXPECT_EQ(std::filesystem::path("/data/world/depths/processed"), stores);
+}
+
+// A relative path that already names a directory resolves against the cwd
+// rather than being treated as rootless.
+TEST(WorldLayout, ARelativeIndexPathWithAParentResolvesAgainstTheCwd)
+{
+  const auto stores = marine_perception_tools::defaultStoresDirForIndex(
+    "sub/dir/survey_index.db");
+
+  EXPECT_EQ(
+    std::filesystem::current_path() / "sub" / "dir" / "depths" / "processed",
+    stores);
 }

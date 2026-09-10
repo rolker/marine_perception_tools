@@ -172,3 +172,45 @@ TEST(NavTrackHit, AZeroRadiusOnlyHitsAnExactCoincidence)
 }
 
 }  // namespace
+
+// A non-finite fix must be skipped, not selected (#42 review, independently
+// flagged by Copilot). Its pixel distance is NaN, which the radius gate does
+// NOT reject, and once it were `best` no real candidate could beat it — so one
+// bad row would swallow the whole track and return itself with a NaN distance.
+TEST(NavTrackHit, ANonFiniteRowIsSkippedAndDoesNotSwallowTheTrack)
+{
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  std::vector<marine_survey_index::NavPoint> track;
+
+  marine_survey_index::NavPoint bad;
+  bad.t_ns = 1;
+  bad.latitude = nan;
+  bad.longitude = nan;
+  track.push_back(bad);   // first, so it would become `best` before any good row
+
+  marine_survey_index::NavPoint good;
+  good.t_ns = 2;
+  good.latitude = 43.0;
+  good.longitude = -71.0;
+  track.push_back(good);
+
+  const auto hit = nearestTrackFix(track, 43.0, -71.0, 1.0);
+
+  ASSERT_TRUE(hit.has_value());
+  EXPECT_EQ(1u, hit->index) << "the non-finite row was returned";
+  EXPECT_EQ(2, hit->t_ns);
+  EXPECT_TRUE(std::isfinite(hit->distance_px));
+}
+
+// A track of nothing BUT non-finite rows is a miss, not a bogus hit.
+TEST(NavTrackHit, AnAllNonFiniteTrackReturnsNoHit)
+{
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  std::vector<marine_survey_index::NavPoint> track(3);
+  for (auto & p : track) {
+    p.latitude = nan;
+    p.longitude = nan;
+  }
+
+  EXPECT_FALSE(nearestTrackFix(track, 43.0, -71.0, 1.0).has_value());
+}

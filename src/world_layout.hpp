@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -59,6 +60,23 @@ inline std::filesystem::path worldIndexPath(const std::filesystem::path & root)
 inline std::filesystem::path defaultStoresDir(const std::filesystem::path & root)
 {
   return root.empty() ? std::filesystem::path{} : root / "depths" / "processed";
+}
+
+/// The default stores directory for an index the operator named on the command
+/// line, resolved so a BARE RELATIVE filename still works.
+///
+/// `std::filesystem::path("survey_index.db").parent_path()` is empty, and
+/// defaultStoresDir() returns {} for an empty root by design — so
+/// `survey_explorer --index survey_index.db`, run from the directory holding
+/// it, opened with no basemap and no explanation. The "never a relative path"
+/// rule this file states is about $HOME, not about a path the operator typed.
+/// Falls back to the unresolved parent when the filesystem cannot answer.
+inline std::filesystem::path defaultStoresDirForIndex(
+  const std::filesystem::path & index_path)
+{
+  std::error_code ec;
+  const auto resolved = std::filesystem::absolute(index_path, ec);
+  return defaultStoresDir(ec ? index_path.parent_path() : resolved.parent_path());
 }
 
 /// Preferred basemap layers as paths relative to the collection root, in the

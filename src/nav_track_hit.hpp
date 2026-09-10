@@ -89,6 +89,16 @@ inline std::optional<TrackHit> nearestTrackFix(
   std::optional<TrackHit> best;
   for (std::size_t i = 0; i < track.size(); ++i) {
     const auto & p = track[i];
+    // A non-finite fix is not a candidate, and must be skipped BEFORE it can
+    // become `best`: its `px` is NaN, `px > radius_px` is false so the radius
+    // gate does not reject it, and once it is `best` the `px < best` test is
+    // false for every real candidate afterwards — so one bad row would swallow
+    // the whole track and return itself. The index writer filters these, so
+    // this guards a database written by some other path (#42 review, and
+    // independently flagged by Copilot).
+    if (!std::isfinite(p.latitude) || !std::isfinite(p.longitude)) {
+      continue;
+    }
     const double north_m = (p.latitude - lat) * kHitMetresPerDegLat;
     const double east_m = (p.longitude - lon) * kHitMetresPerDegLat * lon_scale;
     const double px = std::hypot(north_m, east_m) / metres_per_pixel;

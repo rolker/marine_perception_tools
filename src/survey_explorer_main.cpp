@@ -222,8 +222,8 @@ int main(int argc, char ** argv)
     if (parser.isSet(stores_opt)) {
       stores_dir = parser.value(stores_opt).toStdString();
     } else {
-      stores_dir = marine_perception_tools::defaultStoresDir(
-        std::filesystem::path(index_path).parent_path()).string();
+      stores_dir = marine_perception_tools::defaultStoresDirForIndex(
+        index_path).string();
     }
     try {
       window.openSurveyIndex(index_path, stores_dir);
