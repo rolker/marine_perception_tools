@@ -820,7 +820,8 @@ bool SidescanBagSession::positionAtDistance(
 }
 
 std::vector<WindowPing> SidescanBagSession::readWindow(
-  double dist_lo, double dist_hi, int max_pings, bool include_down) const
+  double dist_lo, double dist_hi, int max_pings, bool include_down,
+  const std::shared_ptr<std::atomic<bool>> & cancel) const
 {
   const auto snap = snapshot();
   if (!snap) {return {};}
@@ -872,6 +873,9 @@ std::vector<WindowPing> SidescanBagSession::readWindow(
     // seek unsupported on this storage -> fall back to a sequential scan.
   }
   while (reader.has_next()) {
+    if (cancel && cancel->load(std::memory_order_relaxed)) {
+      return {};   // cancelled: an abandoned read publishes nothing (#44)
+    }
     auto bag_msg = reader.read_next();
     if (bag_msg->recv_timestamp > t_hi + kPadNs) {break;}
     auto ch_it = topic_to_channel.find(bag_msg->topic_name);
@@ -901,7 +905,8 @@ std::vector<WindowPing> SidescanBagSession::readWindow(
 }
 
 std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
-  double dist_lo, double dist_hi, int max_pings) const
+  double dist_lo, double dist_hi, int max_pings,
+  const std::shared_ptr<std::atomic<bool>> & cancel) const
 {
   const auto snap = snapshot();
   if (!snap) {return {};}
@@ -949,6 +954,9 @@ std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
     // seek unsupported -> sequential scan
   }
   while (reader.has_next()) {
+    if (cancel && cancel->load(std::memory_order_relaxed)) {
+      return {};   // cancelled: an abandoned read publishes nothing (#44)
+    }
     auto bag_msg = reader.read_next();
     if (bag_msg->recv_timestamp > t_hi + kPadNs) {break;}
     if (bag_msg->topic_name != kMbesDetectionsTopic) {continue;}
@@ -964,16 +972,9 @@ std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
       const std::vector<MbesSounding> sensor = project_detections(det);
       out[idx].world_soundings.reserve(sensor.size());
       for (const auto & s : sensor) {
-        double rx = 0.0;
-        double ry = 0.0;
-        double rz = 0.0;
-        rotate_by_quat(p->qx, p->qy, p->qz, p->qw, s.x, s.y, s.z, rx, ry, rz);
-        MbesSounding w;
-        w.x = p->tx + rx;
-        w.y = p->ty + ry;
-        w.z = p->tz + rz;
-        w.intensity = s.intensity;
-        out[idx].world_soundings.push_back(w);
+        out[idx].world_soundings.push_back(
+          lift_sounding_to_world(
+            s, p->tx, p->ty, p->tz, p->qx, p->qy, p->qz, p->qw));
       }
     } catch (const std::exception &) {
       // skip an unreadable message
@@ -990,7 +991,8 @@ std::vector<MbesWindowPing> SidescanBagSession::readMbesWindow(
 }
 
 std::vector<marine_acoustic_msgs::msg::RawSonarImage> SidescanBagSession::readDownImages(
-  double dist_lo, double dist_hi, int max_pings) const
+  double dist_lo, double dist_hi, int max_pings,
+  const std::shared_ptr<std::atomic<bool>> & cancel) const
 {
   const auto snap = snapshot();
   if (!snap) {return {};}
@@ -1032,6 +1034,9 @@ std::vector<marine_acoustic_msgs::msg::RawSonarImage> SidescanBagSession::readDo
   }
   const std::string down_topic = kSidescanTopics[static_cast<int>(SidescanChannel::Down)];
   while (reader.has_next()) {
+    if (cancel && cancel->load(std::memory_order_relaxed)) {
+      return {};   // cancelled: an abandoned read publishes nothing (#44)
+    }
     auto bag_msg = reader.read_next();
     if (bag_msg->recv_timestamp > t_hi + kPadNs) {break;}
     if (bag_msg->topic_name != down_topic) {continue;}

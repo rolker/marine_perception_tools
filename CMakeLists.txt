@@ -11,6 +11,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(grid_map_core REQUIRED)
@@ -162,8 +163,8 @@ target_link_libraries(survey_explorer
   Qt${QT_VERSION_MAJOR}::Gui
   Qt${QT_VERSION_MAJOR}::OpenGL)
 ament_target_dependencies(survey_explorer
-  cube_bathymetry marine_autonomy marine_colormap marine_sonar_widgets
-  marine_tiled_raster_store)
+  ament_index_cpp cube_bathymetry marine_autonomy marine_colormap
+  marine_sonar_widgets marine_tiled_raster_store)
 target_include_directories(survey_explorer SYSTEM PRIVATE
   ${CUBE_BATHYMETRY_INCLUDE_ROOT})
 
@@ -172,6 +173,17 @@ add_executable(sidescan_target_viewer src/sidescan_target_viewer_shim.cpp)
 
 install(TARGETS sea_surface_tuner sidescan_probe survey_explorer sidescan_target_viewer
   DESTINATION lib/${PROJECT_NAME}
+)
+
+# The vendored world coastline (#41) — public-domain Natural Earth data
+# committed under data/coastline/ so the explorer's index map is navigable
+# with no network, at build time or at run time. Installed as data (the
+# scripts that regenerate it are not; see data/coastline/README.md).
+# NOTE: install(DIRECTORY ...) copies even under --symlink-install, so
+# re-vendoring the data needs a rebuild to take effect.
+install(DIRECTORY data/
+  DESTINATION share/${PROJECT_NAME}/data
+  FILES_MATCHING PATTERN "*.txt" PATTERN "README.md"
 )
 
 if(BUILD_TESTING)
@@ -197,6 +209,15 @@ if(BUILD_TESTING)
   target_include_directories(test_mbes_geometry PRIVATE src)
   ament_target_dependencies(test_mbes_geometry marine_acoustic_msgs)
 
+  # The one rigid sensor->world sounding lift, shared by both bag paths (#42).
+  ament_add_gtest(test_tf_lift test/test_tf_lift.cpp)
+  target_include_directories(test_tf_lift PRIVATE src)
+  ament_target_dependencies(test_tf_lift geometry_msgs marine_acoustic_msgs tf2)
+
+  # Supersede semantics for the background-worker cancel tokens (#42).
+  ament_add_gtest(test_worker_cancel test/test_worker_cancel.cpp)
+  target_include_directories(test_worker_cancel PRIVATE src)
+
   # Pure rolling-distance scrub policy (distance_buffer_policy.hpp) — header-only.
   ament_add_gtest(test_distance_buffer_policy test/test_distance_buffer_policy.cpp)
   target_include_directories(test_distance_buffer_policy PRIVATE src)
@@ -221,9 +242,28 @@ if(BUILD_TESTING)
   ament_add_gtest(test_survey_index_bridge test/test_survey_index_bridge.cpp)
   target_link_libraries(test_survey_index_bridge survey_index_bridge SQLite::SQLite3)
 
+  # Click-versus-drag on the index map (map_gesture.hpp, #42) — header-only.
+  ament_add_gtest(test_map_gesture test/test_map_gesture.cpp)
+  target_include_directories(test_map_gesture PRIVATE src)
+
+  # The eased middle-click recentre glide (view_animation.hpp, #42) —
+  # header-only.
+  ament_add_gtest(test_view_animation test/test_view_animation.cpp)
+  target_include_directories(test_view_animation PRIVATE src)
+
+  # The world-collection layout contract (world_layout.hpp, #40) — header-only.
+  ament_add_gtest(test_world_layout test/test_world_layout.cpp)
+  target_include_directories(test_world_layout PRIVATE src)
+
   # Pure tile-selection math (tile_selection.hpp, #24) — header-only.
   ament_add_gtest(test_tile_selection test/test_tile_selection.cpp)
   target_include_directories(test_tile_selection PRIVATE src)
+
+  # Vendored coastline loading, decimation and the scale-fade rule
+  # (coastline_data.hpp, #41) — header-only; covers the empty and malformed
+  # dataset paths that must degrade to "no coastline".
+  ament_add_gtest(test_coastline_data test/test_coastline_data.cpp)
+  target_include_directories(test_coastline_data PRIVATE src)
 
   # Pure multi-resolution tick ladder for the GeoZui-style time bar
   # (time_bar_model.hpp, #24) — header-only.
@@ -235,6 +275,19 @@ if(BUILD_TESTING)
   ament_add_gtest(test_nav_track_lookup test/test_nav_track_lookup.cpp)
   target_include_directories(test_nav_track_lookup PRIVATE src)
   ament_target_dependencies(test_nav_track_lookup marine_survey_index)
+
+  # The CUBE lab's angle-aware per-sounding uncertainty (sounding_uncertainty.hpp,
+  # #49) — header-only, no deps: the propagation formula, its nadir reduction,
+  # and its refusal to answer for missing beam geometry.
+  ament_add_gtest(test_sounding_uncertainty test/test_sounding_uncertainty.cpp)
+  target_include_directories(test_sounding_uncertainty PRIVATE src)
+
+  # Position -> time over the nav track: the nearest-fix search under the map
+  # cursor and its screen-pixel hit radius (nav_track_hit.hpp, #46) —
+  # header-only + the query lib's NavPoint.
+  ament_add_gtest(test_nav_track_hit test/test_nav_track_hit.cpp)
+  target_include_directories(test_nav_track_hit PRIVATE src)
+  ament_target_dependencies(test_nav_track_hit marine_survey_index)
 
   # Bag-index cache serialization (#24): round-trip + identity/version/
   # truncation invalidation — links sidescan_core (SessionIndex).
@@ -265,10 +318,21 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_geo_anchor test/test_map_geo_anchor.cpp)
   target_include_directories(test_map_geo_anchor PRIVATE src)
 
+  # The geographic cursor readout's rules (hover_geo_readout.hpp, #47) —
+  # header-only and Qt-free: per-pane conversion through a frame's anchor,
+  # the attributed one-line format, and which pane owns the readout.
+  ament_add_gtest(test_hover_geo_readout test/test_hover_geo_readout.cpp)
+  target_include_directories(test_hover_geo_readout PRIVATE src)
+
   # Robust basemap contrast (basemap_contrast.hpp, #24) — header-only. Pins
   # the desk-verify bug: store outlier cells must not own the colour scale.
   ament_add_gtest(test_basemap_contrast test/test_basemap_contrast.cpp)
   target_include_directories(test_basemap_contrast PRIVATE src)
+
+  # The 3D pane's one colour vocabulary (#36): the entries, their order, and
+  # which channels a layer cannot carry. Header-only and Qt-free.
+  ament_add_gtest(test_color_vocabulary test/test_color_vocabulary.cpp)
+  target_include_directories(test_color_vocabulary PRIVATE src)
 
   # Multi-pass cloud loader (#24): error paths (missing bag, empty input) —
   # the happy path needs a real bag and is covered by test_mbes_window_reader's
@@ -340,9 +404,13 @@ if(BUILD_TESTING)
     src/sidescan_drape_loader.cpp
     src/cube_export.cpp)
   target_include_directories(test_survey_explorer_window PRIVATE src)
+  # rosbag2_cpp + the message packages are used directly by the test itself:
+  # the bounded-teardown test (#44) writes a synthetic bag to start a real
+  # long job for the close to interrupt.
   ament_target_dependencies(test_survey_explorer_window
-    cube_bathymetry marine_autonomy marine_colormap marine_sonar_widgets
-    marine_tiled_raster_store)
+    ament_index_cpp cube_bathymetry marine_acoustic_msgs marine_autonomy
+    marine_colormap marine_sonar_widgets marine_tiled_raster_store
+    rclcpp rosbag2_cpp tf2_msgs)
   target_include_directories(test_survey_explorer_window SYSTEM PRIVATE
     ${CUBE_BATHYMETRY_INCLUDE_ROOT})
   target_link_libraries(test_survey_explorer_window

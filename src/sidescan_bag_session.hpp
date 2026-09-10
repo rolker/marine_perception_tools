@@ -254,8 +254,15 @@ public:
   // resident index holds no samples, so this is what bounds memory to the window.
   // `max_pings > 0` keeps only the most recent `max_pings` (stationary cap, so a
   // stopped boat re-reads only a bounded set). Returned in along-track order.
+  // `cancel` (optional) is polled per bag message while the samples are
+  // re-read (#44): a window read seeks into a multi-hour recording, and on
+  // storage without seek support it scans from the start, so anything
+  // coarser than per message can leave a closing window waiting minutes.
+  // A cancelled read returns nothing — a short window and an abandoned one
+  // are not the same thing.
   std::vector<WindowPing> readWindow(
-    double dist_lo, double dist_hi, int max_pings = 0, bool include_down = false) const;
+    double dist_lo, double dist_hi, int max_pings = 0, bool include_down = false,
+    const std::shared_ptr<std::atomic<bool>> & cancel = {}) const;
 
   // M3 detection pings whose along-track distance lies in [dist_lo, dist_hi],
   // with sample data read fresh and projected: per ping the raw per-beam
@@ -263,13 +270,15 @@ public:
   // Shares the sidescan distance axis, so one scrub drives both. `max_pings > 0`
   // applies the same stationary cap as readWindow.
   std::vector<MbesWindowPing> readMbesWindow(
-    double dist_lo, double dist_hi, int max_pings = 0) const;
+    double dist_lo, double dist_hi, int max_pings = 0,
+    const std::shared_ptr<std::atomic<bool>> & cancel = {}) const;
 
   // The down-channel (water-column) pings in [dist_lo, dist_hi] as raw
   // RawSonarImage messages, in along-track order, for the echogram pane. Re-read
   // from the bag like readWindow; `max_pings > 0` applies the stationary cap.
   std::vector<marine_acoustic_msgs::msg::RawSonarImage> readDownImages(
-    double dist_lo, double dist_hi, int max_pings = 0) const;
+    double dist_lo, double dist_hi, int max_pings = 0,
+    const std::shared_ptr<std::atomic<bool>> & cancel = {}) const;
 
   // Total along-track distance resolved so far (metres); the final length once the
   // index is complete.

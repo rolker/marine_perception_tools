@@ -14,9 +14,12 @@
 
 #include "sidescan_canvas.hpp"
 
+#include <QAction>
 #include <QColor>
+#include <QContextMenuEvent>
 #include <QGuiApplication>
 #include <QFont>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
@@ -26,8 +29,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <utility>
 #include <vector>
+
+#include "map_gesture.hpp"
+#include "view_animation.hpp"
 
 namespace marine_perception_tools
 {
@@ -55,6 +62,176 @@ SidescanCanvas::SidescanCanvas(QWidget * parent)
       cache_rebuild_due_ = true;
       update();
     });
+  // Middle-click recentre glide (#42): ~60 Hz frames, but the position comes
+  // from wall time (recenter_clock_), not from a frame count, so a dropped
+  // frame costs smoothness and never the duration.
+  recenter_timer_.setInterval(16);
+  connect(&recenter_timer_, &QTimer::timeout, this, [this]() {stepRecenter();});
+  // The map's own context-menu entry (#42). Clearing the region is canvas
+  // state, so the canvas carries this one; anything that is the window's
+  // business is added by the window through addContextMenuEntry.
+  addContextMenuEntry(
+    ContextMenuEntry{
+      tr("Clear Selection"),
+      [this]() {clearRegion();},
+      [this]() {return hasRegion();}});
+}
+
+void SidescanCanvas::addContextMenuEntry(ContextMenuEntry entry)
+{
+  if (!entry.invoke) {return;}   // an inert entry would read as a broken action
+  context_menu_entries_.push_back(std::move(entry));
+}
+
+QMenu * SidescanCanvas::buildContextMenu(QWidget * parent)
+{
+  auto * menu = new QMenu(parent);
+  for (const auto & entry : context_menu_entries_) {
+    QAction * action = menu->addAction(entry.text);
+    // Greyed out, not hidden: the menu keeps one shape, and an entry that
+    // would do nothing never reads as an available action.
+    action->setEnabled(!entry.enabled || entry.enabled());
+    const auto invoke = entry.invoke;
+    connect(action, &QAction::triggered, this, [invoke]() {invoke();});
+  }
+  return menu;
+}
+
+std::optional<GeoPoint> SidescanCanvas::screenToGeo(const QPoint & pos) const
+{
+  const QPointF map = screenToMap(pos.x(), pos.y());
+  if (geo_mode_) {
+    // With a survey index the canvas plane IS geographic, so every pixel of
+    // it has a position — even over a bag that cannot be placed on it.
+    const auto geo = canvasToGeo(map.x(), map.y());
+    return GeoPoint{geo.first, geo.second};
+  }
+  // Bag-only: canvas metres are the bag's map-ENU, so the position comes
+  // through the bag's own anchor — and a bag with no earth reference has
+  // none, which is nothing rather than the origin.
+  return geo_from_map(map_anchor_, map.x(), map.y());
+}
+
+void SidescanCanvas::contextMenuEvent(QContextMenuEvent * event)
+{
+  // Captured here, before the menu exists, because this is the last moment
+  // the pointer is still on the point the operator meant (see contextMenuGeo).
+  context_menu_geo_ = screenToGeo(event->pos());
+  if (context_menu_entries_.empty()) {
+    QWidget::contextMenuEvent(event);
+    return;
+  }
+  QMenu * menu = buildContextMenu(this);
+  // popup(), not exec(): the menu must not run a nested event loop inside the
+  // event handler, and it deletes itself when it closes.
+  menu->setAttribute(Qt::WA_DeleteOnClose);
+  menu->popup(event->globalPos());
+  event->accept();
+}
+
+void SidescanCanvas::clearRegion()
+{
+  const bool had_tiles = !selected_tiles_.empty();
+  const bool had_box = cube_box_geo_.has_value();
+  if (!had_tiles && !had_box) {return;}
+  selected_tiles_.clear();
+  cube_box_geo_.reset();
+  update();
+  if (had_box) {
+    emit cubeBoxCleared();
+  }
+  if (had_tiles) {
+    emit tileSelectionChanged();
+  }
+}
+
+// --- middle-click recentre glide (#42) --------------------------------------
+
+void SidescanCanvas::setRecenterDurationMs(int ms)
+{
+  recenter_duration_ms_ = std::max(0, ms);
+  if (recentering_ && recenter_duration_ms_ == 0) {
+    settleRecenter();   // switching to instant lands whatever is in flight
+  }
+}
+
+void SidescanCanvas::startRecenter(const QPointF & target)
+{
+  // The map is about to move out from under the pointer — on the instant path
+  // as much as the glide — so whatever was highlighted is no longer where the
+  // cursor is (#46).
+  emit hoverInterrupted();
+  recenter_to_ = target;
+  user_adjusted_ = true;
+  fit_pending_ = false;
+  if (recenter_duration_ms_ <= 0) {
+    // Instant path (headless snapshots, tests): identical outcome, no frames
+    // in between for a capture to land on.
+    recentering_ = false;
+    recenter_timer_.stop();
+    center_map_ = target;
+    update();
+    emit viewChanged();
+    return;
+  }
+  // A second middle click retargets rather than cancelling: the gesture means
+  // "go to here", so a fresh one means "actually, here" — and starting from
+  // wherever the glide has reached keeps the map continuous, where cancelling
+  // to a stop first would stutter. The full duration restarts, so the second
+  // click reads exactly like the first.
+  recenter_from_ = center_map_;
+  recentering_ = true;
+  recenter_clock_.start();
+  recenter_timer_.start();
+  update();
+}
+
+void SidescanCanvas::stepRecenter()
+{
+  if (!recentering_) {
+    recenter_timer_.stop();
+    return;
+  }
+  const double t = animationProgress(
+    static_cast<double>(recenter_clock_.elapsed()),
+    static_cast<double>(recenter_duration_ms_));
+  if (t >= 1.0) {
+    settleRecenter();
+    return;
+  }
+  center_map_ = QPointF(
+    easedInterpolate(recenter_from_.x(), recenter_to_.x(), t),
+    easedInterpolate(recenter_from_.y(), recenter_to_.y(), t));
+  update();   // repaints through the translated blit; the cache is untouched
+}
+
+void SidescanCanvas::settleRecenter()
+{
+  if (!recentering_) {
+    return;
+  }
+  recenter_timer_.stop();
+  recentering_ = false;
+  center_map_ = recenter_to_;   // exact: the cache compares centres for equality
+  update();   // the one full layer-cache rebuild for the whole glide
+  emit viewChanged();
+}
+
+void SidescanCanvas::abandonRecenter()
+{
+  if (!recentering_) {
+    return;
+  }
+  // The operator started something else. Stop where the glide stands and let
+  // the new gesture own the view from there — landing on the old target
+  // afterwards would move the map out from under them.
+  recenter_timer_.stop();
+  recentering_ = false;
+}
+
+void SidescanCanvas::finishRecenterNow()
+{
+  settleRecenter();
 }
 
 // --- geographic frame -------------------------------------------------------
@@ -93,6 +270,23 @@ void SidescanCanvas::setNavTrack(
   layer_cache_valid_ = false;
   rebuildGeoLayerGeometry();
   update();
+}
+
+void SidescanCanvas::setCoastline(Coastline coastline)
+{
+  coastline_geo_ = std::move(coastline);
+  layer_cache_valid_ = false;
+  rebuildGeoLayerGeometry();
+  update();
+}
+
+void SidescanCanvas::setCoastlineVisible(bool on)
+{
+  if (show_coastline_ != on) {
+    show_coastline_ = on;
+    layer_cache_valid_ = false;
+    update();
+  }
 }
 
 void SidescanCanvas::setIndexTiles(const std::vector<GeoRect> & tiles)
@@ -152,14 +346,45 @@ void SidescanCanvas::setIndexTilesVisible(bool on)
   }
 }
 
+void SidescanCanvas::setMetricGridVisible(bool on)
+{
+  if (show_metric_grid_ != on) {
+    show_metric_grid_ = on;
+    layer_cache_valid_ = false;   // the grid lives in the cached static layer
+    update();
+  }
+}
+
 void SidescanCanvas::setTimeArrow(const std::optional<TimeArrow> & arrow)
 {
   time_arrow_ = arrow;
   update();
 }
 
+void SidescanCanvas::setHighlightedFix(const std::optional<HighlightedFix> & fix)
+{
+  // Called at mouse-move rate, so repaint only on a real change: the same fix
+  // re-reported as the cursor slides along it must not queue a frame.
+  const bool same = (highlighted_fix_.has_value() == fix.has_value()) &&
+    (!fix.has_value() ||
+    (highlighted_fix_->lat == fix->lat && highlighted_fix_->lon == fix->lon));
+  if (same) {
+    return;
+  }
+  highlighted_fix_ = fix;
+  update();   // a dynamic overlay: no layer-cache invalidation
+}
+
+bool SidescanCanvas::pointerGestureActive() const
+{
+  return (region_selecting_ && region_dragged_) ||
+         (middle_dragging_ && middle_moved_) ||
+         mark_mode_ || recentering_;
+}
+
 void SidescanCanvas::fitGeo(double south, double west, double north, double east)
 {
+  abandonRecenter();   // an explicit fit replaces the view the glide was heading for
   fit_south_ = south;
   fit_west_ = west;
   fit_north_ = north;
@@ -230,6 +455,8 @@ void SidescanCanvas::rebuildGeoLayerGeometry()
   store_tile_rects_.clear();
   nav_segments_.clear();
   index_tiles_.clear();
+  coastline_.clear();
+  coastline_bounds_.clear();
   if (!geo_mode_) {
     return;
   }
@@ -239,6 +466,22 @@ void SidescanCanvas::rebuildGeoLayerGeometry()
     const QPointF ne = geoToCanvas(tile.north, tile.east);
     store_tile_rects_.emplace_back(
       sw.x(), sw.y(), ne.x() - sw.x(), ne.y() - sw.y());
+  }
+  coastline_.clear();
+  coastline_bounds_.clear();
+  coastline_.reserve(coastline_geo_.lines.size());
+  coastline_bounds_.reserve(coastline_geo_.lines.size());
+  for (const auto & line : coastline_geo_.lines) {
+    QPolygonF poly;
+    poly.reserve(static_cast<int>(line.points.size()));
+    for (const auto & [lat, lon] : line.points) {
+      poly << geoToCanvas(lat, lon);
+    }
+    const QPointF sw = geoToCanvas(line.south, line.west);
+    const QPointF ne = geoToCanvas(line.north, line.east);
+    coastline_bounds_.emplace_back(
+      sw.x(), sw.y(), ne.x() - sw.x(), ne.y() - sw.y());
+    coastline_.push_back(std::move(poly));
   }
   nav_segments_.reserve(nav_segments_geo_.size());
   for (const auto & seg : nav_segments_geo_) {
@@ -321,6 +564,7 @@ void SidescanCanvas::setCenter(double map_x, double map_y)
   if (!mapPlaceable()) {
     return;
   }
+  abandonRecenter();   // following the playhead outranks a glide already running
   center_map_ = bagToCanvas(map_x, map_y);
   update();
 }
@@ -329,6 +573,11 @@ void SidescanCanvas::setMarkMode(bool on)
 {
   mark_mode_ = on;
   setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
+  if (on) {
+    // An explicitly chosen mode owns left-drag; the nav-track highlight must
+    // not sit there offering a click that marking is about to take (#46).
+    emit hoverInterrupted();
+  }
 }
 
 void SidescanCanvas::setCursorWorld(const std::optional<QPointF> & map_point)
@@ -360,6 +609,7 @@ QPointF SidescanCanvas::screenToMap(double sx, double sy) const
 
 void SidescanCanvas::resetView()
 {
+  abandonRecenter();
   double min_x = 0.0;
   double min_y = 0.0;
   double max_x = 0.0;
@@ -409,6 +659,9 @@ void SidescanCanvas::resetView()
 
 void SidescanCanvas::drawGrid(QPainter & painter) const
 {
+  if (!show_metric_grid_) {
+    return;
+  }
   const QPointF tl = screenToMap(0, 0);
   const QPointF br = screenToMap(width(), height());
   const double min_x = std::min(tl.x(), br.x());
@@ -436,6 +689,59 @@ void SidescanCanvas::drawGrid(QPainter & painter) const
     const QPointF b = mapToScreen(max_x, y);
     painter.drawLine(a, b);
     painter.drawText(QPointF(2, a.y() - 2), QString::number(y, 'f', 0));
+  }
+}
+
+void SidescanCanvas::drawCoastline(QPainter & painter) const
+{
+  if (coastline_.empty() || !show_coastline_) {
+    return;
+  }
+  // The scale rule (coastline_data.hpp): full strength where nothing else
+  // tells the operator where they are, gone before survey zoom. This is the
+  // whole reason the layer is safe to ship — a generalised coastline that
+  // stayed visible while the operator zoomed into a survey would read as
+  // chart detail and be wrong by hundreds of metres.
+  const double fade = coastlineFadeAlpha(groundMetresPerPixel());
+  if (fade <= 0.0) {
+    return;
+  }
+  // Desaturated slate, kept off the blue-green end the depth colormaps own,
+  // and never brighter than the nav track's veil.
+  QPen pen(QColor(150, 165, 180, static_cast<int>(std::lround(150.0 * fade))));
+  pen.setWidthF(1.0);
+  painter.setPen(pen);
+  painter.setBrush(Qt::NoBrush);
+  const QRectF viewport(0, 0, width(), height());
+  for (std::size_t i = 0; i < coastline_.size(); ++i) {
+    // Cull by the polyline's own bounds first: most of the world is off
+    // screen at every zoom the layer is drawn at.
+    const auto & b = coastline_bounds_[i];
+    const QPointF nw = mapToScreen(b.left(), b.top() + b.height());
+    const QPointF se = mapToScreen(b.left() + b.width(), b.top());
+    if (!QRectF(nw, se).normalized().adjusted(-2, -2, 2, 2).intersects(viewport)) {
+      continue;
+    }
+    // Sparse, as for the nav track: skip points that advance the polyline by
+    // less than ~2 screen px (60k world points collapse to a few thousand).
+    const auto & seg = coastline_[i];
+    if (seg.size() < 2) {
+      continue;
+    }
+    QPolygonF screen;
+    screen.reserve(seg.size());
+    QPointF last = mapToScreen(seg.front().x(), seg.front().y());
+    screen << last;
+    for (int j = 1; j < seg.size(); ++j) {
+      const QPointF pt = mapToScreen(seg[j].x(), seg[j].y());
+      if (j == seg.size() - 1 ||
+        std::abs(pt.x() - last.x()) + std::abs(pt.y() - last.y()) >= 2.0)
+      {
+        screen << pt;
+        last = pt;
+      }
+    }
+    painter.drawPolyline(screen);
   }
 }
 
@@ -526,9 +832,16 @@ void SidescanCanvas::rebuildLayerCache()
   if (size().isEmpty()) {
     return;   // pre-layout paint: nothing sane to rasterize yet
   }
+  ++layer_cache_rebuilds_;
   layer_cache_ = QPixmap(size());
   QPainter painter(&layer_cache_);
   painter.fillRect(layer_cache_.rect(), QColor(20, 24, 28));
+
+  // Bottom of the stack, under the store basemap: an orientation layer must
+  // never occlude real data (#41).
+  if (geo_mode_) {
+    drawCoastline(painter);
+  }
 
   if (geo_mode_ && !store_tile_rects_.empty()) {
     // Nearest-neighbour on purpose: store cells must stay crisp pixels so
@@ -566,16 +879,23 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
   // Static layers from the cache (see rebuildLayerCache): a same-view repaint
   // is a blit; a mid-pan repaint blits the stale cache translated and rebuilds
   // on release; anything else (zoom, resize, data change) rebuilds now.
-  // A lost left-button release (modal mid-drag, grab stolen) must not pin us
-  // on the translated-blit branch forever (review round-2 finding).
-  if (panning_ && !(QGuiApplication::mouseButtons() & Qt::LeftButton)) {
+  // A lost middle-button release (modal mid-drag, grab stolen) must not pin
+  // us on the translated-blit branch forever (review round-2 finding). The
+  // button is the middle one since #42 moved panning off left-drag.
+  if (panning_ && !(QGuiApplication::mouseButtons() & Qt::MiddleButton)) {
     panning_ = false;
   }
   const bool view_matches = layer_cache_valid_ && cache_size_ == size() &&
     cache_px_per_m_ == px_per_m_ && cache_center_ == center_map_;
   const bool stale_ok = layer_cache_valid_ && cache_size_ == size() &&
     !cache_rebuild_due_;
-  const bool pan_blit = panning_ && stale_ok && cache_px_per_m_ == px_per_m_;
+  // A recentre glide moves the centre every frame for three quarters of a
+  // second (#42). It rides the same translated blit as a pan for exactly the
+  // reason the pan does: a per-frame rebuild of the coastline, basemap and
+  // tile grid would stutter on a collection-wide view. One rebuild happens
+  // when it settles, on the frame after recentering_ goes false.
+  const bool pan_blit = (panning_ || recentering_) && stale_ok &&
+    cache_px_per_m_ == px_per_m_;
   // A zoom step (wheel) blits the stale cache scaled about the widget centre
   // — same slippy-map idea as the pan blit — and queues one full-quality
   // rebuild for when the wheel settles (#26 snappiness).
@@ -679,6 +999,21 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     }
   }
 
+  // The nav-track fix under the cursor (#46). Drawn as a filled disc with a
+  // dark rim so it reads against both the pale track and the store basemap,
+  // in a colour used nowhere else on this map (the track is white, the time
+  // arrow orange, contacts magenta, the linked cursor cyan) — the operator
+  // must never have to work out which of two markers he is about to click.
+  if (geo_mode_ && highlighted_fix_) {
+    const QPointF c = geoToCanvas(highlighted_fix_->lat, highlighted_fix_->lon);
+    const QPointF p = mapToScreen(c.x(), c.y());
+    constexpr double kR = 4.5;   // px; comfortably inside kFixHitRadiusPx
+    painter.setPen(QPen(QColor(20, 20, 20), 1.5));
+    painter.setBrush(QColor(255, 235, 59));   // highlight yellow
+    painter.drawEllipse(p, kR, kR);
+    painter.setBrush(Qt::NoBrush);
+  }
+
   // Time-bar position arrow: the boat at the bar's centre time, in the 3D
   // pane's boat-arrow orange for consistent iconography. Drawn near the TOP
   // of the stack — it is a transient indicator and must never hide under the
@@ -728,17 +1063,8 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     painter.drawRect(QRectF(mark_start_, mark_cur_).normalized());
   }
 
-  // Rubber band while selecting tiles (ctrl-drag).
-  if (band_selecting_) {
-    QPen pen(QColor(0, 255, 255));
-    pen.setStyle(Qt::DashLine);
-    painter.setPen(pen);
-    painter.setBrush(QColor(0, 255, 255, 30));
-    painter.drawRect(QRectF(band_start_, band_cur_).normalized());
-  }
-
-  // CUBE box (#27): the persistent geographic box, plus the live shift-drag
-  // rubber band. Orange like the time arrow — the "lab focus" accents.
+  // The region (#42): the persistent geographic rectangle every action reads.
+  // Orange like the time arrow — the "lab focus" accents.
   if (geo_mode_ && cube_box_geo_) {
     const QPointF sw = geoToCanvas(cube_box_geo_->south, cube_box_geo_->west);
     const QPointF ne = geoToCanvas(cube_box_geo_->north, cube_box_geo_->east);
@@ -750,12 +1076,14 @@ void SidescanCanvas::paintEvent(QPaintEvent * event)
     painter.setBrush(QColor(255, 140, 0, 25));
     painter.drawRect(QRectF(s_sw, s_ne).normalized());
   }
-  if (cube_box_selecting_) {
+  // Live rubber band while the region is being dragged. Dashed, so a drag in
+  // progress never looks like a settled selection.
+  if (region_selecting_) {
     QPen pen(QColor(255, 140, 0));
     pen.setStyle(Qt::DashLine);
     painter.setPen(pen);
     painter.setBrush(QColor(255, 140, 0, 30));
-    painter.drawRect(QRectF(cube_box_start_, cube_box_cur_).normalized());
+    painter.drawRect(QRectF(region_start_, region_cur_).normalized());
   }
 }
 
@@ -774,6 +1102,11 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
 {
   const double steps = event->angleDelta().y() / 120.0;
   if (steps == 0.0) {return;}
+  abandonRecenter();   // zooming takes the view over from here, mid-glide
+  // A zoom changes what "close on screen" means, and the map slid under a
+  // pointer that did not move, so no move event will correct the highlight
+  // (#46). Drop it; the next move re-searches at the new scale.
+  emit hoverInterrupted();
   const QPointF cursor = event->position();
   const QPointF before = screenToMap(cursor.x(), cursor.y());
   const double factor = std::pow(1.2, steps);
@@ -789,38 +1122,43 @@ void SidescanCanvas::wheelEvent(QWheelEvent * event)
 
 void SidescanCanvas::mousePressEvent(QMouseEvent * event)
 {
+  // The middle button carries both halves of "go to here" (#42, the GeoZui
+  // idiom): press-and-release centres the view on the point, press-and-drag
+  // pans. Which one it was is only known at release, so the decision waits
+  // there and nothing is committed on press.
+  // Any new press ends a recentre glide in flight (#42): a middle press is
+  // about to pan or retarget, and a left press draws a region whose corners
+  // are read in screen pixels — the map must not slide out from under it.
+  // The right button takes no part in the drag gestures — it opens the map
+  // context menu (contextMenuEvent) — so it must not abandon a glide either:
+  // opening a menu neither pans the view nor draws a region.
+  if (event->button() != Qt::LeftButton && event->button() != Qt::MiddleButton) {return;}
+  abandonRecenter();
   if (event->button() == Qt::MiddleButton) {
-    const QPointF m = screenToMap(event->pos().x(), event->pos().y());
-    const auto bag = canvasToBag(m.x(), m.y());
-    if (bag) {
-      emit seekWorld(bag->x(), bag->y());   // middle-click: seek to this map position
-    }
+    middle_start_ = event->pos();
+    last_drag_pos_ = event->pos();
+    middle_dragging_ = true;
+    middle_moved_ = false;
     return;
   }
   if (event->button() != Qt::LeftButton) {return;}
-  if ((event->modifiers() & Qt::ControlModifier) && !index_tiles_.empty()) {
-    band_selecting_ = true;
-    band_start_ = event->pos();
-    band_cur_ = event->pos();
-    update();
-    return;
-  }
-  if ((event->modifiers() & Qt::ShiftModifier) && geo_mode_) {
-    cube_box_selecting_ = true;   // shift-drag CUBE box (#27)
-    cube_box_start_ = event->pos();
-    cube_box_cur_ = event->pos();
-    update();
-    return;
-  }
+  // Contact marking is an explicitly chosen, visible mode, so it outranks the
+  // default left-drag gesture while it is on.
   if (mark_mode_) {
     marking_ = true;
     mark_start_ = event->pos();
     mark_cur_ = event->pos();
     update();
-  } else {
-    last_drag_pos_ = event->pos();
-    panning_ = true;   // repaint via the translated cache until release
+    return;
   }
+  // Left drag draws the map's one region (#42). Ctrl and Shift no longer mean
+  // anything here: the region replaced both the index-tile rubber band and the
+  // separate CUBE box, so one rectangle feeds every action.
+  region_selecting_ = true;
+  region_dragged_ = false;   // not a gesture until it travels (#46)
+  region_start_ = event->pos();
+  region_cur_ = event->pos();
+  update();
 }
 
 void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
@@ -834,18 +1172,43 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
   } else {
     emit hoverWorld(0.0, 0.0, false);
   }
-  if (geo_mode_) {
-    const auto geo = canvasToGeo(hov.x(), hov.y());
-    emit hoverGeo(geo.first, geo.second);
+  // Geographic readout (#47), through the same screenToGeo the context menu's
+  // captured position takes — so what the operator copies is what he read.
+  if (const auto geo = screenToGeo(event->pos())) {
+    emit hoverGeo(geo->lat, geo->lon, true);
+  } else {
+    emit hoverGeo(0.0, 0.0, false);
   }
-  if (!(event->buttons() & Qt::LeftButton)) {return;}
-  if (band_selecting_) {
-    band_cur_ = event->pos();
-    update();
+  // Panning moved to the middle button (#42), because left-drag now draws the
+  // region. A middle drag that has travelled past the click threshold is a
+  // pan, and having moved at all is what stops the release from centring.
+  if ((event->buttons() & Qt::MiddleButton) && middle_dragging_) {
+    if (!middle_moved_ &&
+      (event->pos() - middle_start_).manhattanLength() > kClickSlopPx)
+    {
+      middle_moved_ = true;
+      emit hoverInterrupted();   // a pan owns the pointer from here (#46)
+    }
+    if (middle_moved_) {
+      panning_ = true;   // repaint via the translated cache until release
+      const QPoint delta = event->pos() - last_drag_pos_;
+      last_drag_pos_ = event->pos();
+      center_map_ += QPointF(-delta.x() / px_per_m_, delta.y() / px_per_m_);
+      user_adjusted_ = true;
+      fit_pending_ = false;
+      update();
+    }
     return;
   }
-  if (cube_box_selecting_) {
-    cube_box_cur_ = event->pos();
+  if (!(event->buttons() & Qt::LeftButton)) {return;}
+  if (region_selecting_) {
+    if (!region_dragged_ &&
+      (event->pos() - region_start_).manhattanLength() > kClickSlopPx)
+    {
+      region_dragged_ = true;
+      emit hoverInterrupted();   // drawing a region, not picking a fix (#46)
+    }
+    region_cur_ = event->pos();
     update();
     return;
   }
@@ -854,68 +1217,81 @@ void SidescanCanvas::mouseMoveEvent(QMouseEvent * event)
     update();
     return;
   }
-  const QPoint delta = event->pos() - last_drag_pos_;
-  last_drag_pos_ = event->pos();
-  center_map_ += QPointF(-delta.x() / px_per_m_, delta.y() / px_per_m_);
-  user_adjusted_ = true;
-  fit_pending_ = false;
-  update();
 }
 
 void SidescanCanvas::mouseReleaseEvent(QMouseEvent * event)
 {
-  if (event->button() != Qt::LeftButton) {return;}
-  if (panning_) {
-    panning_ = false;
-    update();   // rebuild the layer cache at the settled view
-    emit viewChanged();
-  }
-  if (band_selecting_) {
-    band_selecting_ = false;
-    bool changed = false;
-    if ((event->pos() - band_start_).manhattanLength() <= 4) {
-      // A ctrl-click, not a drag: toggle the tile under the cursor.
-      const QPointF m = screenToMap(event->pos().x(), event->pos().y());
-      const int hit = hitRect(index_tiles_, m.x(), m.y());
-      if (hit >= 0) {
-        toggleSelection(selected_tiles_, static_cast<std::size_t>(hit));
-        changed = true;
-      }
-    } else {
-      // Rubber band: add every intersecting tile to the selection.
-      const QPointF a = screenToMap(band_start_.x(), band_start_.y());
-      const QPointF b = screenToMap(event->pos().x(), event->pos().y());
-      for (const auto idx : rectsInBox(index_tiles_, a.x(), a.y(), b.x(), b.y())) {
-        changed = selected_tiles_.insert(idx).second || changed;
-      }
+  // Middle release: a pan settles, a click centres. Centring keeps the seek
+  // that this gesture already performed in every other pane (#42) — the two
+  // compose as "go to here", spatially and, with a bag open, in time.
+  if (event->button() == Qt::MiddleButton && middle_dragging_) {
+    middle_dragging_ = false;
+    if (middle_moved_) {
+      panning_ = false;
+      update();   // rebuild the layer cache at the settled view
+      emit viewChanged();
+      return;
     }
-    update();
-    if (changed) {
-      emit tileSelectionChanged();
+    const QPointF m = screenToMap(event->pos().x(), event->pos().y());
+    // The view glides to the point over about three quarters of a second so
+    // the operator can see where the map went (startRecenter emits
+    // viewChanged when it settles, or immediately on the instant path).
+    startRecenter(m);
+    // The seek fires at the CLICK, not at the landing: the time cursor must
+    // not lag the pointer by the length of the animation.
+    const auto bag = canvasToBag(m.x(), m.y());
+    if (bag) {
+      emit seekWorld(bag->x(), bag->y());
     }
     return;
   }
-  if (cube_box_selecting_) {
-    cube_box_selecting_ = false;
-    if ((event->pos() - cube_box_start_).manhattanLength() <= 4) {
-      // A shift-click, not a drag: clear the box.
-      if (cube_box_geo_) {
-        cube_box_geo_.reset();
-        emit cubeBoxCleared();
-      }
-    } else {
-      const QPointF a = screenToMap(cube_box_start_.x(), cube_box_start_.y());
-      const QPointF b = screenToMap(event->pos().x(), event->pos().y());
+  if (event->button() != Qt::LeftButton) {return;}
+  if (region_selecting_) {
+    region_selecting_ = false;
+    region_dragged_ = false;
+    const bool was_click =
+      (event->pos() - region_start_).manhattanLength() <= kClickSlopPx;
+    // One rectangle, both consequences: the exact bounds are the processing
+    // extent, and the index tiles it covers are the pass query.
+    //
+    // A click with no drag does NOTHING to the region (#42). It used to clear
+    // it, and that is the one destructive thing a bare click could do: the
+    // operator clicked the map meaning "select this nav-track line" — which
+    // is not a gesture this map has, passes being chosen from the time bar or
+    // the pass list — and lost his region. Clearing now lives in the
+    // right-click menu, where it has to be asked for by name.
+    if (was_click) {
+      update();   // erase the zero-size rubber band the press started
+      // Still nothing to the region. It does now REPORT itself, so the window
+      // can cue the time cursor to a highlighted nav-track fix (#46) — a
+      // non-destructive action that exists only when there is a hit.
+      emit plainClicked();
+      return;
+    }
+    const QPointF a = screenToMap(region_start_.x(), region_start_.y());
+    const QPointF b = screenToMap(event->pos().x(), event->pos().y());
+    std::set<std::size_t> hit;
+    for (const auto idx : rectsInBox(index_tiles_, a.x(), a.y(), b.x(), b.y())) {
+      hit.insert(idx);
+    }
+    const bool tiles_changed = hit != selected_tiles_;
+    selected_tiles_ = std::move(hit);
+    if (geo_mode_) {
       const auto [lat_a, lon_a] = canvasToGeo(a.x(), a.y());
       const auto [lat_b, lon_b] = canvasToGeo(b.x(), b.y());
       cube_box_geo_ = GeoRect{
         std::min(lat_a, lat_b), std::min(lon_a, lon_b),
         std::max(lat_a, lat_b), std::max(lon_a, lon_b)};
+    }
+    update();
+    if (tiles_changed) {
+      emit tileSelectionChanged();
+    }
+    if (cube_box_geo_) {
       emit cubeBoxSelected(
         cube_box_geo_->south, cube_box_geo_->west,
         cube_box_geo_->north, cube_box_geo_->east);
     }
-    update();
     return;
   }
   if (!marking_) {return;}

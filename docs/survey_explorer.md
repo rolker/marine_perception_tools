@@ -84,9 +84,42 @@ for this view" has no defined answer. Only a person can choose the pass.
 ### The map *is* the index
 
 The overview map showing georeferenced store imagery is the index interface.
-There is no separate index widget. Selecting tiles on the map loads the relevant
-raw data into the other views; the pass list is a **detail readout of the
-selection, not the primary picker**. (uma#258 amendment, 2026-07-16.)
+There is no separate index widget. Drawing a region on the map loads the
+relevant raw data into the other views; the pass list is a **detail readout of
+the selection, not the primary picker**. (uma#258 amendment, 2026-07-16.)
+
+### One region, one navigation button, no modifiers
+
+The map originally carried two modifier-keyed selections — a ctrl-click tile
+pick and a ctrl-drag box — with panning on the left button. That is now **one
+region**, and the mouse means one thing per button (#42):
+
+- **left-drag** draws or replaces the region, whose exact bounds are the
+  processing extent for CUBE;
+- **middle-click** recentres the view on the point, and seeks the time cursor
+  there when a bag is open;
+- **middle-drag** pans; the wheel zooms;
+- **right-click** opens the context menu, which is where clearing lives.
+
+Three decisions are worth keeping, because each replaced something that looked
+reasonable:
+
+**Modifiers retire rather than move.** A modifier-keyed gesture is invisible: it
+cannot be discovered, cannot be shown in a menu, and cannot be greyed out when
+it does not apply. Two selections with two modifiers also meant the operator had
+to know which one CUBE would use. One region has one answer.
+
+**Clearing is asked for by name.** A left-click with no drag deliberately does
+**nothing** to the region. Clicking empty map to clear was the one destructive
+thing the map could do silently, and it sat on the most easily triggered gesture
+there is — a click meant as the start of a drag. Clearing is now **Clear
+Selection** in the right-click menu, greyed out when there is nothing selected,
+so the operator can see both that it exists and that it applies.
+
+**Panning moved to the middle button** because the left button now belongs to
+the region. That makes recentre and pan the same button, which is the
+consistency worth having: the middle button moves the view, the left button
+changes the selection, and neither ever does the other's job.
 
 ### Zoom drives rasters; selection drives detail
 
@@ -102,6 +135,32 @@ there; the user selects it; the panes fill.
 Auto-loading when only one pass is present is deliberately rejected: "sometimes
 it loads" is harder to learn than "it never loads until you ask", and it makes
 zoom occasionally destructive of pane state.
+
+### Orientation is not navigation
+
+A collection-wide view is a few specks of store imagery on black: the operator
+cannot tell one survey area from another without already knowing where they
+are. Every background source `camp` offers is a network service, and the
+explorer runs on the operator station and in the field, where none of them are
+reachable. So the coastline is **compiled into the application** — public-domain
+Natural Earth 1:50m, vendored under `data/coastline/`, never fetched at build
+or run time.
+
+What that buys is orientation, and nothing else. A generalised world coastline
+is wrong by hundreds of metres to a couple of kilometres at survey scale, and
+this is a tool whose other layers are trusted to the centimetre. The rule that
+keeps the two from being confused is a **scale rule, not a style choice**: the
+layer draws beneath every real layer, and its opacity falls to zero before the
+scales at which the store basemap and the index answer the question
+(`coastlineFadeAlpha`, `src/coastline_data.hpp`). Anything that would let it
+read as authoritative at survey zoom is a defect. The toggle beside track and
+grid is a declutter control, not the mechanism — an operator must not have to
+switch it off to be safe.
+
+The same reasoning is why a network chart layer is a separate question and not
+a variation on this one: a chart that is only sometimes reachable cannot carry
+orientation, and one that is reachable is authoritative enough to be drawn on
+its own terms.
 
 ### One window, docked panes
 

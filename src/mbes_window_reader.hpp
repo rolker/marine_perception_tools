@@ -15,7 +15,9 @@
 #ifndef MBES_WINDOW_READER_HPP_
 #define MBES_WINDOW_READER_HPP_
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -53,11 +55,21 @@ struct MbesWindowResult
   bool has_geo = false;
   geometry_msgs::msg::TransformStamped earth_from_world;
   std::string world_frame;  // echo of the frame the soundings are in
+  // Set when `cancel` fired mid-read (#44). The soundings are cleared with
+  // it: a half-read window is not a short window, and no caller may treat
+  // one as data.
+  bool cancelled = false;
 };
 
+// `cancel` (optional) is polled per bag message in every read loop — the TF
+// prepasses and the detections pass alike (#44). A window read is minutes of
+// I/O on a long bag, so anything coarser (per bag, per pass) would leave the
+// operator's close waiting on the whole thing. Once set, the read abandons
+// its work and returns `cancelled` with no soundings.
 MbesWindowResult read_mbes_window(
   const std::string & bag_uri, std::int64_t t_start_ns, std::int64_t t_end_ns,
-  const MbesWindowOptions & options = {});
+  const MbesWindowOptions & options = {},
+  const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
 // Rigid transform taking points from one bag's world frame into another's,
 // composed through the shared geo frame: T_ref<-src = inv(T_earth<-ref) *

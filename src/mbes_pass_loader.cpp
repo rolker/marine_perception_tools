@@ -17,7 +17,9 @@
 #include <QString>
 
 #include <algorithm>
+#include <atomic>
 #include <exception>
+#include <memory>
 #include <utility>
 
 #include "mbes_window_reader.hpp"
@@ -27,9 +29,20 @@ namespace marine_perception_tools
 {
 
 CloudLoadOutcome load_cloud_passes(
-  const std::vector<CloudPassInfo> & passes, const std::optional<GeoClip> & clip)
+  const std::vector<CloudPassInfo> & passes, const std::optional<GeoClip> & clip,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
 {
   CloudLoadOutcome out;
+  const auto stop = [&cancel]() {
+      return cancel && cancel->load(std::memory_order_relaxed);
+    };
+  // Cancelled: hand back an empty, explicitly-cancelled outcome. Nothing
+  // downstream may paint a legend or a cloud out of half a load (#44).
+  const auto abandon = []() {
+      CloudLoadOutcome c;
+      c.cancelled = true;
+      return c;
+    };
   out.pass_clouds.resize(passes.size());
   out.sounding_counts.assign(passes.size(), 0);
 
@@ -43,15 +56,21 @@ CloudLoadOutcome load_cloud_passes(
   geometry_msgs::msg::TransformStamped ref_earth_from_world;
 
   for (std::size_t i = 0; i < passes.size(); ++i) {
+    if (stop()) {
+      return abandon();
+    }
     const auto & pass = passes[i];
     MbesWindowResult res;
     try {
-      res = read_mbes_window(pass.bag_path, pass.t_start_ns, pass.t_end_ns);
+      res = read_mbes_window(pass.bag_path, pass.t_start_ns, pass.t_end_ns, {}, cancel);
     } catch (const std::exception & e) {
       ++out.skipped_passes;
       out.notes << QString("%1: bag read failed (%2)")
         .arg(QString::fromStdString(pass.label)).arg(e.what());
       continue;
+    }
+    if (res.cancelled) {
+      return abandon();   // the reader stopped mid-bag; so does the loader
     }
     out.skipped_pings += res.skipped_pings;
 

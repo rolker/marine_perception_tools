@@ -25,10 +25,13 @@
 //  - loads are demand-driven: only not-yet-resident tiles of the selected
 //    level intersecting the viewport are read, one worker at a time with a
 //    snapshotted filter;
-//  - progressive refinement: stale levels stay resident as the backdrop
-//    (drawn coarse->fine under the selected level) until the selected
+//  - progressive refinement: stale levels stay resident until the selected
 //    level's visible set has fully landed, then they are released — except
-//    the coarsest level, which stays as the permanent cheap backdrop.
+//    the coarsest level, which stays as the permanent cheap backdrop. Every
+//    resident level is drawn, finer over coarser (uma-ADR-0013 D5's
+//    ascending guarantee: still-resident finer tiles keep drawing until the
+//    coarser selection's visible set has finished loading), whichever level
+//    is selected.
 // The contrast range and colormap LUT are fixed per open() across every
 // level (the overview fold is MEAN — uma ADR-0011 — so overview values are
 // contained in the fine range), keeping colours stable across LOD switches.
@@ -88,9 +91,18 @@ public:
   // missing. `viewport` in degrees; `ground_metres_per_pixel` true ground.
   void viewChanged(const GeoRect & viewport, double ground_metres_per_pixel);
 
-  // Resident tiles in paint order: non-selected levels coarse->fine (the
-  // refinement backdrop), the selected level last (on top).
+  // Resident tiles in paint order: every resident level, coarse->fine, so
+  // finer tiles always composite OVER coarser ones (uma-ADR-0013 D5's
+  // ascending guarantee). The selected level is not special-cased — the selection
+  // decides what to load, never what to overlay (#43).
   std::vector<OverviewTile> renderTiles() const;
+
+  // [#43] Test seam (camp's refreshResidencyForTest() pattern): install a
+  // synthetic resident set and selection so the composite order can be
+  // asserted headlessly, with no store on disk and no worker round trip.
+  void setResidentForTest(
+    std::map<int, std::map<BasemapTileKey, OverviewTile>> resident,
+    int selected_level);
 
   // Union of the native (main-directory) level's tile bounds — the data
   // footprint. Overview tiles pad to their coarse grid cell (the L0 apex

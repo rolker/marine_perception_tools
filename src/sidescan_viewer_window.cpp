@@ -22,9 +22,11 @@
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QStandardItemModel>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QDoubleSpinBox>
@@ -32,10 +34,12 @@
 #include <QFormLayout>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QImage>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -49,6 +53,7 @@
 #include <QPushButton>
 #include <QRectF>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QSplitter>
@@ -75,6 +80,7 @@
 #include <utility>
 #include <vector>
 
+#include "ament_index_cpp/get_package_share_directory.hpp"
 #include "basemap_contrast.hpp"
 #include "basemap_lod.hpp"
 #include "cube_bathymetry/angular_response_curve.h"
@@ -82,10 +88,14 @@
 #include "sidescan_drape_loader.hpp"
 #include "marine_autonomy/gggs.h"
 #include "marine_contacts/contact_store.hpp"
+#include "clamped_entry_spin.hpp"
+#include "coastline_data.hpp"
 #include "coverage_raster.hpp"
 #include "distance_buffer_policy.hpp"
 #include "map_geo_anchor.hpp"
 #include "tf_lift.hpp"   // rotate_by_quat (the export anchor probe)
+#include "worker_cancel.hpp"   // supersede_token
+#include "world_layout.hpp"
 #include "marine_colormap/colormap.hpp"
 #include "marine_colormap/palette.hpp"
 #include "marine_colormap/transfer.hpp"
@@ -99,11 +109,39 @@
 #include "session_index_io.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
+#include "sounding_uncertainty.hpp"
 
 namespace marine_perception_tools
 {
 namespace
 {
+
+// --- shared colour vocabulary (#36) -----------------------------------------
+
+// The channel a selector row stands for (stored as the item's user data, so
+// the two selectors never depend on each other's row ORDER).
+ColorChannel channel_at(const QComboBox * combo, int row)
+{
+  if (!combo || row < 0 || row >= combo->count()) {
+    return ColorChannel::Depth;
+  }
+  return static_cast<ColorChannel>(combo->itemData(row).toInt());
+}
+
+// Enable or grey out one row. `reason` is nullptr when the channel is
+// available; otherwise it greys the row AND becomes its tooltip — a channel a
+// layer cannot carry must say why, never quietly vanish from the list.
+void set_channel_available(QComboBox * combo, int row, const char * reason)
+{
+  if (!combo) {return;}
+  if (auto * model = qobject_cast<QStandardItemModel *>(combo->model())) {
+    if (auto * item = model->item(row)) {
+      item->setEnabled(reason == nullptr);
+    }
+  }
+  combo->setItemData(
+    row, reason ? QString::fromUtf8(reason) : QString(), Qt::ToolTipRole);
+}
 
 // Maximum slant range (≈ far ground range) of a ping's last sample, used to pad
 // the swath bounding box.
@@ -335,11 +373,20 @@ marine_sonar_widgets::WaterfallRow build_mbes_backscatter_row(const MbesWindowPi
 // Build the coverage render for a distance window on a worker thread (readWindow +
 // paint + rasterize + waterfall). Touches no widgets, so it is safe off the UI
 // thread; the caller applies the result on the UI thread.
+// `cancel` (optional) is polled between the three bag re-reads (each of which
+// polls it per message itself) and per ping while the coverage is painted —
+// the units a window render is made of (#44). A cancelled render is marked
+// `cancelled` and delivers nothing: a window painted from half its pings is
+// not a coarser view, it is a wrong one.
 SidescanRenderResult render_window(
   std::shared_ptr<SidescanBagSession> session, double head, double total,
   double win_lo, double win_hi, int max_pings, double res, int palette_index,
-  std::optional<std::pair<float, float>> manual_range = std::nullopt)
+  std::optional<std::pair<float, float>> manual_range = std::nullopt,
+  const std::shared_ptr<std::atomic<bool>> & cancel = {})
 {
+  const auto stop = [&cancel]() {
+      return cancel && cancel->load(std::memory_order_relaxed);
+    };
   SidescanRenderResult out;
   out.res_m = res;
   out.head_m = head;
@@ -348,7 +395,13 @@ SidescanRenderResult render_window(
   out.win_hi = win_hi;
   out.ok = true;
 
-  const std::vector<WindowPing> paint = session->readWindow(win_lo, win_hi, max_pings);
+  const std::vector<WindowPing> paint =
+    session->readWindow(win_lo, win_hi, max_pings, false, cancel);
+  if (stop()) {
+    out.ok = false;
+    out.cancelled = true;
+    return out;
+  }
   out.npings = paint.size();
   if (paint.empty()) {return out;}  // ok, but a null image -> canvas clears
 
@@ -380,7 +433,13 @@ SidescanRenderResult render_window(
 
   // MBES soundings for the same window (world frame), flattened for the 3D view.
   // Shares the distance window so the cloud stays in lockstep with the scrub.
-  const std::vector<MbesWindowPing> mwin = session->readMbesWindow(win_lo, win_hi, max_pings);
+  const std::vector<MbesWindowPing> mwin =
+    session->readMbesWindow(win_lo, win_hi, max_pings, cancel);
+  if (stop()) {
+    out.ok = false;
+    out.cancelled = true;
+    return out;
+  }
   std::size_t n_soundings = 0;
   for (const auto & mp : mwin) {
     n_soundings += mp.world_soundings.size();
@@ -396,7 +455,12 @@ SidescanRenderResult render_window(
   }
 
   // Down-channel water-column pings (raw) for the echogram, same window.
-  out.down_images = session->readDownImages(win_lo, win_hi, max_pings);
+  out.down_images = session->readDownImages(win_lo, win_hi, max_pings, cancel);
+  if (stop()) {
+    out.ok = false;
+    out.cancelled = true;
+    return out;
+  }
 
   // Boat pose at the scrub head, for the 3D context arrow: the ping nearest `head`
   // gives the boat x/y/heading; place the arrow at the top of the cloud (near the
@@ -456,6 +520,11 @@ SidescanRenderResult render_window(
 
   CoverageRaster raster(min_x, min_y, res, w, h);
   for (const auto & p : paint) {
+    if (stop()) {
+      out.ok = false;
+      out.cancelled = true;
+      return out;
+    }
     paint_ping(raster, p.geometry, p.amplitudes);
   }
 
@@ -466,6 +535,43 @@ SidescanRenderResult render_window(
 }
 
 }  // namespace
+
+void SidescanViewerWindow::setupCloudControls()
+{
+  cloud_color_combo_ = new QComboBox(this);
+  cloud_color_combo_->setObjectName("cloud_color_combo");
+  // The SAME vocabulary the surface shade offers (#36). Pass is an ordinary
+  // entry here — selectable and deselectable — never a mode that takes the
+  // control away; the entries the soundings cannot carry are greyed with
+  // their reason, so the two lists read as one.
+  populateColorVocabulary(cloud_color_combo_);
+  cloud_color_combo_->setToolTip(
+    "Point colouring. Greyed entries name a channel a sounding does not "
+    "carry — the reason is on the entry.");
+  zexag_spin_ = new QDoubleSpinBox(this);
+  zexag_spin_->setRange(1.0, 20.0);
+  zexag_spin_->setSingleStep(0.5);
+  zexag_spin_->setValue(1.0);          // no vertical exaggeration by default
+  zexag_spin_->setPrefix("Z× ");
+  point_size_spin_ = new QDoubleSpinBox(this);
+  point_size_spin_->setRange(1.0, 12.0);
+  point_size_spin_->setSingleStep(0.5);
+  point_size_spin_->setValue(2.5);
+  point_size_spin_->setPrefix("pt ");
+  point_size_spin_->setToolTip("3D point size (pixels)");
+
+  // The cloud's own palette, independent of the surface's (the CUBE row has
+  // its own) so cloud and surface can contrast. Defaults to bronze, applied
+  // to the view here because a combo does not fire on construction.
+  cloud_palette_ = new QComboBox(this);
+  for (const auto & name : marine_colormap::palette_names()) {
+    cloud_palette_->addItem(QString::fromStdString(name));
+  }
+  if (const auto vi = marine_colormap::palette_index("bronze")) {
+    cloud_palette_->setCurrentIndex(static_cast<int>(*vi));
+    cloud_->setColorMap(static_cast<int>(*vi));
+  }
+}
 
 void SidescanViewerWindow::setupRangeControls()
 {
@@ -577,23 +683,62 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   // CUBE-lab controls (#27) in their own row under the cloud pane's header:
   // cell size, IHO order, the explicit Run trigger (CUBE is expensive — no
   // auto-runs), and the surface's display controls.
-  cube_cell_spin_ = new QDoubleSpinBox(this);
-  cube_cell_spin_->setRange(0.02, 50.0);
-  cube_cell_spin_->setDecimals(2);
-  cube_cell_spin_->setSingleStep(0.05);
+  // The floor is one display unit, not a judgement about what is worth
+  // gridding (#42). It used to be 0.02 m, which silently swallowed the 0.01 m
+  // the operator was deliberately testing with: Qt reverts out-of-range text
+  // to the last valid value on focus-out — i.e. on the click of Run CUBE.
+  // Nothing here needs to protect memory; the max-nodes pre-flight in
+  // runCubeLab() bounds the allocation and offers a one-shot override. What is
+  // left to protect is the arithmetic, which divides the box by the cell size,
+  // so the floor is simply the smallest number the box can display (1 mm at
+  // three decimals) — two orders of magnitude below any real beam footprint,
+  // and self-consistent in that every enterable value is also a showable one.
+  auto * cube_cell_spin = new ClampedEntryDoubleSpinBox(this);
+  cube_cell_spin_ = cube_cell_spin;
+  cube_cell_spin_->setObjectName("cube_cell_spin");
+  cube_cell_spin_->setDecimals(3);
+  cube_cell_spin_->setRange(0.001, 50.0);
+  cube_cell_spin_->setSingleStep(0.01);   // a centimetre: usable at 0.01 m
   cube_cell_spin_->setValue(0.1);
   cube_cell_spin_->setSuffix(" m");
-  cube_cell_spin_->setToolTip("CUBE node spacing");
+  cube_cell_spin_->setToolTip(
+    "CUBE node spacing, 0.001 - 50 m. Finer is not automatically better: a "
+    "2-degree beam in 5 m of water has a footprint of about 0.17 m at nadir, "
+    "so cells well below that are resolving the sounding pattern rather than "
+    "the seafloor. How big a grid a run may allocate is the separate "
+    "max-nodes limit in params....");
+  cube_cell_spin->setClampNotice(
+    [this](double typed, double applied) {
+      status_->setText(
+        QString(
+          "Cell size %1 m is outside %2 - %3 m - using %4 m.")
+        .arg(typed, 0, 'g', 4)
+        .arg(cube_cell_spin_->minimum())
+        .arg(cube_cell_spin_->maximum())
+        .arg(applied));
+    });
   cube_order_combo_ = new QComboBox(this);
-  for (const auto * order : {"exclusive", "special", "order1a", "order1b", "order2"}) {
-    cube_order_combo_->addItem(order);
+  cube_order_combo_->setObjectName("cube_order_combo");
+  for (const auto & order : iho_preset_names()) {
+    cube_order_combo_->addItem(QString::fromStdString(order));
   }
-  cube_order_combo_->setCurrentText("order1a");
-  cube_order_combo_->setToolTip("IHO order (CUBE capture/hypothesis limits)");
+  // "custom" is not a preset — it is where the selection lands when the two
+  // thresholds are edited to a pair no named order carries (#45).
+  cube_order_combo_->addItem(kCustomIhoOrder);
+  cube_order_combo_->setToolTip(
+    "IHO order — a PRESET for the vertical-uncertainty budget, not the thing "
+    "the run reads: it seeds the two thresholds (fixed m + % of depth) in "
+    "params…, and the run uses whatever those are. Editing either one moves "
+    "this to custom. S-44 order 1a and 1b share one budget (they differ in "
+    "the seafloor-search requirement, which CUBE does not model), so they are "
+    "one entry here. NOTE: the budget is compared against a PLACEHOLDER "
+    "per-sounding error — angle-aware since mpt#49, but still a stand-in; "
+    "see params….");
   cube_run_btn_ = new QPushButton("Run CUBE", this);
-  cube_run_btn_->setEnabled(false);   // until a shift-drag box exists
+  cube_run_btn_->setObjectName("cube_run_btn");
+  cube_run_btn_->setEnabled(false);   // until a region has been drawn
   cube_run_btn_->setToolTip(
-    "Gather every MBES sounding in the shift-drag map box and CUBE it "
+    "Gather every MBES sounding in the map region and CUBE it "
     "at the chosen cell size");
   cube_tuning_ = default_cube_tuning();
   {
@@ -603,10 +748,16 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     cube_tuning_.ara_curve_path =
       settings.value("ara_curve_path").toString().toStdString();
   }
+  // The dropdown follows the tuning, never the other way round: it opens on
+  // whichever preset the library's own defaults happen to be (#45).
+  cube_order_combo_->setCurrentText(
+    QString::fromStdString(
+      iho_order_for_limits(cube_tuning_.iho_fixed, cube_tuning_.iho_percent)));
   cube_params_btn_ = new QPushButton("params…", this);
   cube_params_btn_->setToolTip(
-    "CUBE algorithm parameters (capture scale, median filter, intervention "
-    "thresholds, extractor) — applied on the next Run CUBE");
+    "CUBE algorithm parameters (capture scale, uncertainty budget, median "
+    "filter, intervention thresholds, extractor) — applied on the next "
+    "Run CUBE");
   cube_selfcal_btn_ = new QPushButton("self-cal BS", this);
   cube_selfcal_btn_->setEnabled(false);   // needs a completed run's beams
   cube_selfcal_btn_->setToolTip(
@@ -625,10 +776,21 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
   cube_alpha_spin_->setValue(1.0);
   cube_alpha_spin_->setToolTip("Surface opacity");
   cube_shade_combo_ = new QComboBox(this);
-  cube_shade_combo_->addItems({"Depth", "Uncertainty", "Backscatter", "Sidescan"});
+  cube_shade_combo_->setObjectName("cube_shade_combo");
+  // One vocabulary with the point selector (#36): the same five entries in the
+  // same order. Pass is listed and greyed — a node merges every pass that
+  // touched it — rather than dropped, so the two lists read as one.
+  populateColorVocabulary(cube_shade_combo_);
+  for (int i = 0; i < cube_shade_combo_->count(); ++i) {
+    set_channel_available(
+      cube_shade_combo_, i,
+      surface_channel_unavailable_reason(channel_at(cube_shade_combo_, i)));
+  }
   cube_shade_combo_->setToolTip(
     "Surface colouring: depth, CUBE uncertainty, CUBE-settled backscatter, "
-    "or the draped sidescan pass (pick one in the drape combo)");
+    "or the draped sidescan pass (pick one in the drape combo). Greyed "
+    "entries name a channel the surface cannot carry — the reason is on the "
+    "entry.");
   cube_drape_combo_ = new QComboBox(this);
   cube_drape_combo_->addItem("drape: none");
   cube_drape_combo_->setToolTip(
@@ -703,6 +865,18 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     v->insertLayout(1, row);
   }
 
+  // Picking a preset restores that preset's pair; "custom" is only ever
+  // arrived at by editing a threshold, so selecting it changes nothing (#45).
+  connect(cube_order_combo_, &QComboBox::currentTextChanged, this,
+    [this](const QString & name) {
+      const auto limits = iho_preset_limits(name.toStdString());
+      if (!limits) {
+        return;
+      }
+      cube_tuning_.iho_fixed = limits->first;
+      cube_tuning_.iho_percent = limits->second;
+    });
+
   connect(cube_run_btn_, &QPushButton::clicked, this, [this]() {runCubeLab();});
   connect(cube_selfcal_btn_, &QPushButton::clicked,
     this, [this]() {selfCalibrateBackscatter();});
@@ -733,6 +907,38 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       capture->setToolTip(
         "Scale on depth for how far out a sounding is accepted "
         "(hydrography ~0.05; larger for sparse/flat areas)");
+      // The uncertainty budget, set directly (#45). The order dropdown in the
+      // lab row is a preset that seeds these two; editing either takes the
+      // selection to "custom", and the run reads these numbers, not the label.
+      const QString budget_tip =
+      "Vertical-uncertainty budget: max allowed variance at a depth is "
+      "(fixed^2 + (percent*depth)^2) / 1.96^2, and its ratio against a "
+      "sounding's own error scales the RADIUS over which that sounding "
+      "spreads its influence — looser fills in and smooths, tighter is "
+      "crisper and holier. Not a pass/fail gate. Editing either value moves "
+      "the order dropdown to \"custom\".";
+      auto * iho_fixed = make_dspin(
+        0.001, 20.0, 0.05, 3, cube_tuning_.iho_fixed);
+      iho_fixed->setSuffix(" m");
+      iho_fixed->setToolTip(
+        budget_tip + "  Fixed part, metres at 95% confidence "
+        "(S-44: 0.15 exclusive … 1.0 order 2).");
+      auto * iho_percent = make_dspin(
+        0.0, 0.5, 0.001, 4, cube_tuning_.iho_percent);
+      iho_percent->setToolTip(
+        budget_tip + "  Depth-proportional part, as a FRACTION of depth "
+        "(S-44: 0.0075 … 0.023).");
+      // The caveat belongs where the numbers are set, not only in a header
+      // comment (#45): the budget is being compared against a stand-in.
+      auto * iho_note = new QLabel(
+        QString::fromUtf8(sounding_uncertainty_caveat()), &dialog);
+      iho_note->setWordWrap(true);
+      iho_note->setMaximumWidth(420);
+      {
+        QFont f = iho_note->font();
+        f.setItalic(true);
+        iho_note->setFont(f);
+      }
       auto * median = make_ispin(
         1, 101, static_cast<int>(cube_tuning_.median_length));
       median->setToolTip("Median pre-filter sort queue length");
@@ -786,6 +992,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         "+ per-populated-node CUBE state; 100 M ≈ 2 GB). The run "
         "confirmation can override this per run.");
       form->addRow("Capture distance scale", capture);
+      form->addRow("Uncertainty budget, fixed", iho_fixed);
+      form->addRow("Uncertainty budget, % of depth", iho_percent);
+      form->addRow(iho_note);
       form->addRow("Median filter length", median);
       form->addRow("Outlier quotient limit", quotient);
       form->addRow("Evolution discount", discount);
@@ -806,6 +1015,8 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         &QPushButton::clicked, &dialog, [&]() {
           const CubeTuning d = default_cube_tuning();
           capture->setValue(d.capture_distance_scale);
+          iho_fixed->setValue(d.iho_fixed);
+          iho_percent->setValue(d.iho_percent);
           median->setValue(static_cast<int>(d.median_length));
           quotient->setValue(d.quotient_limit);
           discount->setValue(d.discount);
@@ -821,6 +1032,18 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       }
       cube_tuning_.capture_distance_scale =
       static_cast<float>(capture->value());
+      cube_tuning_.iho_fixed = static_cast<float>(iho_fixed->value());
+      cube_tuning_.iho_percent = static_cast<float>(iho_percent->value());
+      // Values that are no named order's pair land on "custom"; values that
+      // are one restore that preset's name. Guarded so the combo's own
+      // preset-seeding slot cannot fight the edit that just happened.
+      {
+        const QSignalBlocker block(cube_order_combo_);
+        cube_order_combo_->setCurrentText(
+          QString::fromStdString(
+            iho_order_for_limits(
+              cube_tuning_.iho_fixed, cube_tuning_.iho_percent)));
+      }
       cube_tuning_.median_length = static_cast<std::uint32_t>(median->value());
       cube_tuning_.quotient_limit = static_cast<float>(quotient->value());
       cube_tuning_.discount = static_cast<float>(discount->value());
@@ -880,6 +1103,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     });
   connect(&drape_watcher_, &QFutureWatcher<DrapeTicket>::finished, this, [this]() {
       DrapeTicket ticket = drape_watcher_.result();
+      if (ticket.cancelled) {
+        return;   // the window is closing (#44): the widgets below are going away
+      }
       if (ticket.generation != drape_gen_) {
         return;   // a newer drape (or a new CUBE run) superseded this one
       }
@@ -900,6 +1126,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     });
   connect(&cube_watcher_, &QFutureWatcher<CubeLabTicket>::finished, this, [this]() {
       CubeLabTicket ticket = cube_watcher_.result();
+      if (ticket.cancelled) {
+        return;   // the window is closing (#44): the widgets below are going away
+      }
       if (ticket.generation != cube_gen_) {
         return;   // a newer run superseded this one
       }
@@ -912,17 +1141,49 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         cube_run_btn_->setEnabled(cube_box_.has_value());
         return;
       }
-      // The lab owns the cloud pane now: plain points in the same frame as
-      // the surface, scalar modes + range controls live.
-      selection_cloud_ = false;
-      ++cloud_gen_;   // any tile-selection load in flight is stale
-      cloud_legend_->clear();
-      cloud_legend_->setVisible(false);
-      cloud_color_combo_->setEnabled(true);
-      cloud_->setColorMode(
-        cloud_color_combo_->currentIndex() == 1 ?
-        PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
-      cloud_->setPoints(ticket.soundings);
+      // A run ADDS a surface over the soundings already on screen (#36): the
+      // operator selected a region, got his multi-pass cloud, and asked for a
+      // surface over it — replacing that cloud with the run's own gather was
+      // read, rightly, as the CUBE run stealing his selection.
+      //
+      // The one thing that can stop it is the frame: the surface is a grid in
+      // the run's own reference world frame and is placed by the displayed
+      // cloud's centroid, so it may only be drawn over soundings in that same
+      // frame. When the two loads resolved different references the run falls
+      // back to showing its own soundings — a misplaced surface would be a
+      // wrong answer, not an inconvenience — and says so.
+      const bool keep_cloud = cube_surface_shares_cloud_frame(
+        selection_cloud_, !cloud_pass_clouds_.empty(),
+        selection_ref_bag_, selection_ref_frame_,
+        ticket.ref_bag, ticket.ref_frame);
+      QString cloud_note;
+      if (!keep_cloud) {
+        if (selection_cloud_) {
+          cloud_note = QString("  [selection cloud replaced: the run's frame "
+            "(%1) is not the cloud's (%2)]")
+          .arg(QString::fromStdString(
+            ticket.ref_bag.empty() ? std::string("none") : ticket.ref_bag))
+          .arg(QString::fromStdString(
+            selection_ref_bag_.empty() ? std::string("none") : selection_ref_bag_));
+        }
+        // The lab owns the cloud pane: plain points in the same frame as the
+        // surface, scalar modes + range controls live.
+        selection_cloud_ = false;
+        ++cloud_gen_;   // any tile-selection load in flight is stale
+        supersede_token(cloud_cancel_);   // ...and the job serving it stops
+        cloud_pass_clouds_.clear();
+        cloud_legend_->clear();
+        cloud_legend_->setVisible(false);
+        selection_ref_bag_ = ticket.ref_bag;
+        selection_ref_frame_ = ticket.ref_frame;
+        cloud_->setPoints(ticket.soundings);
+        // The pane now shows the RUN's soundings, in the run's reference
+        // frame — which may be another bag's than the one open (#47).
+        cloud_frame_ = CloudFrame::Reference;
+        cloud_ref_anchor_ =
+        earthAnchorAffine(ticket.ref_earth_from_world, ticket.ref_has_geo, 0.0);
+        refreshCloudColorChannels();   // one set of points: Pass greys out
+      }
       cube_soundings_ = std::move(ticket.soundings);   // self-cal input
       cube_selfcal_btn_->setEnabled(!cube_soundings_.empty());
       // The drape frame follows the CUBE load: remember the reference and
@@ -931,16 +1192,18 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_ref_has_geo_ = ticket.ref_has_geo;
       cube_ref_anchor_ = ticket.ref_earth_from_world;
       ++drape_gen_;
+      supersede_token(drape_cancel_);   // ...and the job serving it stops
       cube_drape_ = SidescanDrape{};
       cube_drape_terrain_ = CubeSurface{};
       populateDrapePasses();
       refreshCubeSurface();
-      status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5")
+      status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5%6")
       .arg(cube_surface_.cell_m)
       .arg(cube_surface_.soundings_in)
       .arg(QString::fromStdString(cube_surface_.note))
       .arg(ticket.elapsed_ms / 1000.0, 0, 'f', 1)
-      .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
+      .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]")
+      .arg(cloud_note));
       cube_run_btn_->setEnabled(cube_box_.has_value());
     });
 
@@ -1005,6 +1268,12 @@ void SidescanViewerWindow::selfCalibrateBackscatter()
 
 void SidescanViewerWindow::runCubeLab()
 {
+  // Never launch into a teardown (#42 review): closeEvent() sets the teardown
+  // token before the destructor's waits, and a job started after that would
+  // read its whole bag while the operator waits for the window to go away.
+  // `worker_cancel_` is the right flag here precisely because it never resets;
+  // the per-job tokens do, so they cannot answer "is this window closing".
+  if (worker_cancel_->load(std::memory_order_relaxed)) {return;}
   if (!bridge_ || !cube_box_) {
     return;
   }
@@ -1044,8 +1313,7 @@ void SidescanViewerWindow::runCubeLab()
     kMetersPerDegLat * std::max(0.01, std::cos(clip.lat * M_PI / 180.0));
 
   const double cell_m = cube_cell_spin_->value();
-  const std::string order = cube_order_combo_->currentText().toStdString();
-  CubeTuning tuning = cube_tuning_;
+  CubeTuning tuning = cube_tuning_;   // the budget rides here, not the label
   // Pre-flight grid estimate from the box itself (known before any loading):
   // over the operator's max-nodes limit, ask — with the real numbers — and
   // let them run anyway (one-shot override; the limit itself is editable in
@@ -1076,20 +1344,27 @@ void SidescanViewerWindow::runCubeLab()
     }
   }
   ++cube_gen_;
+  supersede_token(cube_cancel_);   // ...and the job serving it stops
   const auto gen = cube_gen_;
   cube_run_btn_->setEnabled(false);
   status_->setText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
     .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
+  const auto cancel = cube_cancel_;
   cube_watcher_.setFuture(
-    QtConcurrent::run([passes, clip, cell_m, order, tuning, gen]() {
+    QtConcurrent::run([passes, clip, cell_m, tuning, gen, cancel]() {
       CubeLabTicket ticket;
       ticket.generation = gen;
       QElapsedTimer timer;
       timer.start();
       try {
-        auto outcome = load_cloud_passes(passes, clip);
+        auto outcome = load_cloud_passes(passes, clip, cancel);
+        if (outcome.cancelled) {
+          ticket.cancelled = true;
+          return ticket;   // the window is closing: nothing to estimate for
+        }
         ticket.notes = std::move(outcome.notes);
         ticket.ref_bag = outcome.ref_bag;
+        ticket.ref_frame = outcome.ref_frame;
         ticket.ref_has_geo = outcome.ref_has_geo;
         ticket.ref_earth_from_world = outcome.ref_earth_from_world;
         std::size_t total = 0;
@@ -1100,14 +1375,88 @@ void SidescanViewerWindow::runCubeLab()
         for (auto & pc : outcome.pass_clouds) {
           ticket.soundings.insert(ticket.soundings.end(), pc.begin(), pc.end());
         }
-        ticket.surface = run_cube(ticket.soundings, cell_m, order, tuning);
+        ticket.surface = run_cube(ticket.soundings, cell_m, tuning, cancel);
+        if (cancel->load(std::memory_order_relaxed)) {
+          ticket.cancelled = true;
+          ticket.soundings.clear();
+          return ticket;
+        }
       } catch (const std::exception & e) {
         ticket.surface = CubeSurface{};
         ticket.surface.note = e.what();
+      } catch (...) {
+        // A non-std exception escaping a QtConcurrent task std::terminates on
+        // Qt5 just as a std::exception does, so the guard is only a guard with
+        // both arms (#42 review).
+        ticket.surface = CubeSurface{};
+        ticket.surface.note = "CUBE run failed: unknown exception";
       }
       ticket.elapsed_ms = timer.elapsed();
       return ticket;
     }));
+}
+
+void SidescanViewerWindow::populateColorVocabulary(QComboBox * combo)
+{
+  if (!combo) {
+    return;
+  }
+  for (const auto channel : kColorVocabulary) {
+    combo->addItem(
+      QString::fromUtf8(color_channel_name(channel)), static_cast<int>(channel));
+  }
+}
+
+// Which point channels the CURRENT cloud can offer. Called after every load
+// into the pane, because pass identity comes and goes with the cloud: a
+// multi-pass selection has passes to tell apart, a scrub window or a CUBE
+// run's own gather is one undifferentiated set of points.
+void SidescanViewerWindow::refreshCloudColorChannels()
+{
+  if (!cloud_color_combo_) {
+    return;
+  }
+  const bool has_pass_identity = cloud_ && cloud_->passCount() > 0;
+  int depth_row = 0;
+  bool current_unavailable = false;
+  for (int i = 0; i < cloud_color_combo_->count(); ++i) {
+    const auto channel = channel_at(cloud_color_combo_, i);
+    const char * reason =
+      point_channel_unavailable_reason(channel, has_pass_identity);
+    set_channel_available(cloud_color_combo_, i, reason);
+    if (channel == ColorChannel::Depth) {
+      depth_row = i;
+    }
+    if (reason != nullptr && i == cloud_color_combo_->currentIndex()) {
+      current_unavailable = true;
+    }
+  }
+  // Never leave a greyed entry showing as the current choice — the pane would
+  // claim a colouring it is not drawing.
+  if (current_unavailable) {
+    cloud_color_combo_->setCurrentIndex(depth_row);
+  }
+  applyCloudColorMode();
+}
+
+void SidescanViewerWindow::applyCloudColorMode()
+{
+  if (!cloud_ || !cloud_color_combo_) {
+    return;
+  }
+  switch (channel_at(cloud_color_combo_, cloud_color_combo_->currentIndex())) {
+    case ColorChannel::Backscatter:
+      cloud_->setColorMode(PointCloudView::ColorMode::Backscatter);
+      break;
+    case ColorChannel::Pass:
+      cloud_->setColorMode(PointCloudView::ColorMode::Pass);
+      break;
+    default:
+      // Uncertainty and Sidescan are greyed for the points, so Depth is the
+      // only other reachable entry.
+      cloud_->setColorMode(PointCloudView::ColorMode::Depth);
+      break;
+  }
 }
 
 void SidescanViewerWindow::refreshCubeSurface()
@@ -1116,7 +1465,9 @@ void SidescanViewerWindow::refreshCubeSurface()
     cloud_->clearSurface();
     return;
   }
-  const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const ColorChannel shade_ch = cube_shade_combo_ ?
+    channel_at(cube_shade_combo_, cube_shade_combo_->currentIndex()) :
+    ColorChannel::Depth;
   const int style_i = cube_mesh_combo_ ? cube_mesh_combo_->currentIndex() : 0;
   const CubeMeshStyle style =
     (style_i == 1) ? CubeMeshStyle::CrispStepped :
@@ -1126,7 +1477,7 @@ void SidescanViewerWindow::refreshCubeSurface()
   // through the SIDESCAN pane's palette + range (so drape and waterfall read
   // identically), acoustic shadows near-black, ensonified-but-unseen nodes
   // dim grey (the relief stays legible).
-  if (shade_i == 3) {
+  if (shade_ch == ColorChannel::Sidescan) {
     // The drape rides its own extended terrain (surface grown to the
     // swath); fall back to the CUBE surface for pre-terrain drapes.
     const CubeSurface & terrain =
@@ -1215,8 +1566,9 @@ void SidescanViewerWindow::refreshCubeSurface()
   }
 
   const CubeShade shade =
-    (shade_i == 1) ? CubeShade::Uncertainty :
-    (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
+    (shade_ch == ColorChannel::Uncertainty) ? CubeShade::Uncertainty :
+    (shade_ch == ColorChannel::Backscatter) ? CubeShade::Intensity :
+    CubeShade::Depth;
   const std::size_t n_pal = marine_colormap::palette_count();
   const auto pal_i = (n_pal > 0) ?
     static_cast<std::size_t>(std::clamp(
@@ -1260,7 +1612,20 @@ std::optional<MapGeoAffine> SidescanViewerWindow::cubeSurfaceAnchor() const
     }
   }
   const double z0 = (z_cnt > 0) ? z_sum / static_cast<double>(z_cnt) : 0.0;
-  const auto & t = cube_ref_anchor_.transform;
+  return earthAnchorAffine(cube_ref_anchor_, cube_ref_has_geo_, z0);
+}
+
+std::optional<MapGeoAffine> SidescanViewerWindow::earthAnchorAffine(
+  const geometry_msgs::msg::TransformStamped & earth_from_world,
+  bool has_geo, double z0)
+{
+  if (!has_geo) {
+    return std::nullopt;
+  }
+  // Probe world->geo through the reference earth anchor at height z0 (the
+  // vertical offset moves lat/lon by ~nothing but keeps the ECEF conversion
+  // honest).
+  const auto & t = earth_from_world.transform;
   return probe_map_anchor(
     [&t, z0](double x, double y, double & lat, double & lon, double & alt) {
       double ex = 0.0;
@@ -1325,13 +1690,15 @@ void SidescanViewerWindow::onExportSurfaceRgba()
   // Render the ACTIVE shade to per-node RGBA, mirroring refreshCubeSurface:
   // alpha 0 = hole (unestimated; or, in the Sidescan shade, interpolated
   // terrain the pass never touched).
-  const int shade_i = cube_shade_combo_ ? cube_shade_combo_->currentIndex() : 0;
+  const ColorChannel shade_ch = cube_shade_combo_ ?
+    channel_at(cube_shade_combo_, cube_shade_combo_->currentIndex()) :
+    ColorChannel::Depth;
   const CubeSurface * srf = &cube_surface_;
   const std::size_t n_scalar =
     static_cast<std::size_t>(cube_surface_.nx) *
     static_cast<std::size_t>(cube_surface_.ny);
   std::vector<std::uint8_t> rgba;
-  if (shade_i == 3) {
+  if (shade_ch == ColorChannel::Sidescan) {
     const CubeSurface & terrain =
       cube_drape_terrain_.ok() ? cube_drape_terrain_ : cube_surface_;
     const std::size_t n =
@@ -1381,8 +1748,9 @@ void SidescanViewerWindow::onExportSurfaceRgba()
     // Scalar shades: the spins hold the ramp in force (auto keeps them
     // synced to the computed range), so read the ramp straight from them.
     const CubeShade shade =
-      (shade_i == 1) ? CubeShade::Uncertainty :
-      (shade_i == 2) ? CubeShade::Intensity : CubeShade::Depth;
+      (shade_ch == ColorChannel::Uncertainty) ? CubeShade::Uncertainty :
+      (shade_ch == ColorChannel::Backscatter) ? CubeShade::Intensity :
+      CubeShade::Depth;
     const auto & scalar =
       (shade == CubeShade::Depth) ? cube_surface_.depth :
       (shade == CubeShade::Uncertainty) ? cube_surface_.uncertainty :
@@ -1487,6 +1855,12 @@ void SidescanViewerWindow::populateDrapePasses()
 
 void SidescanViewerWindow::requestDrape()
 {
+  // Never launch into a teardown (#42 review): closeEvent() sets the teardown
+  // token before the destructor's waits, and a job started after that would
+  // read its whole bag while the operator waits for the window to go away.
+  // `worker_cancel_` is the right flag here precisely because it never resets;
+  // the per-job tokens do, so they cannot answer "is this window closing".
+  if (worker_cancel_->load(std::memory_order_relaxed)) {return;}
   const int idx = cube_drape_combo_ ? cube_drape_combo_->currentIndex() : 0;
   if (idx <= 0 || !cube_surface_.ok()) {
     return;
@@ -1513,47 +1887,80 @@ void SidescanViewerWindow::requestDrape()
     (cube_range_score_combo_ && cube_range_score_combo_->currentIndex() == 1) ?
     RangeScoreMode::MidRange : RangeScoreMode::Nearest;
   ++drape_gen_;
+  supersede_token(drape_cancel_);   // ...and the job serving it stops
   const auto gen = drape_gen_;
   status_->setText(targets.size() == 1 ?
     QString("Draping %1 …")
     .arg(QFileInfo(QString::fromStdString(targets.front().bag_path)).fileName()) :
     QString("Draping composite of %1 passes …").arg(targets.size()));
+  const auto cancel = drape_cancel_;
   drape_watcher_.setFuture(QtConcurrent::run(
       [targets, surface, cache_dir, ref_bag, ref_has_geo, ref_anchor,
-      max_nodes, range_mode, gen]() {
+      max_nodes, range_mode, gen, cancel]() {
         DrapeTicket ticket;
         ticket.generation = gen;
-        QElapsedTimer timer;
-        timer.start();
-        std::vector<WindowPing> pings;
-        for (const auto & entry : targets) {
-          const auto loaded = load_drape_pings(
-            entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
-            ref_bag, ref_has_geo, ref_anchor);
-          for (const auto & n : loaded.notes) {
-            ticket.notes << QString::fromStdString(n);
+        // A non-QException escaping a QtConcurrent task std::terminates on
+        // Qt5, and the throw resurfaces on the UI thread out of result() --
+        // or out of the destructor's waitForFinished(), i.e. a throw from a
+        // destructor. extend_surface_for_drape() sizes a grid bounded by the
+        // operator's own "Run anyway" override, so bad_alloc here is the case
+        // the dialog invites rather than a pathological one (#42 review).
+        try {
+          QElapsedTimer timer;
+          timer.start();
+          std::vector<WindowPing> pings;
+          for (const auto & entry : targets) {
+            const auto loaded = load_drape_pings(
+              entry.bag_path, entry.t0_ns, entry.t1_ns, cache_dir,
+              ref_bag, ref_has_geo, ref_anchor, cancel);
+            if (loaded.cancelled) {
+              ticket.cancelled = true;
+              return ticket;   // the window is closing: nothing to march on
+            }
+            for (const auto & n : loaded.notes) {
+              ticket.notes << QString::fromStdString(n);
+            }
+            if (loaded.ok) {
+              pings.insert(pings.end(), loaded.pings.begin(), loaded.pings.end());
+            }
           }
-          if (loaded.ok) {
-            pings.insert(pings.end(), loaded.pings.begin(), loaded.pings.end());
+          if (!pings.empty()) {
+            // The sidescan outreaches the MBES: extend the surface to the
+            // swath (holes filled, edges extrapolated) so the drape has
+            // terrain to land on beyond the bathymetry.
+            std::string grow_note;
+            ticket.terrain = extend_surface_for_drape(
+              surface, pings, max_nodes, grow_note, cancel);
+            if (cancel->load(std::memory_order_relaxed)) {
+              ticket.cancelled = true;
+              ticket.terrain = CubeSurface{};
+              return ticket;
+            }
+            if (!grow_note.empty()) {
+              ticket.notes << QString::fromStdString(grow_note);
+            }
+            ticket.drape = drape_pass(ticket.terrain, pings, range_mode, cancel);
+            if (cancel->load(std::memory_order_relaxed)) {
+              ticket.cancelled = true;
+              ticket.terrain = CubeSurface{};
+              ticket.drape = SidescanDrape{};
+              return ticket;
+            }
+            if (ticket.drape.pings_skipped > 0) {
+              ticket.notes << QString("%1 pings unusable (no altitude/side or "
+                "off the surface)").arg(ticket.drape.pings_skipped);
+            }
           }
+          ticket.elapsed_ms = timer.elapsed();
+        } catch (const std::exception & e) {
+          ticket.drape = SidescanDrape{};
+          ticket.terrain = CubeSurface{};
+          ticket.notes << QString("drape failed: %1").arg(e.what());
+        } catch (...) {
+          ticket.drape = SidescanDrape{};
+          ticket.terrain = CubeSurface{};
+          ticket.notes << QString("drape failed: unknown exception");
         }
-        if (!pings.empty()) {
-          // The sidescan outreaches the MBES: extend the surface to the
-          // swath (holes filled, edges extrapolated) so the drape has
-          // terrain to land on beyond the bathymetry.
-          std::string grow_note;
-          ticket.terrain = extend_surface_for_drape(
-            surface, pings, max_nodes, grow_note);
-          if (!grow_note.empty()) {
-            ticket.notes << QString::fromStdString(grow_note);
-          }
-          ticket.drape = drape_pass(ticket.terrain, pings, range_mode);
-          if (ticket.drape.pings_skipped > 0) {
-            ticket.notes << QString("%1 pings unusable (no altitude/side or "
-              "off the surface)").arg(ticket.drape.pings_skipped);
-          }
-        }
-        ticket.elapsed_ms = timer.elapsed();
         return ticket;
       }));
 }
@@ -1570,6 +1977,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   scrub_->setEnabled(false);
 
   grid_spin_ = new QDoubleSpinBox(this);
+  grid_spin_->setObjectName("grid_spacing_spin");
   grid_spin_->setRange(1.0, 1000.0);
   grid_spin_->setValue(10.0);
   grid_spin_->setSuffix(" m");
@@ -1590,6 +1998,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     "both renders more pings and refines the map.");
 
   status_ = new QLabel("Open a bag to begin (File → Open Bag).", this);
+  status_->setObjectName("status");
   // The status line must never dictate the window size: a long load note was
   // resizing the whole window (desk finding). Long text clips instead.
   status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -1634,11 +2043,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // marked pixel to map coordinates from each row's pose; slant range (water column
   // kept) matches the raw display analysts read, with across-track range gridlines.
   waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
+  waterfall_->setObjectName("sidescan_waterfall");
   waterfall_->set_ground_range(false);   // raw slant range, not slant->ground (palette set below)
 
   // MBES backscatter waterfall: one row per detection ping, the beam dB fan
   // across-track (beam-index axis, no metric range lines), newest at top.
   mbes_waterfall_ = new marine_sonar_widgets::WaterfallWidget(this);
+  mbes_waterfall_->setObjectName("mbes_waterfall");
   // Across-track-projected: keep slant range (we already supply ground/across-track
   // distances, so no further conversion) and draw across-track range lines.
   mbes_waterfall_->set_ground_range(false);
@@ -1646,24 +2057,13 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
 
   // Water-column echogram: the down-channel pings as a depth-vs-distance curtain.
   echogram_ = new marine_sonar_widgets::EchogramWidget(this);
+  echogram_->setObjectName("echogram");
 
   // MBES 3D point cloud: orbit view of the window's soundings (colour mode +
   // Z-exaggeration live).
   cloud_ = new PointCloudView(this);
-  cloud_color_combo_ = new QComboBox(this);
-  cloud_color_combo_->addItem("Depth");
-  cloud_color_combo_->addItem("Backscatter");
-  zexag_spin_ = new QDoubleSpinBox(this);
-  zexag_spin_->setRange(1.0, 20.0);
-  zexag_spin_->setSingleStep(0.5);
-  zexag_spin_->setValue(1.0);          // no vertical exaggeration by default
-  zexag_spin_->setPrefix("Z× ");
-  point_size_spin_ = new QDoubleSpinBox(this);
-  point_size_spin_->setRange(1.0, 12.0);
-  point_size_spin_->setSingleStep(0.5);
-  point_size_spin_->setValue(2.5);
-  point_size_spin_->setPrefix("pt ");
-  point_size_spin_->setToolTip("3D point size (pixels)");
+  cloud_->setObjectName("cloud_view");
+  setupCloudControls();
 
   // Per-pane colormap selectors. Every pane offers the SAME full marine_colormap
   // palette set (the waterfalls/echogram via the lib's palette overload, the map +
@@ -1689,19 +2089,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   basemap_cmap_ = make_cmap_combo();
   basemap_cmap_->setToolTip("Basemap colormap (percentile-scaled per layer)");
   basemap_cmap_->setVisible(false);
-  show_track_check_ = new QCheckBox("track", this);
-  show_track_check_->setChecked(true);
-  show_track_check_->setToolTip("Show the campaign nav track");
-  show_track_check_->setVisible(false);
-  show_grid_check_ = new QCheckBox("grid", this);
-  show_grid_check_->setChecked(true);
-  show_grid_check_->setToolTip(
-    "Show the index-tile grid (selected tiles stay visible)");
-  show_grid_check_->setVisible(false);
+
   // Times display in the system local zone by default (#26); this switches
   // the time bar, tooltips, status messages and pass labels to UTC — the
   // zone of bag stamps and survey_index_query output.
   utc_check_ = new QCheckBox("UTC", this);
+  utc_check_->setObjectName("utc_check");
   utc_check_->setChecked(false);
   utc_check_->setToolTip(
     "Display times in UTC instead of local time "
@@ -1710,15 +2103,6 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   waterfall_->set_color_map(marine_colormap::palette(sidescan_cmap_->currentIndex()));
   mbes_waterfall_->set_color_map(marine_colormap::palette(mbes_cmap_->currentIndex()));
   echogram_->set_color_map(marine_colormap::palette(echo_cmap_->currentIndex()));
-  cloud_palette_ = new QComboBox(this);
-  for (const auto & name : marine_colormap::palette_names()) {
-    cloud_palette_->addItem(QString::fromStdString(name));
-  }
-  if (const auto vi = marine_colormap::palette_index("bronze")) {
-    cloud_palette_->setCurrentIndex(static_cast<int>(*vi));
-    cloud_->setColorMap(static_cast<int>(*vi));
-  }
-
   setupRangeControls();
 
   // Wrap a view in a titled panel with a small header row (title + per-pane controls).
@@ -1794,12 +2178,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   auto * contacts_pane = make_pane("Contacts", contact_list_, {});
 
   // Left-to-right: contacts | map | 2x2 grid, all resizable. The map pane
-  // header carries the basemap layer/colormap combos (survey mode only).
+  // header carries the basemap layer/colormap combos and the contrast
+  // controls (survey mode only); the overlay toggles live in the View menu.
   auto * map_pane = make_pane(
     "Map", canvas_,
     {basemap_layer_, basemap_cmap_,
-      map_range_.auto_check, map_range_.lo, map_range_.hi,
-      show_track_check_, show_grid_check_});
+      map_range_.auto_check, map_range_.lo, map_range_.hi});
   outer_split_ = new QSplitter(Qt::Horizontal, this);
   outer_split_->addWidget(contacts_pane);
   outer_split_->addWidget(map_pane);
@@ -1808,13 +2192,25 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   outer_split_->setStretchFactor(1, 3);
   outer_split_->setStretchFactor(2, 4);
 
-  // Status row: the main readout plus a right-aligned lat/lon hover readout
-  // (populated only in survey/geo mode).
+  // Status row: the main readout plus right-aligned hover readouts (populated
+  // only in survey/geo mode) — the time of the highlighted nav-track fix
+  // (#46) and then the cursor's lat/lon. The time sits beside the lat/lon
+  // because they answer the same question about the same pointer: where the
+  // cursor is, and when the boat was there.
   hover_geo_ = new QLabel(this);
+  hover_geo_->setObjectName("hover_geo");
+  hover_geo_->setToolTip(
+    "Geographic position of the cursor, named by the pane it is over — "
+    "empty whenever the cursor is not over a pane that can place it");
+  hover_time_ = new QLabel(this);
+  hover_time_->setObjectName("hover_time");
+  hover_time_->setToolTip(
+    "Time of the highlighted nav-track fix — click the map to cue there");
   auto * status_row = new QWidget(this);
   auto * srow = new QHBoxLayout(status_row);
   srow->setContentsMargins(0, 0, 0, 0);
   srow->addWidget(status_, 1);
+  srow->addWidget(hover_time_);
   srow->addWidget(hover_geo_);
   srow->addWidget(utc_check_);   // right under the time bar it switches
 
@@ -1859,6 +2255,69 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   file_menu->addSeparator();
   file_menu->addAction("E&xit", this, &QWidget::close);
 
+  // View menu (#42): the map overlay toggles, moved off the map pane header
+  // where four checkboxes had crowded out the basemap and contrast controls.
+  // Read as a vertical list the labels have to stand on their own, so each
+  // one names its overlay in full — above all the two grids, which an
+  // operator has already mistaken for each other.
+  auto * view_menu = menuBar()->addMenu("&View");
+  view_menu->setToolTipsVisible(true);
+  const auto add_overlay_action =
+    [this, view_menu](const QString & text, const QKeySequence & key,
+    const QString & tip) {
+      QAction * action = view_menu->addAction(text);
+      action->setCheckable(true);
+      action->setShortcut(key);
+      action->setToolTip(tip);
+      // The overlays have nothing to draw until an index opens; each action
+      // is enabled there, where its checkbox used to become visible.
+      action->setEnabled(false);
+      return action;
+    };
+  show_track_action_ = add_overlay_action(
+    "Nav &Track", QKeySequence("Ctrl+1"), "Show the campaign nav track");
+  show_track_action_->setObjectName("show_track_action");
+  show_track_action_->setChecked(true);
+  show_grid_action_ = add_overlay_action(
+    "Survey &Index Tile Grid", QKeySequence("Ctrl+2"),
+    "Show the index-tile grid (selected tiles stay visible)");
+  show_grid_action_->setObjectName("show_grid_action");
+  show_grid_action_->setChecked(true);
+  // Built-in world coastline (#41): orientation at collection zoom, where the
+  // store tiles are specks and nothing else says where you are. It fades out
+  // with zoom and is gone before survey scale — see coastline_data.hpp. Its
+  // state persists (written on toggle) because an operator who switched it
+  // off does not want it back at every launch.
+  show_coast_action_ = add_overlay_action(
+    "World &Coastline", QKeySequence("Ctrl+3"),
+    "Show the built-in world coastline (Natural Earth 1:50m, offline).\n"
+    "Orientation only: generalised to the kilometre, drawn under every data "
+    "layer, and faded out before survey zoom. Never navigate by it.");
+  show_coast_action_->setObjectName("show_coast_action");
+  {
+    const QSettings settings("UNH-CCOM", "survey_explorer");
+    const bool on = settings.value("show_coastline", true).toBool();
+    show_coast_action_->setChecked(on);
+    canvas_->setCoastlineVisible(on);
+  }
+  // Metric measuring grid (#42): the slate Cartesian lines and their metre
+  // labels, a ruler inherited from the target viewer. Distinct from the tile
+  // grid above, which draws the cyan survey index tiles — the two were
+  // indistinguishable while only one of them could be switched off, and the
+  // header's "grid" / "metric grid" pair barely helped.
+  // Checked here for the bag case (the target-viewer window, where the grid
+  // IS the measuring tool); openSurveyIndex overrides it for index mode,
+  // where the remembered state wins and the default is off.
+  show_metric_grid_action_ = add_overlay_action(
+    "&Measuring Grid (metres)", QKeySequence("Ctrl+4"),
+    "Show the metric measuring grid: Cartesian lines at the spacing set by "
+    "the Grid box in the bottom row, labelled in metres from the map "
+    "origin.\nA ruler for sizing a target, not navigation chrome — over a "
+    "whole collection the origin is arbitrary. This is NOT the survey index "
+    "tile grid.");
+  show_metric_grid_action_->setObjectName("show_metric_grid_action");
+  show_metric_grid_action_->setChecked(true);
+
   connect(this, &SidescanViewerWindow::indexProgress,
     this, &SidescanViewerWindow::onIndexProgress);
   connect(this, &SidescanViewerWindow::sessionOpened,
@@ -1873,7 +2332,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       if (!debounce_uri_.empty()) {
         const std::string uri = debounce_uri_;
         debounce_uri_.clear();
-        openBag(uri, debounce_t0_ns_, debounce_t1_ns_);
+        openBag(uri, OpenReason::Cue, debounce_t0_ns_, debounce_t1_ns_);
       }
     });
   connect(&render_watcher_, &QFutureWatcher<SidescanRenderResult>::finished,
@@ -1948,13 +2407,27 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     this, [this](int) {requestBasemapLoad();});
   connect(basemap_cmap_, QOverload<int>::of(&QComboBox::currentIndexChanged),
     this, [this](int) {requestBasemapLoad();});
-  connect(show_track_check_, &QCheckBox::toggled,
+  connect(show_track_action_, &QAction::toggled,
     this, [this](bool on) {canvas_->setNavTrackVisible(on);});
-  connect(show_grid_check_, &QCheckBox::toggled,
+  connect(show_grid_action_, &QAction::toggled,
     this, [this](bool on) {canvas_->setIndexTilesVisible(on);});
+  connect(show_coast_action_, &QAction::toggled, this, [this](bool on) {
+      canvas_->setCoastlineVisible(on);
+      QSettings settings("UNH-CCOM", "survey_explorer");
+      settings.setValue("show_coastline", on);
+    });
+  connect(show_metric_grid_action_, &QAction::toggled, this, [this](bool on) {
+      canvas_->setMetricGridVisible(on);
+      // The spacing spinbox belongs to this grid; grey it out while there is
+      // no grid for it to space.
+      grid_spin_->setEnabled(on);
+      QSettings settings("UNH-CCOM", "survey_explorer");
+      settings.setValue("show_metric_grid", on);
+    });
   connect(utc_check_, &QCheckBox::toggled, this, [this](bool on) {
       time_bar_->setDisplayUtc(on);
       refreshPassLabels();
+      refreshFixHighlightReadout();   // the hovered fix reads in the new zone too
     });
 
   // Clip changes re-run the selection load (cheap: the query is local, the
@@ -1974,10 +2447,12 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     });
   connect(canvas_, &SidescanCanvas::tileSelectionChanged,
     this, &SidescanViewerWindow::onTileSelectionChanged);
-  connect(canvas_, &SidescanCanvas::hoverGeo, this, [this](double lat, double lon) {
-      hover_geo_->setText(
-        QString("%1, %2").arg(lat, 0, 'f', 6).arg(lon, 0, 'f', 6));
-    });
+  connect(canvas_, &SidescanCanvas::hoverGeo,
+    this, &SidescanViewerWindow::onMapHoverGeo);
+  connect(canvas_, &SidescanCanvas::hoverInterrupted,
+    this, &SidescanViewerWindow::clearFixHighlight);
+  connect(canvas_, &SidescanCanvas::plainClicked,
+    this, &SidescanViewerWindow::onMapPlainClicked);
   connect(time_bar_, &TimeBarWidget::passActivated,
     this, &SidescanViewerWindow::onTimelinePassActivated);
   connect(time_bar_, &TimeBarWidget::timeSelected,
@@ -2000,6 +2475,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     });
   connect(canvas_, &SidescanCanvas::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
+  registerMapContextMenuEntries();   // the map menu's window-side entries (#42)
   connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::boxMarked,
     this, &SidescanViewerWindow::onContactMarked);
   connect(mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::boxMarked,
@@ -2027,8 +2503,11 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       QAction * remove = menu.addAction("Delete contact");
       QAction * chosen = menu.exec(contact_list_->viewport()->mapToGlobal(pos));
       if (chosen == copy_ll && has_geo) {
+        // The one number format, shared with the status readout and the map
+        // menu's Copy Position (#42) — same six decimals, one code path.
         QApplication::clipboard()->setText(
-          QString("%1, %2").arg(g.latitude, 0, 'f', 6).arg(g.longitude, 0, 'f', 6));
+          QString::fromStdString(
+            format_geo_coords(GeoPoint{g.latitude, g.longitude})));
       } else if (chosen == copy_row) {
         QApplication::clipboard()->setText(item->text());
       } else if (chosen == remove) {
@@ -2048,10 +2527,8 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       }
     });
   connect(cloud_color_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-    this, [this](int i) {
-      cloud_->setColorMode(
-        i == 1 ? PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
-    });
+    this, [this](int) {applyCloudColorMode();});
+  refreshCloudColorChannels();   // the startup cloud is empty: Pass has nothing to tell apart
   connect(zexag_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
     this, [this](double z) {cloud_->setZExaggeration(static_cast<float>(z));});
   connect(point_size_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -2074,6 +2551,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   connect(canvas_, &SidescanCanvas::seekWorld, this, &SidescanViewerWindow::onCursorSeek);
   connect(cloud_, &PointCloudView::hoverWorld, this, &SidescanViewerWindow::onCursorHover);
   connect(cloud_, &PointCloudView::seekWorld, this, &SidescanViewerWindow::onCursorSeek);
+  connectHoverReadout();   // the same hovers again, as the geographic readout (#47)
   const auto wf_hover = [this](QPointF p, bool v) {onCursorHover(p.x(), p.y(), v);};
   const auto wf_seek = [this](QPointF p) {onCursorSeek(p.x(), p.y());};
   connect(waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this, wf_hover);
@@ -2120,7 +2598,9 @@ SidescanViewerWindow::~SidescanViewerWindow()
   // index/render to finish before the members tear down (~QObject then discards any
   // already-queued indexProgress events targeted at this window). Cancelling the
   // live scan first turns a minutes-long wait into milliseconds.
-  if (scan_cancel_) {scan_cancel_->store(true);}
+  // closeEvent already cancelled both tokens on the normal path (#44); this is
+  // the backstop for a window destroyed without ever being closed.
+  cancelWorkers();
   if (index_watcher_.isRunning()) {index_watcher_.waitForFinished();}
   for (auto & f : superseded_index_futures_) {
     f.waitForFinished();   // orphaned indexers also captured `this`
@@ -2133,8 +2613,32 @@ SidescanViewerWindow::~SidescanViewerWindow()
   // its own worker) runs during QObject teardown after this body.
 }
 
+void SidescanViewerWindow::cancelWorkers()
+{
+  // One token per meaning: `scan_cancel_` is the bag index scan's (it doubles
+  // as the supersede signal), `worker_cancel_` is the render/cloud/CUBE/drape
+  // teardown token. Both are only ever set here, never cleared.
+  if (scan_cancel_) {scan_cancel_->store(true);}
+  worker_cancel_->store(true);
+  // The per-job supersede tokens are what the cloud / CUBE / drape workers
+  // actually hold, so teardown has to set them too — worker_cancel_ alone
+  // would leave an in-flight job reading its bag to the end.
+  if (cloud_cancel_) {cloud_cancel_->store(true);}
+  if (cube_cancel_) {cube_cancel_->store(true);}
+  if (drape_cancel_) {drape_cancel_->store(true);}
+  // basemap_lod_ carries its own cancel_, set by its destructor during the
+  // QObject teardown that follows ~SidescanViewerWindow's body.
+}
+
 void SidescanViewerWindow::closeEvent(QCloseEvent * event)
 {
+  // Tell the background workers to stop FIRST (#44): the destructor waits on
+  // them, and by the time it runs the window is already off the screen — the
+  // operator would be staring at a vanished application while a CUBE run or a
+  // multi-bag cloud load finished work nobody wants. Cancelling here gives
+  // them the whole teardown to notice.
+  cancelWorkers();
+
   // Persist the window geometry + the resizable-pane splitter sizes so the
   // operator's arrangement survives a restart.
   QSettings settings("UNH-CCOM", "survey_explorer");
@@ -2147,8 +2651,90 @@ void SidescanViewerWindow::closeEvent(QCloseEvent * event)
   QMainWindow::closeEvent(event);
 }
 
+void SidescanViewerWindow::registerMapContextMenuEntries()
+{
+  // Copy Position (#42): the operator's reason for it is handing a place to
+  // someone else — "generate a surface around here" — so the text has to be
+  // pasteable and has to name the same spot he was looking at.
+  //
+  // Registered by the WINDOW, not the canvas, on the split #42 established:
+  // the canvas owns the geometry (and supplies it through contextMenuGeo),
+  // while the clipboard and the status row are application state the canvas
+  // has no business reaching into.
+  canvas_->addContextMenuEntry(
+    SidescanCanvas::ContextMenuEntry{
+      tr("Copy Position"),
+      [this]() {copyMapContextMenuPosition();},
+      // Greyed, never hidden and never a zero: with no survey index and no
+      // placeable bag the clicked pixel has no position, which is the same
+      // condition under which the readout shows nothing (#47).
+      [this]() {return canvas_->contextMenuGeo().has_value();}});
+}
+
+void SidescanViewerWindow::copyMapContextMenuPosition()
+{
+  // The position the MENU was opened at, not the cursor's: by now the pointer
+  // has travelled down the menu to this entry. The canvas captured it in the
+  // context-menu event and has held it since.
+  const auto & geo = canvas_->contextMenuGeo();
+  if (!geo) {
+    // Unreachable through the menu (the entry is greyed out without one), but
+    // an action that is asked to copy nothing must copy nothing, not "0, 0".
+    return;
+  }
+  const QString text = QString::fromStdString(format_geo_coords(*geo));
+  QApplication::clipboard()->setText(text);
+  // Copying is silent otherwise — nothing on screen changes — so the status
+  // row is the only thing that can tell him it happened, and it shows what
+  // landed on the clipboard so he can check it without pasting.
+  status_->setText(tr("Copied %1 to the clipboard.").arg(text));
+}
+
+void SidescanViewerWindow::connectHoverReadout()
+{
+  // Separate from the linked cursor on purpose: the cursor is a map-frame
+  // point broadcast to every pane, while the readout is ONE pane's position
+  // converted in its own frame and named by the pane that produced it. The
+  // map feeds it through hoverGeo (it has a geographic frame of its own) and
+  // the echogram through onEchogramHover (its frame is along-track distance).
+  connect(
+    cloud_, &PointCloudView::hoverWorld, this,
+    [this](double x, double y, bool v) {onPaneHoverWorld(HoverPane::Cloud, x, y, v);});
+  connect(
+    waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this,
+    [this](QPointF p, bool v) {
+      onPaneHoverWorld(HoverPane::Sidescan, p.x(), p.y(), v);
+    });
+  connect(
+    mbes_waterfall_, &marine_sonar_widgets::WaterfallWidget::hoverMap, this,
+    [this](QPointF p, bool v) {
+      onPaneHoverWorld(HoverPane::Mbes, p.x(), p.y(), v);
+    });
+}
+
+std::optional<HoverPane> SidescanViewerWindow::paneOf(const QObject * obj) const
+{
+  if (obj == canvas_) {return HoverPane::Map;}
+  if (obj == cloud_) {return HoverPane::Cloud;}
+  if (obj == waterfall_) {return HoverPane::Sidescan;}
+  if (obj == mbes_waterfall_) {return HoverPane::Mbes;}
+  if (obj == echogram_) {return HoverPane::Echogram;}
+  return std::nullopt;
+}
+
 bool SidescanViewerWindow::eventFilter(QObject * obj, QEvent * event)
 {
+  // The cursor left a pane: its position is no longer live, so it goes (#47).
+  // Handled here, on the application filter this window already installs,
+  // rather than in each pane: two of the five widgets come from
+  // marine_sonar_widgets, which emits no leave — and the alternative, a
+  // timer deciding a position had gone stale, would be a guess where Qt has
+  // the fact. Never consumed: leaving is the widgets' event too.
+  if (event->type() == QEvent::Leave) {
+    if (const auto pane = paneOf(obj)) {
+      onPaneLeave(*pane);
+    }
+  }
   if (event->type() == QEvent::KeyPress && scrub_ != nullptr && scrub_->isEnabled()) {
     // Don't steal navigation keys from widgets where they mean something else:
     // editing a spin box / combo / text field, navigating the contact list, or the
@@ -2185,7 +2771,7 @@ bool SidescanViewerWindow::eventFilter(QObject * obj, QEvent * event)
 void SidescanViewerWindow::onOpenBag()
 {
   const QString dir = QFileDialog::getExistingDirectory(this, "Open ROS 2 bag directory");
-  if (!dir.isEmpty()) {openBag(dir.toStdString());}
+  if (!dir.isEmpty()) {openBag(dir.toStdString(), OpenReason::Explicit);}
 }
 
 void SidescanViewerWindow::onOpenIndex()
@@ -2205,14 +2791,23 @@ void SidescanViewerWindow::onOpenIndex()
   openIndexWithDefaults(path.toStdString());
 }
 
-void SidescanViewerWindow::reopenLastIndexIfAny()
+void SidescanViewerWindow::openStartupIndex()
 {
+  // Precedence (#40): the index the operator last had open, then the
+  // conventional world collection. An explicit --index never reaches here —
+  // main opens it directly. Absence is silent at every step: the window
+  // starts empty rather than raising a dialog about a path nobody named.
   const QSettings settings("UNH-CCOM", "survey_explorer");
   const QString last = settings.value("last_index").toString();
-  if (last.isEmpty() || !QFileInfo::exists(last)) {
-    return;   // nothing remembered (or it moved) — start empty, no dialog
+  if (!last.isEmpty() && QFileInfo::exists(last)) {
+    openIndexWithDefaults(last.toStdString());
+    return;
   }
-  openIndexWithDefaults(last.toStdString());
+  const auto world = worldIndexPath(defaultWorldRoot());
+  std::error_code ec;
+  if (!world.empty() && std::filesystem::is_regular_file(world, ec)) {
+    openIndexWithDefaults(world.string());
+  }
 }
 
 void SidescanViewerWindow::onReopenLastIndex()
@@ -2227,11 +2822,19 @@ void SidescanViewerWindow::onReopenLastIndex()
 
 void SidescanViewerWindow::openIndexWithDefaults(const std::string & index_path)
 {
-  // Same stores default as the --stores CLI option: the sibling
-  // bathymetry/survey layer next to the index (discovery finds the rest).
+  // Same stores default as the --stores CLI option: the authoritative depth
+  // product beside the index (discovery finds the rest). #40.
+  //
+  // Through the SHARED helper, not a second copy of the derivation: this path
+  // had its own `path(index_path).parent_path()`, which is empty for a bare
+  // relative filename and so reproduced the no-basemap failure the CLI fix had
+  // just closed. A remembered `last_index` can be relative, so the GUI reaches
+  // it too. Found by Copilot after the CLI site was fixed — the same
+  // fixed-one-site-missed-another shape as the supersede tokens earlier in this
+  // branch, which is a good argument for the derivation living in exactly one
+  // place.
   const std::string stores_dir =
-    (std::filesystem::path(index_path).parent_path() /
-    "bathymetry" / "survey").string();
+    defaultStoresDirForIndex(index_path).string();
   try {
     openSurveyIndex(index_path, stores_dir);
   } catch (const std::exception & e) {
@@ -2265,13 +2868,26 @@ void SidescanViewerWindow::scheduleOpen(
   debounce_t0_ns_ = t0_ns;
   debounce_t1_ns_ = t1_ns;
   open_debounce_.start();   // restart on every commit; the last one wins
-  status_->setText(QString("Cueing %1 …")
+  // Say what the stall IS. Cueing to an instant outside the open recording
+  // reopens and re-indexes a whole bag, and in a revisited area — the case
+  // the map-click cue exists for (#46) — most clicks land in another
+  // recording and pay it. A wait the operator understands is a different
+  // thing from one he does not. (Making it CHEAP is the cursor-to-absolute-
+  // time work discussed against #36, not this.)
+  status_->setText(
+    QString("Cueing %1 — that time is in another recording, which has to be "
+      "reopened and indexed …")
     .arg(QFileInfo(QString::fromStdString(bag_uri)).fileName()));
 }
 
 void SidescanViewerWindow::openBag(
-  const std::string & bag_uri, int64_t cue_start_ns, int64_t cue_end_ns)
+  const std::string & bag_uri, OpenReason reason,
+  int64_t cue_start_ns, int64_t cue_end_ns)
 {
+  // An explicit open frames the bag the operator asked for; a cued one leaves
+  // his map zoom/centre and 3D camera exactly where they were (#46). Both fit
+  // points below read this, so the deferred one belongs to the same open.
+  open_fits_view_ = reason == OpenReason::Explicit;
   // A direct open (menu, pass click) outranks a pending debounced one.
   open_debounce_.stop();
   debounce_uri_.clear();
@@ -2318,8 +2934,16 @@ void SidescanViewerWindow::openBag(
   // draw as before in bag-only mode.
   canvas_->setMapAnchor(std::nullopt);
   canvas_->setTrack({});
-  canvas_->resetView();
-  cloud_->resetView();
+  if (open_fits_view_) {
+    canvas_->resetView();
+    // The 3D camera gets the same treatment: it is operator state too, and it
+    // is already frame-independent — the pane recentres every cloud on its own
+    // centroid and keeps the orbit and zoom across a scrub, which is exactly
+    // what a cued reopen is from the operator's side (a new window of
+    // soundings, same viewing angle). Fitting it is only right when he asked
+    // for this bag.
+    cloud_->resetView();
+  }
   scrub_->setEnabled(false);
   scrub_->blockSignals(true);
   scrub_->setRange(0, 1);
@@ -2346,6 +2970,12 @@ void SidescanViewerWindow::openBag(
         session = std::make_shared<SidescanBagSession>(bag_uri);
       } catch (const std::exception & e) {
         Q_EMIT openFailed(epoch, QString::fromStdString(e.what()));
+        return;
+      } catch (...) {
+        // Both arms, for the same reason as the std::exception one above: on
+        // Qt5 a non-QException of ANY type escaping the task terminates the
+        // process (#42 review).
+        Q_EMIT openFailed(epoch, "bag open failed: unknown exception");
         return;
       }
       {
@@ -2384,6 +3014,8 @@ void SidescanViewerWindow::openBag(
           }, cancel);
       } catch (const std::exception &) {
         Q_EMIT indexProgress(epoch, 0.0, true);   // surface as an empty done
+      } catch (...) {
+        Q_EMIT indexProgress(epoch, 0.0, true);   // ditto, for a non-std throw
       }
     }));
 }
@@ -2449,7 +3081,7 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
     track.emplace_back(pts.back().first, pts.back().second);
   }
   canvas_->setTrack(track);
-  if (first) {
+  if (first && open_fits_view_) {
     canvas_->resetView();   // fit once when the first resolved data arrives
     cloud_->resetView();
   }
@@ -2656,16 +3288,16 @@ void SidescanViewerWindow::onCursorSeek(double map_x, double map_y)
 
 void SidescanViewerWindow::onEchogramHover(double frac, bool valid)
 {
+  // The echogram's own frame is along-track distance: a column is where the
+  // boat was, so its position is the track position at that distance. With no
+  // open bag, or a distance the track cannot answer for, it is nothing.
   const double span = last_win_hi_ - last_win_lo_;
   double x = 0.0;
   double y = 0.0;
-  if (valid && session_ && span > 0.0 &&
-    session_->positionAtDistance(last_win_lo_ + frac * span, x, y))
-  {
-    onCursorHover(x, y, true);
-  } else {
-    onCursorHover(0.0, 0.0, false);
-  }
+  const bool placed = valid && session_ && span > 0.0 &&
+    session_->positionAtDistance(last_win_lo_ + frac * span, x, y);
+  onCursorHover(x, y, placed);
+  onPaneHoverWorld(HoverPane::Echogram, x, y, placed);
 }
 
 void SidescanViewerWindow::onEchogramSeek(double frac)
@@ -2725,6 +3357,9 @@ void SidescanViewerWindow::updateScrubStep()
 void SidescanViewerWindow::requestRender()
 {
   if (!session_) {return;}
+  // Closing (#44): never launch a fresh render into the teardown — the
+  // destructor would then wait for a job that started after the cancel.
+  if (worker_cancel_->load(std::memory_order_relaxed)) {return;}
   // Coalesce: if a render is already running, flag a pending one and re-launch on
   // finish with the latest scrub position (so a drag never queues a backlog).
   if (rendering_) {
@@ -2748,15 +3383,21 @@ void SidescanViewerWindow::requestRender()
     manual_range = {static_cast<float>(ss_range_.lo->value()),
       static_cast<float>(ss_range_.hi->value())};
   }
+  const auto cancel = worker_cancel_;
   render_watcher_.setFuture(QtConcurrent::run(
-      [session, head, total, win, max_pings, res, palette, epoch, manual_range]() {
+      [session, head, total, win, max_pings, res, palette, epoch, manual_range,
+      cancel]() {
         SidescanRenderResult r;
         try {
           r = render_window(
             session, head, total, win.lo, win.hi, max_pings, res, palette,
-            manual_range);
+            manual_range, cancel);
         } catch (const std::exception &) {
           r.ok = false;   // e.g. the bag became unreadable mid-session
+          r.cancelled = cancel->load(std::memory_order_relaxed);
+        } catch (...) {
+          r.ok = false;   // a non-std throw terminates just as surely on Qt5
+          r.cancelled = cancel->load(std::memory_order_relaxed);
         }
         r.epoch = epoch;
         return r;
@@ -2767,6 +3408,12 @@ void SidescanViewerWindow::onRenderFinished()
 {
   rendering_ = false;
   const SidescanRenderResult r = render_watcher_.result();
+  if (r.cancelled) {
+    // The window is closing (#44): publish nothing, and above all do not
+    // relaunch a pending render into widgets that are going away.
+    render_pending_ = false;
+    return;
+  }
 
   // Drop a render computed for a previous bag (epoch mismatch) so it never flashes
   // stale coverage or leaves the waterfall index on the wrong geometry.
@@ -2820,6 +3467,8 @@ void SidescanViewerWindow::onRenderFinished()
   // pane alone — the selection cloud spans bags and would be clobbered.
   if (!selection_cloud_) {
     cloud_->setPoints(r.mbes_soundings);
+    cloud_frame_ = CloudFrame::OpenBag;   // the open bag's map-ENU (#47)
+    refreshCloudColorChannels();   // one set of points: no pass identity
     cloud_->setBoat(r.boat_x, r.boat_y, r.boat_z, r.boat_heading, r.boat_valid);
   }
   // Size the MBES backscatter scrollback to the window too (same reason as the
@@ -2900,6 +3549,7 @@ void SidescanViewerWindow::openSurveyIndex(
   // the time-bar position arrow (time -> fix) and time -> bag resolution.
   nav_track_points_ = bridge_->navTrack();
   bag_paths_ = bridge_->bagPaths();
+  clearFixHighlight();   // the old index's fix is not in this one (#46)
   std::vector<std::vector<std::pair<double, double>>> segments;
   {
     std::int64_t cur_bag = -1;
@@ -2940,8 +3590,8 @@ void SidescanViewerWindow::openSurveyIndex(
   if (box) {
     canvas_->fitGeo(box->south, box->west, box->north, box->east);
     status_->setText(
-      QString("Survey index: %1 tiles indexed — ctrl-click or ctrl-drag "
-        "tiles to load their passes into the 3D cloud.")
+      QString("Survey index: %1 tiles indexed — drag on the map to select a "
+        "region and load its passes; click to clear.")
       .arg(indexed_tiles_.size()));
   } else {
     status_->setText("Survey index holds no passes — nothing to explore.");
@@ -2952,8 +3602,48 @@ void SidescanViewerWindow::openSurveyIndex(
   discoverBasemapLayers(
     std::filesystem::path(index_path).parent_path().string(), stores_dir);
   requestBasemapLoad();
-  show_track_check_->setVisible(true);
-  show_grid_check_->setVisible(true);
+  show_track_action_->setEnabled(true);
+  show_grid_action_->setEnabled(true);
+  show_coast_action_->setEnabled(true);
+  // Index mode: the measuring grid is off unless the operator asked for it
+  // back. Applied here rather than in the constructor because this is the
+  // moment the window learns which mode it is in.
+  {
+    const QSettings settings("UNH-CCOM", "survey_explorer");
+    const bool on = settings.value("show_metric_grid", false).toBool();
+    show_metric_grid_action_->setChecked(on);
+    canvas_->setMetricGridVisible(on);
+    grid_spin_->setEnabled(on);
+  }
+  show_metric_grid_action_->setEnabled(true);
+  loadCoastlineLayer();
+}
+
+void SidescanViewerWindow::loadCoastlineLayer()
+{
+  if (coastline_loaded_) {
+    return;   // the canvas keeps the data across index opens
+  }
+  coastline_loaded_ = true;   // one attempt per session, warning included
+  std::string share;
+  try {
+    share = ament_index_cpp::get_package_share_directory("marine_perception_tools");
+  } catch (const std::exception & e) {
+    qWarning() << "No coastline layer: package share directory not found —" << e.what();
+    return;
+  }
+  const std::string path =
+    (std::filesystem::path(share) / "data" / "coastline" / "ne_50m_coastline.txt").string();
+  // Decimate at ~55 m, half the milli-degree quantisation of the vendored
+  // data: it removes the collinear runs that quantisation leaves behind
+  // without moving the line anywhere the eye could follow.
+  auto coastline = loadCoastline(path, 0.0005);
+  if (coastline.empty()) {
+    qWarning() << "No coastline layer: nothing usable in"
+               << QString::fromStdString(path);
+    return;
+  }
+  canvas_->setCoastline(std::move(coastline));
 }
 
 void SidescanViewerWindow::discoverBasemapLayers(
@@ -2973,36 +3663,50 @@ void SidescanViewerWindow::discoverBasemapLayers(
 
   // Preferred layers first (the ones an operator reaches for), then any other
   // tile-holding subdirectory found one or two levels under the stores root.
-  const std::vector<std::string> preferred = {
-    "bathymetry/survey", "backscatter/survey", "sidescan/processed",
-    "bathymetry/reference"};
-  for (const auto & rel : preferred) {
+  // The names are the uma-ADR-0010 D3 taxonomy; see world_layout.hpp (#40).
+  for (const auto & rel : preferredLayerPaths()) {
     const auto dir = std::filesystem::path(root) / rel;
     if (has_tif(dir)) {
       basemap_layers_.emplace_back(QString::fromStdString(rel), dir.string());
     }
   }
-  std::error_code ec;
-  for (const auto & top : std::filesystem::directory_iterator(root, ec)) {
-    if (!top.is_directory()) {
-      continue;
-    }
-    std::error_code ec2;
-    for (const auto & sub : std::filesystem::directory_iterator(top.path(), ec2)) {
-      if (!sub.is_directory() || !has_tif(sub.path())) {
-        continue;
+  // Fallback discovery: any tile-holding directory up to three levels under
+  // the root. Three, not two, because the imagery theme nests a store between
+  // the theme and its layers (imagery/sidescan/processed) while the depth
+  // theme does not (depths/processed). A directory that is not a world
+  // collection at all still lights up whatever it has.
+  const std::function<void(const std::filesystem::path &, int)> scan =
+    [&](const std::filesystem::path & dir, int depth) {
+      if (depth > 3) {
+        return;
       }
-      const std::string dir = sub.path().string();
-      const bool known = std::any_of(
-        basemap_layers_.begin(), basemap_layers_.end(),
-        [&dir](const auto & l) {return l.second == dir;});
-      if (!known) {
-        const auto rel = std::filesystem::relative(sub.path(), root, ec2);
-        basemap_layers_.emplace_back(
-          QString::fromStdString(ec2 ? dir : rel.string()), dir);
+      std::error_code ec;
+      for (const auto & e : std::filesystem::directory_iterator(dir, ec)) {
+        if (!e.is_directory()) {
+          continue;
+        }
+        // The derived overview sidecar is the same layer at coarser levels,
+        // not a layer of its own — listing it would offer the operator a
+        // second, blurrier copy of every store.
+        if (e.path().filename() == "overviews") {
+          continue;
+        }
+        if (has_tif(e.path())) {
+          const std::string sub_dir = e.path().string();
+          const bool known = std::any_of(
+            basemap_layers_.begin(), basemap_layers_.end(),
+            [&sub_dir](const auto & l) {return l.second == sub_dir;});
+          if (!known) {
+            std::error_code rel_ec;
+            const auto rel = std::filesystem::relative(e.path(), root, rel_ec);
+            basemap_layers_.emplace_back(
+              QString::fromStdString(rel_ec ? sub_dir : rel.string()), sub_dir);
+          }
+        }
+        scan(e.path(), depth + 1);
       }
-    }
-  }
+    };
+  scan(std::filesystem::path(root), 1);
   // An explicit --stores dir that discovery didn't produce goes first (it was
   // asked for), labeled by its path.
   const bool initial_known = std::any_of(
@@ -3060,6 +3764,12 @@ void SidescanViewerWindow::pushBasemapView()
 
 void SidescanViewerWindow::onTileSelectionChanged()
 {
+  // Never launch into a teardown (#42 review): closeEvent() sets the teardown
+  // token before the destructor's waits, and a job started after that would
+  // read its whole bag while the operator waits for the window to go away.
+  // `worker_cancel_` is the right flag here precisely because it never resets;
+  // the per-job tokens do, so they cannot answer "is this window closing".
+  if (worker_cancel_->load(std::memory_order_relaxed)) {return;}
   if (!bridge_) {
     return;
   }
@@ -3123,17 +3833,30 @@ void SidescanViewerWindow::onTileSelectionChanged()
   cube_soundings_.clear();
   if (cube_selfcal_btn_) {cube_selfcal_btn_->setEnabled(false);}
   ++drape_gen_;
+  supersede_token(drape_cancel_);   // ...and the job serving it stops
   cloud_->clearSurface();
+  // Entering multi-pass mode from anything else defaults the colouring to
+  // Pass once the load lands (#36); re-selecting while already in a
+  // multi-pass cloud keeps the operator's choice. Either way the selector
+  // stays live — Pass is an entry, not a mode that takes the control away,
+  // which is what made a CUBE run look like it stole the cloud.
+  cloud_pass_default_pending_ = !selection_cloud_;
   selection_cloud_ = true;
-  cloud_->setColorMode(PointCloudView::ColorMode::Pass);
-  cloud_color_combo_->setEnabled(false);
+  // The pane is reloading: the passes on screen no longer answer to the
+  // selection, and the frame they were loaded in is no longer current.
+  cloud_pass_clouds_.clear();
+  selection_ref_bag_.clear();
+  selection_ref_frame_.clear();
   cloud_legend_->clear();
   cloud_legend_->setVisible(true);
   ++cloud_gen_;   // any load in flight is for a stale selection
+  supersede_token(cloud_cancel_);   // ...and the job serving it stops
 
   if (cloud_passes.empty()) {
     cloud_->resetView();
     cloud_->setMultiPassPoints({});
+    cloud_frame_ = CloudFrame::None;   // an empty pane places nothing (#47)
+    refreshCloudColorChannels();
     cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
     status_->setText(
       QString("%1 tile%2 selected, %3 pass%4 — none mbes-bathy; nothing to "
@@ -3171,10 +3894,24 @@ void SidescanViewerWindow::onTileSelectionChanged()
     QString()));
   const auto gen = cloud_gen_;
   const auto snapshot = std::move(cloud_passes);   // worker owns its own copy
-  cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen, clip]() {
+  const auto cancel = cloud_cancel_;
+  cloud_watcher_.setFuture(QtConcurrent::run([snapshot, gen, clip, cancel]() {
       CloudLoadTicket ticket;
       ticket.generation = gen;
-      ticket.outcome = load_cloud_passes(snapshot, clip);
+      // A non-QException escaping a QtConcurrent task std::terminates on Qt5,
+      // and the throw resurfaces on the UI thread out of result() -- or out of
+      // the destructor's waitForFinished(), i.e. a throw from a destructor.
+      // The index and CUBE workers already guard; these two did not (#42
+      // review). A multi-bag load is exactly where bad_alloc lives.
+      try {
+        ticket.outcome = load_cloud_passes(snapshot, clip, cancel);
+      } catch (const std::exception & e) {
+        ticket.outcome = CloudLoadOutcome();
+        ticket.outcome.notes << QString("cloud load failed: %1").arg(e.what());
+      } catch (...) {
+        ticket.outcome = CloudLoadOutcome();
+        ticket.outcome.notes << QString("cloud load failed: unknown exception");
+      }
       return ticket;
     }));
 }
@@ -3208,6 +3945,7 @@ void SidescanViewerWindow::exitSelectionCloud()
   cube_drape_ = SidescanDrape{};
   cube_drape_terrain_ = CubeSurface{};
   ++drape_gen_;
+  supersede_token(drape_cancel_);   // ...and the job serving it stops
   cloud_->clearSurface();
   if (time_bar_) {
     time_bar_->clearPasses();
@@ -3234,21 +3972,25 @@ void SidescanViewerWindow::exitSelectionCloud()
   }
   selection_cloud_ = false;
   ++cloud_gen_;   // an in-flight selection load must not apply any more
+  supersede_token(cloud_cancel_);   // ...and the job serving it stops
   cloud_pass_clouds_.clear();
+  selection_ref_bag_.clear();
+  selection_ref_frame_.clear();
   cloud_legend_->clear();
   cloud_legend_->setVisible(false);
-  cloud_color_combo_->setEnabled(true);
-  cloud_->setColorMode(cloud_color_combo_->currentIndex() == 1 ?
-    PointCloudView::ColorMode::Backscatter : PointCloudView::ColorMode::Depth);
   // Hand the pane back to the scrub window: re-render if a bag is open,
   // otherwise leave it empty.
   cloud_->resetView();
   if (session_) {
-    requestRender();
+    requestRender();   // the render sets the pane's frame back to the open bag
   } else {
     cloud_->setPoints({});
     cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
+    cloud_frame_ = CloudFrame::None;
   }
+  // The scrub cloud has no pass identity: Pass greys out (with its reason)
+  // and the colouring falls back to Depth if it was the live choice.
+  refreshCloudColorChannels();
 }
 
 void SidescanViewerWindow::onTimelinePassActivated(
@@ -3274,7 +4016,9 @@ void SidescanViewerWindow::onTimelinePassActivated(
     }
     return;
   }
-  openBag(bag, static_cast<int64_t>(t_start_ns), static_cast<int64_t>(t_end_ns));
+  openBag(
+    bag, OpenReason::Cue,
+    static_cast<int64_t>(t_start_ns), static_cast<int64_t>(t_end_ns));
 }
 
 void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)
@@ -3361,11 +4105,120 @@ void SidescanViewerWindow::onCenterTimeChanged(qlonglong t_ns)
   }
 }
 
+void SidescanViewerWindow::onMapHoverGeo(double lat, double lon, bool valid)
+{
+  onPaneHoverGeo(
+    HoverPane::Map,
+    valid ? std::optional<GeoPoint>(GeoPoint{lat, lon}) : std::nullopt);
+  if (!valid) {
+    // No geographic position under the cursor means no fix search either:
+    // the track is placed geographically, so there is nothing to search in.
+    clearFixHighlight();
+    return;
+  }
+  // No highlight while a gesture owns the pointer (#46): a region drag past
+  // the slop, a pan, a glide, or contact marking. hoverGeo still fires
+  // throughout those — the lat/lon readout should keep following the cursor —
+  // so the suppression belongs here rather than at the emit.
+  if (canvas_->pointerGestureActive()) {
+    clearFixHighlight();
+    return;
+  }
+  // In bag-only mode nav_track_points_ is empty, so this is a no-hit and the
+  // feature is simply absent — no special case needed.
+  const auto hit = nearestTrackFix(
+    nav_track_points_, lat, lon, canvas_->groundMetresPerPixel());
+  hovered_fix_ = hit;
+  canvas_->setHighlightedFix(
+    hit ?
+    std::optional<SidescanCanvas::HighlightedFix>(
+      SidescanCanvas::HighlightedFix{hit->latitude, hit->longitude}) :
+    std::nullopt);
+  refreshFixHighlightReadout();
+}
+
+void SidescanViewerWindow::onPaneHoverGeo(
+  HoverPane pane, const std::optional<GeoPoint> & pos)
+{
+  hover_readout_.hover(pane, pos);
+  hover_geo_->setText(QString::fromStdString(hover_readout_.text()));
+}
+
+void SidescanViewerWindow::onPaneHoverWorld(
+  HoverPane pane, double map_x, double map_y, bool valid)
+{
+  // Each pane converts in ITS OWN frame: the three sonar panes hover in the
+  // open bag's map-ENU, while the 3D pane's points may be a selection or CUBE
+  // load in another bag's reference frame entirely.
+  const std::optional<MapGeoAffine> anchor =
+    (pane == HoverPane::Cloud) ? cloudFrameAnchor() : canvas_->mapAnchor();
+  onPaneHoverGeo(
+    pane, valid ? geo_from_map(anchor, map_x, map_y) : std::nullopt);
+}
+
+std::optional<MapGeoAffine> SidescanViewerWindow::cloudFrameAnchor() const
+{
+  switch (cloud_frame_) {
+    case CloudFrame::OpenBag:
+      // The scrub cloud is the open bag's window, in the same map-ENU the map
+      // places that bag by — so it reads through the same anchor, live.
+      return canvas_->mapAnchor();
+    case CloudFrame::Reference:
+      return cloud_ref_anchor_;
+    case CloudFrame::None:
+      break;
+  }
+  return std::nullopt;
+}
+
+void SidescanViewerWindow::onPaneLeave(HoverPane pane)
+{
+  hover_readout_.leave(pane);
+  hover_geo_->setText(QString::fromStdString(hover_readout_.text()));
+}
+
+void SidescanViewerWindow::clearFixHighlight()
+{
+  hovered_fix_.reset();
+  canvas_->setHighlightedFix(std::nullopt);
+  hover_time_->clear();
+}
+
+void SidescanViewerWindow::refreshFixHighlightReadout()
+{
+  if (!hovered_fix_) {
+    hover_time_->clear();
+    return;
+  }
+  // The time bar's formatter, so this instant reads exactly as the same
+  // instant does on the tape, in tooltips and in pass labels — and follows
+  // the one UTC/local toggle rather than inventing a second answer.
+  hover_time_->setText(time_bar_->formatTime(hovered_fix_->t_ns));
+}
+
+void SidescanViewerWindow::onMapPlainClicked()
+{
+  // With no highlighted fix a bare left click still does nothing at all —
+  // #42's contract, and the reason it exists (a click that quietly destroyed
+  // the operator's region) has not gone away. With one, the click cues.
+  if (!hovered_fix_) {
+    return;
+  }
+  // Deliberately the SAME path a committed time on the time bar takes: one
+  // cueing implementation, so the map and the tape can never disagree about
+  // what "go there" does. It resolves the recording itself, including the
+  // reopen when the instant is in another one.
+  onTimeSelected(static_cast<qlonglong>(hovered_fix_->t_ns));
+}
+
 void SidescanViewerWindow::onCloudPassesLoaded()
 {
   // Non-const: the per-pass clouds are MOVED out below (a const ticket
   // silently degraded the move to a full copy — review round-2 finding).
   CloudLoadTicket ticket = cloud_watcher_.result();
+  if (ticket.outcome.cancelled) {
+    return;   // the window is closing (#44): the widgets below are going away
+  }
   if (ticket.generation != cloud_gen_) {
     return;   // a newer selection (or a cleared one) superseded this load
   }
@@ -3373,6 +4226,27 @@ void SidescanViewerWindow::onCloudPassesLoaded()
 
   cloud_->resetView();
   cloud_->setMultiPassPoints(out.pass_clouds);
+  // The frame these soundings live in (#36): a later CUBE run may only lay a
+  // surface over them when its own load resolved the same reference. It is
+  // also the frame the pane's cursor reads out in (#47) — a load that
+  // resolved no earth reference places nothing.
+  selection_ref_bag_ = out.ref_bag;
+  selection_ref_frame_ = out.ref_frame;
+  cloud_frame_ = CloudFrame::Reference;
+  cloud_ref_anchor_ =
+    earthAnchorAffine(out.ref_earth_from_world, out.ref_has_geo, 0.0);
+  // Pass identity exists again, so the Pass entry goes live; a selection that
+  // just entered multi-pass mode also lands on it.
+  refreshCloudColorChannels();
+  if (cloud_pass_default_pending_) {
+    cloud_pass_default_pending_ = false;
+    for (int i = 0; i < cloud_color_combo_->count(); ++i) {
+      if (channel_at(cloud_color_combo_, i) == ColorChannel::Pass) {
+        cloud_color_combo_->setCurrentIndex(i);
+        break;
+      }
+    }
+  }
   // The selection cloud sits in the reference pass's world frame — the scrub
   // bag's boat arrow would be in the wrong frame, so hide it.
   cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);

@@ -200,6 +200,57 @@ TEST_F(PointCloudViewTest, ColorModePassOnSinglePassIsSafe)
   EXPECT_GT(non_background(img), 0);
 }
 
+// Pass identity is a property of the LOAD, not a mode: a multi-pass load has
+// passes to tell apart (so the Pass entry is offerable), a plain setPoints
+// cloud does not. The colour vocabulary reads exactly this to decide whether
+// to grey the Pass entry, so it is pinned here (#36).
+TEST_F(PointCloudViewTest, PassCountFollowsTheLoad)
+{
+  PointCloudView view;
+  view.resize(kW, kH);
+  EXPECT_EQ(view.passCount(), 0) << "an empty view has no passes";
+
+  view.setMultiPassPoints({make_cloud(), make_cloud(), {}});
+  EXPECT_EQ(view.passCount(), 3)
+    << "an EMPTY pass still has a legend row and a colour, so it still counts";
+
+  // A single set of points — the scrub window, or a CUBE run's own gather —
+  // carries no pass identity, whatever was loaded before it.
+  view.setPoints(make_cloud());
+  EXPECT_EQ(view.passCount(), 0);
+
+  view.setMultiPassPoints({make_cloud()});
+  EXPECT_EQ(view.passCount(), 1);
+  view.clear();
+  EXPECT_EQ(view.passCount(), 0);
+}
+
+// The surface layer is held independently of the points: a CUBE surface set
+// over a multi-pass cloud must survive the cloud being re-uploaded (which is
+// what a legend checkbox toggle does), because the run adds a surface over
+// the selection rather than replacing it (#36).
+TEST_F(PointCloudViewTest, SurfaceSurvivesAMultiPassReupload)
+{
+  PointCloudView view;
+  view.resize(kW, kH);
+  view.setMultiPassPoints({make_cloud(), make_cloud()});
+  EXPECT_FALSE(view.hasSurface());
+
+  // A single triangle in the same world frame as the cloud.
+  view.setSurface(
+    {0.0f, 0.0f, -10.0f, 5.0f, 0.0f, -10.0f, 0.0f, 5.0f, -10.0f},
+    {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f},
+    {0u, 1u, 2u});
+  EXPECT_TRUE(view.hasSurface());
+
+  view.setMultiPassPoints({make_cloud()});   // a pass toggled off
+  EXPECT_TRUE(view.hasSurface()) << "re-uploading the cloud dropped the surface";
+  EXPECT_EQ(view.passCount(), 1);
+
+  view.clearSurface();
+  EXPECT_FALSE(view.hasSurface());
+}
+
 // The golden-angle pass palette is pure and stable: pinned values + distinct
 // leading hues (legend colours must not drift between releases).
 TEST(PassColor, StableAndDistinct)

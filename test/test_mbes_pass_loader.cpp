@@ -14,6 +14,9 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <memory>
+#include <optional>
 #include <vector>
 
 #include "mbes_pass_loader.hpp"
@@ -22,6 +25,7 @@ namespace
 {
 
 using marine_perception_tools::CloudPassInfo;
+using marine_perception_tools::cube_surface_shares_cloud_frame;
 using marine_perception_tools::load_cloud_passes;
 
 TEST(MbesPassLoader, EmptyInputYieldsEmptyOutcome)
@@ -55,6 +59,98 @@ TEST(MbesPassLoader, MissingBagCostsOnlyItsOwnPass)
   ASSERT_EQ(out.notes.size(), 2);
   EXPECT_TRUE(out.notes[0].contains("bag read failed"));
   EXPECT_TRUE(out.notes[0].contains("2026-06-15 15:10:00"));
+}
+
+// Cancellation (#44). The token is checked BEFORE the first bag is opened
+// and inside read_mbes_window per message, so a cancelled load does no I/O
+// and hands back nothing: no clouds, no notes, no counts a legend could be
+// built from. (The bag path here does not exist — an uncancelled load would
+// prove it opened it by leaving a "bag read failed" note per pass, which the
+// companion test below pins.)
+TEST(MbesPassLoader, CancelledLoadReadsNothingAndPublishesNothing)
+{
+  CloudPassInfo pass;
+  pass.bag_path = "/nonexistent/bag_dir";
+  pass.label = "2026-06-15 15:10:00  (bag_a)";
+  pass.t_start_ns = 1000;
+  pass.t_end_ns = 2000;
+
+  const auto cancel = std::make_shared<std::atomic<bool>>(true);
+  const auto out = load_cloud_passes({pass, pass}, std::nullopt, cancel);
+
+  EXPECT_TRUE(out.cancelled);
+  EXPECT_TRUE(out.pass_clouds.empty());
+  EXPECT_TRUE(out.sounding_counts.empty());
+  EXPECT_TRUE(out.notes.isEmpty());
+  EXPECT_EQ(out.skipped_passes, 0);
+  EXPECT_TRUE(out.ref_bag.empty());
+}
+
+// The token is a cancellation signal, not a switch that refuses work: an
+// un-set token must load exactly as no token at all.
+TEST(MbesPassLoader, UnsetCancelTokenLoadsNormally)
+{
+  CloudPassInfo pass;
+  pass.bag_path = "/nonexistent/bag_dir";
+  pass.label = "2026-06-15 15:10:00  (bag_a)";
+  pass.t_start_ns = 1000;
+  pass.t_end_ns = 2000;
+
+  const auto cancel = std::make_shared<std::atomic<bool>>(false);
+  const auto out = load_cloud_passes({pass, pass}, std::nullopt, cancel);
+
+  EXPECT_FALSE(out.cancelled);
+  ASSERT_EQ(out.pass_clouds.size(), 2u);
+  EXPECT_EQ(out.skipped_passes, 2);
+  ASSERT_EQ(out.notes.size(), 2);
+  EXPECT_TRUE(out.notes[0].contains("bag read failed"));
+}
+
+// --- a CUBE surface over the selection cloud (#36) ---------------------------
+//
+// A finished CUBE run lays its surface over the soundings already on screen
+// instead of replacing them. The one thing that can stop it is the frame: the
+// surface is a grid in the run's own reference world frame, placed by the
+// displayed cloud's centroid, so it may only be drawn over soundings that live
+// in that frame. Same reference bag AND frame name is that guarantee.
+TEST(CubeSurfaceSharesCloudFrame, KeepsTheCloudWhenBothLoadsResolvedTheSameReference)
+{
+  EXPECT_TRUE(
+    cube_surface_shares_cloud_frame(
+      true, true, "/bags/a", "bizzy/map", "/bags/a", "bizzy/map"));
+}
+
+// A different reference bag — or the same bag under a different frame name —
+// means the two point sets are related by a rigid transform the surface grid
+// cannot be re-gridded through without re-running the estimate. Drawing it
+// anyway would place bathymetry by luck, so the run falls back to its own
+// soundings.
+TEST(CubeSurfaceSharesCloudFrame, RefusesAcrossDifferentReferenceFrames)
+{
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      true, true, "/bags/a", "bizzy/map", "/bags/b", "bizzy/map"));
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      true, true, "/bags/a", "bizzy/map", "/bags/a", "izzy/map"));
+}
+
+// Nothing to preserve: the pane is not showing a selection, or its load has
+// not landed yet. An unresolved reference on either side is not a match
+// either — a load that resolved no reference produced no soundings at all.
+TEST(CubeSurfaceSharesCloudFrame, RefusesWithNothingLoadedOrNoReference)
+{
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      false, true, "/bags/a", "bizzy/map", "/bags/a", "bizzy/map"));
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      true, false, "/bags/a", "bizzy/map", "/bags/a", "bizzy/map"));
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(true, true, "", "", "", ""));
+  EXPECT_FALSE(
+    cube_surface_shares_cloud_frame(
+      true, true, "/bags/a", "bizzy/map", "", ""));
 }
 
 }  // namespace

@@ -126,17 +126,89 @@ One window, two modes that compose:
   recording along distance travelled; the rolling window paints georeferenced
   sidescan coverage on the map beside the slant-range waterfall, MBES
   backscatter, water-column echogram, and 3D point cloud (linked cursor,
-  middle-click seek, contact marking with Contact-store save/load + GeoJSON
-  export). `--start/--end` (UNIX ns or ISO-8601 UTC) cue the scrub to that
+  middle-click to recentre and seek, contact marking with Contact-store
+  save/load + GeoJSON export). `--start/--end` (UNIX ns or ISO-8601 UTC) cue the scrub to that
   time window once indexing completes.
 - **Explorer mode** — `survey_explorer --index survey_index.db [--stores DIR]`:
   the map becomes the survey index — store-tile basemap (GGGS GeoTIFFs;
-  `--stores` defaults to `<index dir>/bathymetry/survey`), per-bag nav track
-  with direction arrows, and the selectable index-tile grid. Ctrl-click /
-  ctrl-drag selects tiles: every `mbes-bathy` pass of the selection loads into
+  `--stores` defaults to `<index dir>/depths/processed`), per-bag nav track
+  with direction arrows, and the selectable index-tile grid. Left-drag on the
+  map draws the **region** (#42), the map's one geographic selection: its exact
+  bounds are the processing extent for CUBE, and every `mbes-bathy` pass of the
+  index tiles it covers loads into
   the 3D cloud (one golden-angle colour per pass, legend beside the pane,
   cross-bag reprojection through the `earth` anchor), and the **time bar**
   under the scrub controls fills with the selection's passes.
+  Map gestures (#42) are one region and one navigation button, with no
+  modifiers: **left-drag** draws or replaces the region, **middle-click**
+  centres the view on the point (and seeks the time cursor there when a bag is
+  open), **middle-drag** pans, and the wheel zooms. A **left-click** with no
+  drag never touches the region — a click that silently threw the region away
+  was the one destructive thing it could do, so clearing is asked for by name:
+  **right-click** the map for its context menu and choose **Clear Selection**,
+  which is greyed out when there is nothing selected. The same menu also
+  offers **Copy Position**, which puts the latitude and longitude of the point
+  you right-clicked on the clipboard — the point the menu was opened at, not
+  wherever the pointer ended up on its way down the menu — in the status row's
+  own format, so what you paste is what you read. It is greyed out wherever
+  the map cannot place that point at all (no survey index and a bag with no
+  earth reference), rather than copying a zero. That menu is where further map
+  actions will appear. While *Mark contact* is on, that visible mode takes
+  left-drag for marking.
+
+  What a bare left-click *does* do is **cue the time bar from the map** (#46).
+  **Hover** within a few pixels of a nav track and the nearest fix on it is
+  marked with a yellow disc, with the time the boat was there in the status
+  row beside the lat/lon (in whichever zone the **UTC** toggle is showing).
+  Click it and the scrub and the trackline views cue to that instant, by the
+  same path a committed time on the time bar takes. This is the map answering
+  the one question the time bar cannot — *when did **that** pass happen* —
+  which is what you need in an area worked over many times, where the passes
+  span several recordings and you should not have to know which. The hit
+  radius is in **screen pixels**, not ground metres, so "close enough" means
+  the same thing at every zoom. Beyond it nothing highlights, and the
+  highlight stays out of the way of every other gesture: no marker during a
+  region drag, a pan, a recentre glide, a zoom, or contact marking. With no
+  highlighted fix the click is still the complete no-op #42 made it.
+
+  The **geographic readout** in the status row follows the cursor over *every*
+  spatial pane (#47), not just the map: the 3D cloud, both waterfalls and the
+  echogram each convert the position in their own frame — the waterfalls and
+  the echogram through the open bag's earth anchor, the 3D pane through the
+  frame its points were loaded in, which for a selection or CUBE run may be
+  another recording's. Each position is shown with the name of the pane that
+  produced it (`MBES 3D  43.020305, -71.360000`), because with four panes
+  feeding one label a number nobody can attribute is a number you cannot act
+  on. A pane that cannot place the cursor — a recording with no earth
+  reference, a waterfall pixel with no pose behind it — shows *nothing* rather
+  than a zero that reads like a position, and the readout clears when the
+  cursor leaves a pane, so a position on screen is always a live one.
+
+  Cueing to an instant in a recording that is not open reopens and re-indexes
+  that whole bag, and the status line says so while it happens. In a revisited
+  area most clicks land in another recording and pay it: underneath, the
+  cursor the trackline views follow is a distance along the open bag's track,
+  not an absolute time, and only the time bar spans every recording. Promoting
+  that cursor to absolute time is the larger piece of work, tracked against
+  #36. What the reopen does **not** do is move the map: a recording opened as
+  a side effect of cueing a time leaves the zoom and centre you were working
+  at exactly where they were, in both the 3D pane and the map. The view is
+  fitted to a new recording only when you asked for that recording by name —
+  *File → Open Bag…* or a bag on the command line.
+  The recentre **glides** to the point over about three quarters of a second,
+  easing in and out, so the eye can follow the map across instead of having to
+  re-find the survey after a jump. The seek is not delayed by it — the time
+  cursor moves at the click. Any gesture that touches the view takes over at
+  once: a pan or a wheel zoom leaves the glide where it stands, and a second
+  middle-click retargets it from there rather than cancelling.
+
+  Underneath all of it is a built-in **world coastline** so a collection-wide
+  view is navigable at all: Natural Earth 1:50m, public domain, vendored into
+  the package (`data/coastline/`) and never fetched — the build and the
+  application touch the network nowhere. It is **orientation, not
+  navigation**: generalised to the kilometre, drawn under every real layer,
+  and faded out entirely before survey zoom, where the store imagery and the
+  index carry the answer. Never navigate by it.
   Both modes together (`--index` + a bag argument) place the open bag's
   coverage on the survey map through its earth anchor.
 
@@ -155,10 +227,89 @@ More explorer controls: the Map pane header carries a **basemap layer
 picker** (bathymetry / backscatter / sidescan store layers discovered next
 to the index) and a **basemap colormap** combo — contrast is
 percentile-scaled per layer so residual store outliers cannot blank the
-map — plus **track**/**grid** declutter toggles. The cloud legend's rows
+map. The map overlays are switched from the **View menu**, which holds
+**Nav Track** (`Ctrl+1`), **Survey Index Tile Grid** (`Ctrl+2`), **World
+Coastline** (`Ctrl+3`) and **Measuring Grid (metres)** (`Ctrl+4`); all four
+are greyed out until an index is open. Two of those are grids and they are
+different layers: **Survey Index Tile Grid** switches the cyan outlines of
+the ~54 m survey **index tiles** (the things you select to load passes),
+while **Measuring Grid (metres)** switches the slate Cartesian ruler —
+lines at the spacing set by the Grid box in the bottom row, labelled in
+metres from the map origin. The measuring grid is a ruler for sizing a
+target on one bag, so it is **on for a bag and off when an index is
+open**, where the origin is arbitrary and the lines are just noise; the
+Grid spacing box greys out while it is hidden. The **World Coastline** and
+**Measuring Grid** toggles remember their state across restarts (**Nav
+Track** and **Survey Index Tile Grid** do not). The cloud legend's rows
 have **checkboxes** to show/hide individual passes, and **clip to
 contact** (+ margin) restricts a multi-pass load to the selected contact's
 neighbourhood. Contacts can be deleted from the list's context menu.
+
+The **3D pane's colouring** is one vocabulary shared by the point cloud and the
+CUBE surface: **Depth**, **Uncertainty**, **Backscatter**, **Pass** and
+**Sidescan**, in that order in both selectors. **Pass** is an ordinary entry —
+loading a multi-pass region defaults to it, but you can leave it for a scalar
+ramp and come back; it is not a mode that takes the selector away. An entry a
+layer cannot carry stays in the list, greyed, with the reason on the entry
+rather than silently missing: the points offer no **Uncertainty** (a sounding
+carries none — the per-beam errors CUBE consumes are a placeholder computed
+inside the estimator, and uncertainty is a property of the surface) and no
+**Sidescan** (that is a drape painted onto CUBE nodes by marching the terrain),
+and the surface offers no **Pass** (a node merges every pass that touched it).
+
+### Per-sounding uncertainty in the lab
+
+CUBE weights every sounding by its own uncertainty, and the lab has to supply
+one: the real `cube::ErrorModel` needs the raw detections, the platform
+attitude and the vessel offsets, none of which the explorer's cloud path
+carries. The stand-in is **angle-aware** (#49). For a beam at angle *t* from
+nadir at slant range *R*, with a range error σ_R and an angular error σ_θ:
+
+    σ_z² = (σ_R·cos t)² + (R·σ_θ·sin t)²
+    σ_y² = (σ_R·sin t)² + (R·σ_θ·cos t)²
+
+σ_R is 0.5% of the slant range and σ_θ is a 2° beamwidth over twelve — both
+taken from `cube::Device`'s own documented defaults, and the beamwidth-to-σ
+divisor is the one `cube::ErrorModel` already uses, so the codebase turns a
+beamwidth into a σ exactly one way. Each component is floored at 0.05 m so no
+beam claims zero error. The effect over one depth is that a 60° beam carries
+about twice the variance of a nadir beam, so where two passes overlap the
+estimator prefers the clean near-nadir data — which is the point: an outer beam
+used to be trusted exactly as much as a nadir one. A sounding that arrives
+without beam geometry is skipped rather than given an invented error, and the
+run's note says how many were.
+
+This is still a **placeholder** (mpt#27 follow-up), and it does **not** correct
+the refraction smile: that is a *systematic* error, which no uncertainty model
+removes — see #28. Compared at a fixed *slant range* rather than a fixed depth,
+σ_z falls with angle, because an outer beam at the same range is over shallower
+water; the model's claim is about beams over the same seabed.
+
+A **Run CUBE** *adds* its surface over the soundings already loaded instead of
+replacing them: after a run you are still looking at your selection, now with a
+surface over it. The one exception is a run whose reference world frame differs
+from the loaded cloud's — the surface is a grid in its own frame and would be
+placed by luck over soundings in another — where the run falls back to showing
+its own soundings and says so in the status line.
+
+The **cell size** runs from 0.001 m to 50 m at three decimals, stepping by a
+centimetre. That floor is just the finest spacing the box can display — it is
+not a judgement about what is worth gridding, and it is not there to bound
+memory: how large a grid a run may allocate is the separate **max grid nodes**
+limit in *params…*, which asks (with the real node count and a one-shot
+override) rather than refusing. Cells far below the beam footprint — a
+2-degree beam in 5 m of water footprints about 0.17 m at nadir — resolve the
+sounding pattern rather than the seafloor, which is worth knowing and is the
+operator's call to make.
+
+A cell size below the floor is corrected to the nearest value the box accepts
+**and reported in the status line** (#42). Qt's own behaviour is to restore
+the value that was in the box *before* the edit, on focus-out — which is the
+moment you click **Run CUBE** — so a cell size typed below the old 0.02 m
+floor ran at whatever had been there before, with nothing on screen saying the
+entry had been dropped. Only the floors do this: text above a maximum cannot
+grow into anything valid, so Qt refuses those keystrokes and the digit
+visibly never appears.
 
 Bag opens are accelerated by a **bag-index cache** (`--cache-dir`, default
 `$XDG_CACHE_HOME/survey_explorer`): the whole-bag metadata scan runs once per

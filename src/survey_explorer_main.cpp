@@ -28,6 +28,7 @@
 #include "sidescan_bag_session.hpp"
 #include "sidescan_viewer_window.hpp"
 #include "survey_index_bridge.hpp"
+#include "world_layout.hpp"
 
 namespace
 {
@@ -94,11 +95,12 @@ int main(int argc, char ** argv)
   const QCommandLineOption index_opt(
     "index", "survey_index.db to open in survey-explorer mode (#24): the map "
     "becomes the index — store-tile basemap, nav track, selectable tiles; "
-    "selecting tiles loads their mbes-bathy passes into the 3D cloud.",
+    "selecting tiles loads their mbes-bathy passes into the 3D cloud. "
+    "Without it, the last index opened is reopened, else ~/data/world.",
     "db");
   const QCommandLineOption stores_opt(
     "stores", "Directory of GGGS store GeoTIFF tiles for the explorer basemap "
-    "(default: <index dir>/bathymetry/survey).", "dir");
+    "(default: <index dir>/depths/processed).", "dir");
   const QCommandLineOption snapshot_opt(
     "snapshot", "Headless debugging: grab the window into this PNG after "
     "--snapshot-delay seconds, then exit (pair with "
@@ -220,8 +222,8 @@ int main(int argc, char ** argv)
     if (parser.isSet(stores_opt)) {
       stores_dir = parser.value(stores_opt).toStdString();
     } else {
-      stores_dir = (std::filesystem::path(index_path).parent_path() /
-        "bathymetry" / "survey").string();
+      stores_dir = marine_perception_tools::defaultStoresDirForIndex(
+        index_path).string();
     }
     try {
       window.openSurveyIndex(index_path, stores_dir);
@@ -232,13 +234,19 @@ int main(int argc, char ** argv)
   }
   window.show();
   if (!positional.isEmpty()) {
-    window.openBag(positional.first().toStdString(), cue_start_ns, cue_end_ns);
+    // A bag named on the command line is what the operator asked to see:
+    // frame it (#46).
+    window.openBag(
+      positional.first().toStdString(),
+      marine_perception_tools::SidescanViewerWindow::OpenReason::Explicit,
+      cue_start_ns, cue_end_ns);
   }
   // A plain start (no --index, no bag) comes back where the operator left
   // off: the remembered last index auto-reopens (#27 follow-up — starting
-  // empty read as the app "forgetting" the index).
+  // empty read as the app "forgetting" the index), and failing that the
+  // conventional world collection opens (#40).
   if (!parser.isSet(index_opt) && positional.isEmpty()) {
-    window.reopenLastIndexIfAny();
+    window.openStartupIndex();
   }
   if (parser.isSet(snapshot_opt)) {
     const QString png = parser.value(snapshot_opt);

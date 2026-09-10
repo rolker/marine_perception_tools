@@ -25,15 +25,19 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "color_vocabulary.hpp"
 #include "cube_lab.hpp"
+#include "hover_geo_readout.hpp"   // HoverPane/HoverGeoReadout (the lat/lon readout)
 #include "sidescan_drape.hpp"
 #include "marine_contacts/contact_store.hpp"
 #include "marine_sonar_widgets/waterfall_model.hpp"
 #include "mbes_pass_loader.hpp"
+#include "nav_track_hit.hpp"   // TrackHit (the nav-track fix under the cursor)
 #include "sidescan_bag_session.hpp"
 #include "sidescan_canvas.hpp"   // OverviewTile/GeoRect (index-map layer types)
 #include "survey_index_bridge.hpp"
@@ -74,6 +78,7 @@ namespace marine_perception_tools
 struct SidescanRenderResult
 {
   bool ok = false;
+  bool cancelled = false;   // the window is closing (#44): do not publish
   uint64_t epoch = 0;    // session epoch this render was computed for (stale-drop)
   QImage image;          // georeferenced coverage (map frame)
   // Uncorrected slant-range sidescan rows (shared-lib WaterfallWidget) for the same
@@ -108,7 +113,7 @@ struct SidescanRenderResult
 struct CloudLoadTicket
 {
   std::uint64_t generation = 0;
-  CloudLoadOutcome outcome;
+  CloudLoadOutcome outcome;   // outcome.cancelled marks a teardown-abandoned load
 };
 
 // A box-CUBE run in flight (#27): the gathered box soundings (reference
@@ -120,9 +125,11 @@ struct CubeLabTicket
   CubeSurface surface;
   QStringList notes;
   qint64 elapsed_ms = 0;
+  bool cancelled = false;   // the window is closing (#44): do not publish
   // Reference frame identity from the cloud load (#29): the sidescan drape
   // reprojects its pings into this frame.
   std::string ref_bag;
+  std::string ref_frame;
   bool ref_has_geo = false;
   geometry_msgs::msg::TransformStamped ref_earth_from_world;
 };
@@ -138,6 +145,7 @@ struct DrapeTicket
   CubeSurface terrain;
   QStringList notes;
   qint64 elapsed_ms = 0;
+  bool cancelled = false;   // the window is closing (#44): do not publish
 };
 
 
@@ -162,23 +170,49 @@ public:
   // incompatible index (the bridge's regenerate hint propagates).
   void openSurveyIndex(const std::string & index_path, const std::string & stores_dir);
 
+  // Why a bag is being opened — the map and 3D views are fitted to the new bag
+  // only for an Explicit one (#46).
+  //   Explicit: the operator asked for THIS recording (File → Open Bag, a
+  //     command-line bag argument). Framing it is what he asked for.
+  //   Cue: the recording is opened as a SIDE EFFECT of cueing a time he picked
+  //     on the map or the time bar. The zoom and centre he was working at are
+  //     his, and a revisited area's passes span several recordings, so most
+  //     cues reopen — refitting threw the view away on nearly every click.
+  // Deliberately not inferred from the window's mode: both readings agree
+  // today, but the distinction that matters is why the bag is being opened,
+  // not whether an index happens to be loaded. No default value — a new call
+  // site has to say which kind of open it is.
+  enum class OpenReason { Explicit, Cue };
+
   // Open a bag directly (e.g. from a CLI argument). Non-zero cue bounds
   // (UNIX ns) jump the scrub to the along-track window those stamps cover once
   // indexing completes — the survey-index (jump-to-pass) bridge. The whole bag
   // is still metadata-indexed first (TF + cumulative distance need the full
   // recording); only sample data is window-read, so the cue costs one normal
   // index pass, not a whole-bag sample read.
-  void openBag(const std::string & bag_uri, int64_t cue_start_ns = 0, int64_t cue_end_ns = 0);
+  void openBag(
+    const std::string & bag_uri, OpenReason reason,
+    int64_t cue_start_ns = 0, int64_t cue_end_ns = 0);
 
-  // Startup convenience: open the remembered last index (QSettings) if one
-  // exists on disk. Called by main when the app launches with neither
-  // --index nor a bag argument, so a plain start comes back where the
-  // operator left off instead of empty.
-  void reopenLastIndexIfAny();
+  // Startup convenience: open the remembered last index (QSettings), falling
+  // back to the conventional world collection (#40). Called by main when the
+  // app launches with neither --index nor a bag argument, so a plain start
+  // comes back where the operator left off, or at the world model, instead of
+  // empty.
+  void openStartupIndex();
+
+  // The CUBE tuning the next Run CUBE will use — including the uncertainty
+  // budget the order dropdown seeds and the params dialog edits (#45).
+  // Read-only: the dropdown and the dialog are the ways it changes.
+  const CubeTuning & cubeTuning() const {return cube_tuning_;}
 
 protected:
   // Persist window geometry + splitter sizes on close (QSettings).
   void closeEvent(QCloseEvent * event) override;
+
+  // Set every worker cancel token (#44). Called from closeEvent (so the jobs
+  // have the whole teardown to notice) and again from the destructor.
+  void cancelWorkers();
 
   // Route scrub keys (Left/Right/PageUp/PageDown/Home/End) to the scrub slider from
   // anywhere in the window, so scrubbing works without the slider holding focus —
@@ -229,6 +263,57 @@ private:
 
   void refreshContacts();   // push the store to the map overlay + the list
 
+  // --- the nav-track fix under the map cursor (#46) ------------------------
+  // The map answers "when did THAT pass happen", which is the one question
+  // the time bar cannot: hovering near a track highlights the nearest fix and
+  // reads out its time, and a plain click cues there. The search is the pure
+  // nearestTrackFix over nav_track_points_; the window owns the result
+  // because only it holds the timestamps and the cue path.
+  void onMapHoverGeo(double lat, double lon, bool valid);   // fix search + readout
+  void onMapPlainClicked();                     // cue, but only on a hit
+  void clearFixHighlight();                     // no hit: no marker, no readout
+  void refreshFixHighlightReadout();            // re-render after a UTC toggle
+  std::optional<TrackHit> hovered_fix_;
+
+  // --- the geographic cursor readout (#47) --------------------------------
+  // Every spatial pane feeds ONE lat/lon label, each converting its own frame
+  // at the source; the label names the pane so a position is attributable.
+  // A pane that cannot place the cursor reports nothing.
+  void onPaneHoverGeo(HoverPane pane, const std::optional<GeoPoint> & pos);
+  // A pane hovering in a map-ENU frame (the three sonar panes and the 3D
+  // view): convert through that frame's anchor and report. valid=false, or a
+  // frame with no earth reference, reports nothing.
+  void onPaneHoverWorld(HoverPane pane, double map_x, double map_y, bool valid);
+  // Which frame the 3D pane's points are in right now, and its anchor. The
+  // scrub cloud is the open bag's map-ENU; a selection or CUBE load lives in
+  // its own load's reference frame, which may be another bag's entirely.
+  enum class CloudFrame { None, OpenBag, Reference };
+  CloudFrame cloud_frame_ = CloudFrame::None;
+  std::optional<MapGeoAffine> cloud_ref_anchor_;   // valid when cloud_frame_ == Reference
+  std::optional<MapGeoAffine> cloudFrameAnchor() const;
+  void onPaneLeave(HoverPane pane);   // the cursor left: a shown position must be live
+  void connectHoverReadout();        // wire the panes that hover in a map frame
+
+  // The map context-menu entries that are the WINDOW's business (#42). The
+  // canvas registers only `Clear Selection`, because the region is its own
+  // state; these reach outside the map — to the clipboard and the status row
+  // — which is exactly what the canvas must never do.
+  void registerMapContextMenuEntries();
+  // Put the position the menu was opened at on the clipboard, in the status
+  // row's own format, and say so.
+  void copyMapContextMenuPosition();
+  // Which pane (if any) an event's receiver is, for the QEvent::Leave path.
+  std::optional<HoverPane> paneOf(const QObject * obj) const;
+  HoverGeoReadout hover_readout_;
+
+  // Load the vendored world coastline into the map's bottom layer (#41), once
+  // per session and never over the network — the operator station and the
+  // boat have no route to one. A missing or unreadable dataset leaves the map
+  // without a coastline; it is a packaging fault, not an operator's problem,
+  // so it warns and carries on.
+  void loadCoastlineLayer();
+  bool coastline_loaded_ = false;
+
   // Populate the basemap layer combo from the store layers under `root`
   // (subdirectories holding GGGS *.tif tiles), selecting `initial_dir`.
   void discoverBasemapLayers(const std::string & root, const std::string & initial_dir);
@@ -246,6 +331,9 @@ private:
   // Build + wire the per-pane colour-range controls (#26); ctor helper, must
   // run before the pane headers consume the widgets.
   void setupRangeControls();
+  // Build the 3D pane's own controls (colour selector, Z-exaggeration, point
+  // size, palette); ctor helper, run once the PointCloudView exists.
+  void setupCloudControls();
   // Build + wire the CUBE-lab controls row (#27) into the cloud pane;
   // ctor helper, run after the pane exists.
   void setupCubeLab(QWidget * cloud_pane);
@@ -261,9 +349,23 @@ private:
   // Re-triangulate + recolour the stored surface for the shade combo (cheap;
   // no CUBE re-run) and hand it to the cloud pane.
   void refreshCubeSurface();
+  // The shared colour vocabulary (#36): fill a selector with every channel,
+  // then keep the point selector's entries enabled/disabled for the cloud
+  // that is actually loaded. refreshCloudColorChannels also re-applies the
+  // resulting mode, and falls back to Depth if the chosen entry just became
+  // unavailable — it is called after every load into the pane.
+  void populateColorVocabulary(QComboBox * combo);
+  void refreshCloudColorChannels();
+  void applyCloudColorMode();
   // The CUBE frame's world->geo affine, probed through the reference
   // earth anchor; nullopt without a geo reference (export refuses then).
   std::optional<MapGeoAffine> cubeSurfaceAnchor() const;
+  // A reference world frame's world->geo affine, probed through its earth
+  // anchor at height `z0`. nullopt when the load resolved no earth reference
+  // — the frame is unplaceable and everything downstream must say so.
+  static std::optional<MapGeoAffine> earthAnchorAffine(
+    const geometry_msgs::msg::TransformStamped & earth_from_world,
+    bool has_geo, double z0);
   // Fill the drape pass combo with the sidescan passes crossing the box
   // (port + starboard of the same bag interval merged into one entry).
   void populateDrapePasses();
@@ -325,6 +427,31 @@ private:
   // Cancel token for the CURRENT scan; superseding an open sets it so the
   // abandoned worker stops streaming the bag instead of running to the end.
   std::shared_ptr<std::atomic<bool>> scan_cancel_;
+  // Teardown cancel token for the four workers that had none (#44): the
+  // sidescan render, the cloud-pass load, the CUBE run and the drape. Set in
+  // closeEvent — the whole teardown before the destructor's waits, so the
+  // operator gets their prompt back instead of watching a dead window — and
+  // again in the destructor as the backstop for a window destroyed without a
+  // close. Never reset: it means "this window is going away", not "this job
+  // is superseded" (supersede is the generation counters' job).
+  std::shared_ptr<std::atomic<bool>> worker_cancel_ =
+    std::make_shared<std::atomic<bool>>(false);
+  // Per-job SUPERSEDE tokens (#42 review). `worker_cancel_` above covers
+  // teardown; it deliberately never resets, so it cannot also mean "this job
+  // was replaced". Without that second meaning a superseded cloud / CUBE /
+  // drape ran its multi-GB bag read to completion and threw the result away:
+  // holding the margin spin or dragging a new region starts a fresh load per
+  // valueChanged, and every abandoned one keeps its whole pass set resident
+  // AND occupies a slot in the GLOBAL QThreadPool that the scrub render, the
+  // basemap and the next real job all queue behind. Each dispatch cancels the
+  // previous token and installs a fresh one (see supersedeToken); the render
+  // worker needs none, since it coalesces through rendering_/render_pending_.
+  std::shared_ptr<std::atomic<bool>> cloud_cancel_;
+  std::shared_ptr<std::atomic<bool>> cube_cancel_;
+  std::shared_ptr<std::atomic<bool>> drape_cancel_;
+
+  // Superseding is supersede_token() in worker_cancel.hpp — a free function so
+  // its semantics are unit-testable without a window.
   // Session handoff worker -> UI (the constructor runs in the worker so the
   // UI never touches a multi-GB bag synchronously): the worker parks the
   // session + its epoch here, then emits sessionOpened.
@@ -333,6 +460,11 @@ private:
   quint64 pending_open_epoch_ = 0;
   // Debounce for scrub-driven opens (time-bar commits): rapid fine-tune
   // commits collapse into one openBag once the hand settles.
+  // Whether the open in flight may fit the views to the new bag: true for an
+  // Explicit open, false for a Cue one (#46). Held as state because the fit
+  // happens twice — once here and once when the first resolved data arrives —
+  // and both belong to the same open.
+  bool open_fits_view_ = true;
   QTimer open_debounce_;
   std::string debounce_uri_;
   int64_t debounce_t0_ns_ = 0;
@@ -358,7 +490,8 @@ private:
   std::vector<IndexedTile> indexed_tiles_;      // canvas selection indices map here
   QTreeWidget * cloud_legend_ = nullptr;        // per-pass colours + counts
   QSplitter * cloud_split_ = nullptr;           // [cloud | legend]
-  QLabel * hover_geo_ = nullptr;                // lat/lon readout (geo mode)
+  QLabel * hover_geo_ = nullptr;                // lat/lon readout, any pane (#47)
+  QLabel * hover_time_ = nullptr;               // time of the hovered fix (#46)
   QFutureWatcher<CloudLoadTicket> cloud_watcher_;
   std::uint64_t cloud_gen_ = 0;                 // bumped per selection change
   std::vector<CloudPassInfo> cloud_passes_;     // passes of the in-flight/last load
@@ -366,6 +499,10 @@ private:
   // passes without re-reading bags (index-aligned with cloud_passes_).
   std::vector<std::vector<MbesSounding>> cloud_pass_clouds_;
   bool selection_cloud_ = false;   // cloud pane shows the tile selection, not the scrub window
+  // A selection that ENTERS multi-pass mode defaults its colouring to Pass
+  // (#36) — set when the pane was not already showing a multi-pass cloud, so
+  // adjusting an existing region keeps whatever colouring the operator chose.
+  bool cloud_pass_default_pending_ = false;
   TimeBarWidget * time_bar_ = nullptr;   // GeoZui-style time navigator (replaced phase d's axis)
   std::vector<TimelinePassInfo> selection_passes_;   // for time->bag lookup on cue
   // Campaign nav track + bag paths (index mode): the time-bar position arrow
@@ -382,13 +519,20 @@ public:
 private:
   std::string current_bag_uri_;    // open bag; a same-bag timeline cue skips the re-open
 
-  // Basemap controls (#24 follow-up from desk verify): store layer + colormap,
-  // and declutter toggles for the overlays that otherwise blanket the basemap.
+  // Basemap controls (#24 follow-up from desk verify): store layer + colormap.
   QComboBox * basemap_layer_ = nullptr;
   QComboBox * basemap_cmap_ = nullptr;
-  QCheckBox * show_track_check_ = nullptr;
-  QCheckBox * show_grid_check_ = nullptr;
   QCheckBox * utc_check_ = nullptr;
+
+  // Map overlay toggles, in the View menu (#42): four checkboxes crowding the
+  // map pane header read as clutter and their one-word labels only worked
+  // because they sat in a row. As a vertical list they can say what they are.
+  // Disabled until an index opens, the moment the overlays have anything to
+  // draw. A proper layer list is later, deliberate work (#36).
+  QAction * show_track_action_ = nullptr;
+  QAction * show_grid_action_ = nullptr;
+  QAction * show_coast_action_ = nullptr;
+  QAction * show_metric_grid_action_ = nullptr;
 
   // Per-pane colour-range controls (#26): auto (default) or a manual lo/hi
   // in the pane's native units. The sidescan range also drives the map's
@@ -435,6 +579,13 @@ private:
   CubeSurface cube_drape_terrain_;   // the extended terrain the drape rode
   QFutureWatcher<DrapeTicket> drape_watcher_;
   std::uint64_t drape_gen_ = 0;
+  // The reference world frame the CURRENT selection cloud lives in (#36).
+  // A CUBE surface may only be drawn over soundings in its own reference
+  // frame, so a run compares its frame against these before keeping the
+  // cloud on screen. Empty = no selection cloud loaded.
+  std::string selection_ref_bag_;
+  std::string selection_ref_frame_;
+
   std::string cube_ref_bag_;
   bool cube_ref_has_geo_ = false;
   geometry_msgs::msg::TransformStamped cube_ref_anchor_;

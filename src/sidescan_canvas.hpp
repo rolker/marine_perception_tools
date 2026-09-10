@@ -15,6 +15,7 @@
 #ifndef SIDESCAN_CANVAS_HPP_
 #define SIDESCAN_CANVAS_HPP_
 
+#include <QElapsedTimer>
 #include <QImage>
 #include <QPixmap>
 #include <QPoint>
@@ -27,14 +28,21 @@
 #include <QVector>
 #include <QWidget>
 
+class QContextMenuEvent;
+class QMenu;
+
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <set>
 #include <utility>
 #include <vector>
 
+#include "coastline_data.hpp"
+#include "hover_geo_readout.hpp"
 #include "map_geo_anchor.hpp"
 #include "tile_selection.hpp"
+#include "view_animation.hpp"
 
 namespace marine_perception_tools
 {
@@ -102,6 +110,9 @@ public:
   // The bag's map-ENU -> geo anchor (nullopt: bag has no earth reference).
   void setMapAnchor(const std::optional<MapGeoAffine> & anchor);
   bool mapPlaceable() const {return !geo_mode_ || map_anchor_.has_value();}
+  // The anchor itself, for panes that hover in the bag's map-ENU frame and
+  // need the same conversion the map uses (#47).
+  const std::optional<MapGeoAffine> & mapAnchor() const {return map_anchor_;}
 
   // Store-tile basemap (geo bounds per tile).
   void setStoreTiles(std::vector<OverviewTile> tiles);
@@ -114,6 +125,15 @@ public:
   // Decimated nav track, pre-segmented per bag, as (lat, lon) polylines.
   void setNavTrack(std::vector<std::vector<std::pair<double, double>>> segments);
 
+  // Built-in world coastline (#41): the bottom layer of the map, drawn under
+  // the store basemap and everything else. ORIENTATION, NOT NAVIGATION — a
+  // generalised world coastline is wrong by hundreds of metres at survey
+  // scale, so the canvas fades it out with zoom (coastlineFadeAlpha) and it
+  // is gone entirely before the scales where the real layers answer the
+  // question. Nothing else about the layer may make it read as chart detail.
+  void setCoastline(Coastline coastline);
+  void setCoastlineVisible(bool on);
+
   // Overlay visibility (#24 desk-verify follow-up): a whole campaign's track
   // and tile grid blanket the surveyed area at overview zoom, hiding the
   // basemap under them — let the operator switch them off. Hiding the tile
@@ -121,6 +141,15 @@ public:
   // answerable at a glance).
   void setNavTrackVisible(bool on);
   void setIndexTilesVisible(bool on);
+
+  // The metric measuring grid (#42): Cartesian lines every setGridSpacing()
+  // metres, labelled in canvas metres. It came from the target viewer, where
+  // the map was one bag's local frame and the grid was the ruler a target was
+  // sized against. On a collection-wide index map it measures from an
+  // arbitrary origin and is noise, so the window defaults it OFF there and ON
+  // for a bag — see SidescanViewerWindow.
+  void setMetricGridVisible(bool on);
+  bool metricGridVisible() const {return show_metric_grid_;}
 
   // The time-bar position arrow (#24): the boat's interpolated nav-track
   // position/course at the time bar's centre time. Replaces the per-track
@@ -133,6 +162,37 @@ public:
     double heading_rad = 0.0;   // CW from north
   };
   void setTimeArrow(const std::optional<TimeArrow> & arrow);
+
+  // The nav-track fix under the cursor (#46): a distinct marker drawn on the
+  // track where the operator is pointing, so "this point, here" is a thing he
+  // can see before he commits to it. nullopt clears it — beyond the hit
+  // radius nothing highlights, and the map stays silent while he is doing
+  // something else.
+  //
+  // The canvas draws it and nothing more. WHICH fix it is, and when the boat
+  // was there, is the window's business: only the window holds the nav
+  // track's timestamps, and only the window knows what a click on it should
+  // cue. Keeping the decision there is what stops the canvas reaching into
+  // the time bar.
+  struct HighlightedFix
+  {
+    double lat = 0.0;
+    double lon = 0.0;
+  };
+  void setHighlightedFix(const std::optional<HighlightedFix> & fix);
+  const std::optional<HighlightedFix> & highlightedFix() const {return highlighted_fix_;}
+
+  // True while a gesture owns the pointer, or the view is moving under it: a
+  // region drag that has travelled past the click slop, a middle-drag pan,
+  // contact marking, or a recentre glide. Hover-driven feedback must stay
+  // silent while this holds (#46) — a highlight that appears mid-drag is
+  // noise the operator did not ask for, and it offers a click target the
+  // release was never going to honour.
+  //
+  // A left press that has NOT travelled is deliberately not a gesture yet: it
+  // is still on its way to being the plain click that cues, and suppressing
+  // the highlight on press would clear the very thing the release acts on.
+  bool pointerGestureActive() const;
 
   // Selectable index tiles. Replaces the set and clears the selection.
   void setIndexTiles(const std::vector<GeoRect> & tiles);
@@ -173,6 +233,32 @@ public:
   // pending and no bag content, refits the survey bounds instead.
   void resetView();
 
+  // --- middle-click recentre animation (#42) ------------------------------
+  // The recentre glides rather than jumping, so the operator can see where
+  // the map went. Only this gesture animates: panning tracks the pointer,
+  // the wheel zoom is already incremental, and the initial fit has no
+  // previous view to glide from.
+  //
+  // Duration in milliseconds; 0 makes the recentre instant. Headless runs
+  // and the widget tests set 0 so no capture can land on an intermediate
+  // frame, instead of racing a running animation with sleeps.
+  void setRecenterDurationMs(int ms);
+  int recenterDurationMs() const {return recenter_duration_ms_;}
+
+  // True while a recentre glide is in flight.
+  bool recenterAnimating() const {return recentering_;}
+
+  // Land the glide on its target now (settling the view and rebuilding the
+  // layer cache exactly as the last frame would have). A no-op when nothing
+  // is animating.
+  void finishRecenterNow();
+
+  // How many times the static-layer cache has been rasterized (see
+  // rebuildLayerCache). Diagnostic, and the regression guard for the reason
+  // the glide exists in this shape at all: a moving centre must NOT rebuild
+  // the coastline, basemap and tile grid once per frame.
+  std::size_t layerCacheRebuildCount() const {return layer_cache_rebuilds_;}
+
   // In mark mode, left-drag draws a contact box (instead of panning) and emits
   // boxMarked() on release.
   void setMarkMode(bool on);
@@ -183,6 +269,72 @@ public:
   // Transient cross-pane linked cursor at a map point (metres); nullopt clears it.
   void setCursorWorld(const std::optional<QPointF> & map_point);
 
+  // --- map context menu (#42) ---------------------------------------------
+  // Right-click on the map opens a menu of map actions. Entries are
+  // registered rather than hard-coded in the event handler, so the menu the
+  // operator expects to grow (Run CUBE here, export this area, load these
+  // passes) grows by adding one entry instead of by restructuring.
+  //
+  // The canvas registers `Clear selection` itself, because clearing the
+  // region is purely canvas state and reports through the existing
+  // cubeBoxCleared / tileSelectionChanged signals. Everything that is the
+  // window's business the window adds through addContextMenuEntry, which
+  // keeps the canvas from ever reaching into the window.
+  struct ContextMenuEntry
+  {
+    QString text;
+    // What the entry does. An entry without one is inert and is not added.
+    std::function<void()> invoke;
+    // Whether the entry applies to the current state; null means always. A
+    // false predicate greys the entry out (rather than hiding it) so the menu
+    // keeps one stable shape and never offers an action that would do
+    // nothing.
+    std::function<bool()> enabled;
+  };
+
+  // Append an entry. Entries appear in registration order; the canvas's own
+  // `Clear selection` is registered at construction, so window entries follow
+  // it.
+  void addContextMenuEntry(ContextMenuEntry entry);
+
+  // The menu for the current state, parented to `parent` (which owns it).
+  // contextMenuEvent pops this up; tests drive the same actions through it
+  // without a modal exec.
+  QMenu * buildContextMenu(QWidget * parent);
+
+  // Where the menu was opened, geographically — the map's own conversion of
+  // the right-clicked pixel, taken IN contextMenuEvent and held while the
+  // menu stands. An entry that acts on "the point I clicked" reads this, and
+  // must not re-derive it from the cursor: by the time the operator has
+  // picked an entry the pointer has travelled down the menu, and a position
+  // sampled then is not the one he asked about. It is the canvas that owns
+  // the geometry, so the canvas captures it; what to DO with the position is
+  // the window's business (#42).
+  //
+  // nullopt when that pixel has no resolvable position at all — no survey
+  // index and a bag with no earth reference — which is the same condition
+  // under which the hover readout shows nothing (#47). Entries that need a
+  // position grey themselves out on it rather than acting on a zero.
+  const std::optional<GeoPoint> & contextMenuGeo() const {return context_menu_geo_;}
+
+  // The map's conversion of a widget pixel to geographic, by whichever frame
+  // the canvas is in: the geographic canvas plane in survey mode, and the
+  // open bag's map-ENU anchor otherwise. This is the one path both the hover
+  // readout and the context menu take, so they can never disagree about
+  // where a pixel is.
+  std::optional<GeoPoint> screenToGeo(const QPoint & pos) const;
+
+  // Whether there is a region to act on: selected index tiles, a CUBE box, or
+  // both. Decides whether `Clear selection` is offered as available.
+  bool hasRegion() const {return !selected_tiles_.empty() || cube_box_geo_.has_value();}
+
+  // Drop the region — the selected index tiles and the CUBE box overlay —
+  // emitting the same signals the region gestures do. This was the
+  // left-click-with-no-drag gesture until #42 moved it into the context menu:
+  // a bare click on the map reads as "select what I clicked on", and the one
+  // thing it did was destroy the operator's region.
+  void clearRegion();
+
 signals:
   // A contact box was drawn, in map coordinates (metres).
   void boxMarked(const QRectF & map_rect);
@@ -190,8 +342,11 @@ signals:
   // Hovered map position (metres), for a cross-pane linked cursor (always valid).
   void hoverWorld(double map_x, double map_y, bool valid);
 
-  // Hovered geographic position (only in geo mode), for a status readout.
-  void hoverGeo(double lat, double lon);
+  // Hovered geographic position, for the status readout (#47). Emitted on
+  // every move, with valid=false when the cursor's position cannot be placed
+  // on the earth at all — a bag-only view of a recording with no earth
+  // reference. lat/lon are meaningless then and must not be shown.
+  void hoverGeo(double lat, double lon, bool valid);
 
   // Middle-click map position (metres), for click-to-seek.
   void seekWorld(double map_x, double map_y);
@@ -203,10 +358,24 @@ signals:
   // LOD basemap re-evaluates its level + visible-tile demand load (#26).
   void viewChanged();
 
-  // Shift-drag CUBE box (#27): a geographic box was drawn / cleared (a
-  // shift-click without a drag clears). The box stays as a map overlay.
+  // The region's geographic box (#27, #42): drawn by a left-drag, or cleared
+  // (clearRegion, reached from the right-click menu). The box stays as a map
+  // overlay.
   void cubeBoxSelected(double south, double west, double north, double east);
   void cubeBoxCleared();
+
+  // A plain left click on the map: pressed and released without a drag (#46).
+  // It does nothing to the region — that is #42's contract and it stands —
+  // and exists so the window can act on a highlighted nav-track fix. With no
+  // highlight the window does nothing, so a bare click on empty water is
+  // still the no-op #42 made it.
+  void plainClicked();
+
+  // Hover feedback must clear: a gesture has just taken the pointer or the
+  // view (a region drag, a pan, a recentre glide, contact marking) (#46). The
+  // highlight under a cursor that is no longer where the map thinks it is
+  // would be a lie, and a click target the operator did not choose.
+  void hoverInterrupted();
 
 protected:
   void paintEvent(QPaintEvent * event) override;
@@ -215,8 +384,15 @@ protected:
   void mousePressEvent(QMouseEvent * event) override;
   void mouseMoveEvent(QMouseEvent * event) override;
   void mouseReleaseEvent(QMouseEvent * event) override;
+  void contextMenuEvent(QContextMenuEvent * event) override;
 
 private:
+  // Registered context-menu entries, in the order they are offered.
+  std::vector<ContextMenuEntry> context_menu_entries_;
+
+  // The position the last context menu was opened at (see contextMenuGeo).
+  std::optional<GeoPoint> context_menu_geo_;
+
   // Static-layer cache (#24 desk finding: full repaints at mouse-move rate
   // made everything sluggish). The basemap tiles, measuring grid, decimated
   // nav track, and unselected tile-grid outlines render ONCE per view into a
@@ -227,11 +403,17 @@ private:
   // view parameters.
   void rebuildLayerCache();
   QPixmap layer_cache_;
+  std::size_t layer_cache_rebuilds_ = 0;
   bool layer_cache_valid_ = false;
   double cache_px_per_m_ = 0.0;
   QPointF cache_center_;
   QSize cache_size_;
-  bool panning_ = false;
+  bool panning_ = false;   // mid middle-drag pan (#42)
+  // A recentre glide blits the stale cache translated for its whole run, for
+  // the same reason a pan does: the centre moves every frame, and rebuilding
+  // the static layers per frame would stutter on a collection-wide view. One
+  // rebuild happens when it settles.
+  bool recentering_ = false;
   // Zoom snappiness (#26): a zoom step blits the stale cache scaled (like the
   // pan blit) and the expensive rebuild waits for the wheel to settle.
   QTimer cache_settle_;
@@ -250,6 +432,7 @@ private:
   void rebuildGeoLayerGeometry();   // re-derive canvas-metre rects/polylines
   void applyPendingFit();
   void drawGrid(QPainter & painter) const;
+  void drawCoastline(QPainter & painter) const;     // bottom layer; cache only
   void drawNavTrack(QPainter & painter) const;      // decimated; cache only
   void drawIndexTileGrid(QPainter & painter) const;   // unselected; cache only
   void drawSelectedTiles(QPainter & painter) const;   // dynamic overlay
@@ -267,23 +450,36 @@ private:
   std::vector<std::vector<std::pair<double, double>>> nav_segments_geo_;
   std::vector<QPolygonF> nav_segments_;    // canvas metres
 
+  Coastline coastline_geo_;
+  std::vector<QPolygonF> coastline_;        // canvas metres
+  std::vector<QRectF> coastline_bounds_;    // canvas metres, per polyline (culling)
+  bool show_coastline_ = true;
+
   std::vector<GeoRect> index_tiles_geo_;
   std::vector<SelectableRect> index_tiles_;   // canvas metres
   std::set<std::size_t> selected_tiles_;
   bool show_nav_track_ = true;
   bool show_index_tiles_ = true;
   std::optional<TimeArrow> time_arrow_;
+  std::optional<HighlightedFix> highlighted_fix_;   // nav-track fix under the cursor (#46)
 
   bool fit_pending_ = false;
   bool user_adjusted_ = false;
   double fit_south_ = 0.0, fit_west_ = 0.0, fit_north_ = 0.0, fit_east_ = 0.0;
 
-  bool band_selecting_ = false;   // mid ctrl-drag rubber band
-  QPoint band_start_;
-  QPoint band_cur_;
-  bool cube_box_selecting_ = false;   // mid shift-drag CUBE box (#27)
-  QPoint cube_box_start_;
-  QPoint cube_box_cur_;
+  // The map's one geographic selection (#42): left-drag draws it, its exact
+  // bounds are the processing extent (cube_box_geo_) and the index tiles it
+  // covers are the pass query (selected_tiles_).
+  bool region_selecting_ = false;
+  // Whether that press has travelled far enough to be a drag rather than a
+  // click. Only a travelled press is a gesture for pointerGestureActive (#46).
+  bool region_dragged_ = false;
+  QPoint region_start_;
+  QPoint region_cur_;
+  // Middle button: a click centres, a drag pans, decided at release (#42).
+  bool middle_dragging_ = false;
+  bool middle_moved_ = false;
+  QPoint middle_start_;
   std::optional<GeoRect> cube_box_geo_;   // the persistent box overlay
 
   // --- per-bag layers ---
@@ -296,10 +492,27 @@ private:
   std::vector<QPointF> track_;  // map frame
 
   double grid_spacing_m_ = 10.0;
+  bool show_metric_grid_ = true;   // bag-mode default; index mode turns it off
   double px_per_m_ = 4.0;       // zoom
   QPointF center_map_{0.0, 0.0};  // canvas point shown at the widget centre
 
   QPoint last_drag_pos_;
+
+  // --- middle-click recentre glide (#42) ---
+  // Started by a middle click, driven by recenter_timer_ against wall time
+  // (recenter_clock_) so a dropped frame shortens the run rather than
+  // stretching it. Any gesture that moves the view takes over immediately:
+  // pan and wheel abandon it where it stands, a second middle click retargets
+  // from there.
+  void startRecenter(const QPointF & target);
+  void stepRecenter();
+  void abandonRecenter();   // stop where it stands; the new gesture owns the view
+  void settleRecenter();    // land on the target, rebuild the cache, emit viewChanged
+  QTimer recenter_timer_;
+  QElapsedTimer recenter_clock_;
+  QPointF recenter_from_;
+  QPointF recenter_to_;
+  int recenter_duration_ms_ = kRecenterDurationMs;
 
   bool mark_mode_ = false;
   bool marking_ = false;        // mid contact box-drag

@@ -20,7 +20,9 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "basemap_contrast.hpp"
@@ -29,6 +31,7 @@
 #include "cube_bathymetry/parameters.h"
 #include "cube_bathymetry/sizes.h"
 #include "cube_bathymetry/sounding.h"
+#include "sounding_uncertainty.hpp"
 
 namespace marine_perception_tools
 {
@@ -45,7 +48,70 @@ CubeTuning default_cube_tuning()
   t.bayes_factor_threshold = params.bayes_factor_threshold;
   t.runlength_threshold = params.runlength_threshold;
   t.extractor = static_cast<int>(params.extractor);
+  // The library stores the SQUARED budget (setIHOLimits squares both on the
+  // way in); the operator edits the un-squared metres and fraction of depth.
+  t.iho_fixed = static_cast<float>(std::sqrt(params.iho_fixed));
+  t.iho_percent = static_cast<float>(std::sqrt(params.iho_percent));
   return t;
+}
+
+namespace
+{
+// The preset table, in the order the dropdown offers them. Values are S-44's
+// (and the library's) un-squared budget: metres, then fraction of depth.
+// order1a and order1b share this pair in cube::Parameters::setIHOLimits, so
+// they are ONE entry here (see iho_preset_names in the header).
+const std::vector<std::pair<std::string, std::pair<float, float>>> & presets()
+{
+  static const std::vector<std::pair<std::string, std::pair<float, float>>> kP{
+    {"exclusive", {0.15f, 0.0075f}},
+    {"special", {0.25f, 0.0075f}},
+    {"order1a/1b", {0.5f, 0.013f}},
+    {"order2", {1.0f, 0.023f}}};
+  return kP;
+}
+}  // namespace
+
+std::vector<std::string> iho_preset_names()
+{
+  std::vector<std::string> names;
+  names.reserve(presets().size());
+  for (const auto & p : presets()) {
+    names.push_back(p.first);
+  }
+  return names;
+}
+
+std::optional<std::pair<float, float>> iho_preset_limits(const std::string & name)
+{
+  for (const auto & p : presets()) {
+    if (p.first == name) {
+      return p.second;
+    }
+  }
+  // The library's own vocabulary still resolves, so a caller (or a saved
+  // session) naming "order1a"/"order1b" gets the budget it asked for rather
+  // than silently falling through to custom.
+  if (name == "order1a" || name == "order1b") {
+    return std::pair<float, float>{0.5f, 0.013f};
+  }
+  return std::nullopt;
+}
+
+std::string iho_order_for_limits(float iho_fixed, float iho_percent)
+{
+  // Tolerance is a display-precision epsilon, not a physical one: the spins
+  // hand back the same values the presets seeded, so this only absorbs the
+  // float round trip.
+  constexpr float kEps = 1e-6f;
+  for (const auto & p : presets()) {
+    if (std::fabs(iho_fixed - p.second.first) <= kEps &&
+      std::fabs(iho_percent - p.second.second) <= kEps)
+    {
+      return p.first;
+    }
+  }
+  return kCustomIhoOrder;
 }
 
 std::string derive_box_curve(
@@ -122,8 +188,21 @@ std::string derive_box_curve(
 
 CubeSurface run_cube(
   const std::vector<MbesSounding> & soundings, double cell_m,
-  const std::string & iho_order, const CubeTuning & tuning)
+  const CubeTuning & tuning,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
 {
+  const auto stop = [&cancel]() {
+      return cancel && cancel->load(std::memory_order_relaxed);
+    };
+  // A cancelled run yields no surface at all (#44): half a grid of hypotheses
+  // is not a coarser estimate, it is an unfinished one.
+  const auto abandon = [&soundings]() {
+      CubeSurface c;
+      c.soundings_in = soundings.size();
+      c.note = "cancelled";
+      return c;
+    };
+  if (stop()) {return abandon();}
   CubeSurface out;
   out.cell_m = cell_m;
   out.soundings_in = soundings.size();
@@ -169,10 +248,17 @@ CubeSurface run_cube(
   }
 
   const cube::CellSizes sizes(static_cast<float>(cell_m));   // square cells
-  cube::Parameters params(sizes, iho_order);
+  cube::Parameters params(sizes);
   // Operator tuning (#27): the exposed subset only — the derived scales
   // (distance_scale etc.) stay as the ctor computed them from the cell size.
   params.capture_distance_scale = tuning.capture_distance_scale;
+  // The uncertainty budget is the operator's two numbers, squared into the
+  // library's storage convention (#45). Overwriting what the ctor's order name
+  // seeded is the point: a run can only ever use the current values.
+  params.iho_fixed = static_cast<double>(tuning.iho_fixed) * tuning.iho_fixed;
+  params.iho_percent =
+    static_cast<double>(tuning.iho_percent) * tuning.iho_percent;
+  params.iho_order = iho_order_for_limits(tuning.iho_fixed, tuning.iho_percent);
   params.median_length = std::max<std::uint32_t>(1, tuning.median_length);
   params.quotient_limit = tuning.quotient_limit;
   params.discount = tuning.discount;
@@ -215,16 +301,25 @@ CubeSurface run_cube(
   // spread mirrors Grid::insert's effect square exactly (influence radius,
   // node-centre distance test).
   std::vector<std::unique_ptr<cube::Node>> nodes(n_nodes);
+  std::size_t dropped_no_geometry = 0;   // beams with no usable angle/range
   for (const auto & s : soundings) {
+    if (stop()) {return abandon();}
+    // Angle-aware placeholder errors (#49, see sounding_uncertainty.hpp):
+    // first-order propagation through this beam's own angle and slant range,
+    // so the estimator can prefer a pass's near-nadir coverage over another
+    // pass's outer beams. Already variances — the contract cube::Sounding
+    // carries — so they are stored as computed, not squared again.
+    // A beam whose geometry is missing or non-finite is DROPPED: no sounding
+    // is better than one carrying a fabricated confidence.
+    SoundingUncertainty u;
+    if (!sounding_uncertainty(s.beam_angle, s.slant_range, &u)) {
+      ++dropped_no_geometry;
+      continue;
+    }
     // World z is up (seabed negative) — the cube depth convention directly.
     cube::Sounding cs(static_cast<float>(s.z));
-    // Placeholder depth-dependent errors (see header): stds squared into the
-    // variances the Sounding contract carries.
-    const double d = std::abs(s.z);
-    const double v_std = 0.1 + 0.007 * d;
-    const double h_std = 0.2 + 0.01 * d;
-    cs.vertical_error = static_cast<float>(v_std * v_std);
-    cs.horizontal_error = static_cast<float>(h_std * h_std);
+    cs.vertical_error = static_cast<float>(u.vertical_variance);
+    cs.horizontal_error = static_cast<float>(u.horizontal_variance);
     // CUBE-settled backscatter (ADR-0007): the intensity rides the
     // hypothesis queue bound to its depth and comes back per node, with
     // its beam angle + slant range so the ARA/TL corrections can act.
@@ -264,6 +359,7 @@ CubeSurface run_cube(
   out.intensity.reserve(n_nodes);
   std::size_t estimated = 0;
   for (auto & node : nodes) {
+    if (stop()) {return abandon();}
     if (!node) {
       out.depth.push_back(std::nanf(""));
       out.uncertainty.push_back(std::nanf(""));
@@ -281,6 +377,12 @@ CubeSurface run_cube(
   }
   out.note = std::to_string(estimated) + " of " +
     std::to_string(n_nodes) + " nodes estimated" + ara_note;
+  if (dropped_no_geometry > 0) {
+    // Never silent: a beam without angle/slant range gets no uncertainty and
+    // so is not inserted at all (#49).
+    out.note += "; " + std::to_string(dropped_no_geometry) +
+      " sounding(s) skipped — no beam geometry";
+  }
   return out;
 }
 

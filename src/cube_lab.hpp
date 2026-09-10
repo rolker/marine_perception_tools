@@ -22,8 +22,10 @@
 // intensity (ADR-0007: intensity rides the hypothesis queue bound to its
 // depth). Qt-free and bag-free — unit-testable with synthetic soundings.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -77,6 +79,25 @@ struct CubeTuning
   // Scale on depth for how far out a sounding is accepted (unitless;
   // hydrography ~0.05, larger for sparse/flat geological mapping).
   float capture_distance_scale = 0.05f;
+  // The vertical-uncertainty budget, set directly rather than only by picking
+  // a named IHO order (#45). Together they are
+  //   max variance allowed(depth) = (iho_fixed^2 + (iho_percent*depth)^2)
+  //                                 / CONF_95PC^2,
+  // whose ratio against a sounding's own vertical error scales the RADIUS over
+  // which that sounding spreads its influence on insertion — a looser budget
+  // gives every sounding a larger radius, so the surface fills in and smooths;
+  // a tighter one shrinks it, so the surface is crisper and holier. It is a
+  // knob on how far the estimator may extrapolate, NOT a pass/fail gate, which
+  // is why non-hydrographic work wants the numbers and not the standards
+  // label (S-44 orders span 0.15 m/0.75% at exclusive to 1.0 m/2.3% at
+  // order 2; go looser still for sparse or flat geological mapping).
+  //
+  // Held here in the operator's units — metres and a fraction of depth, the
+  // numbers S-44 is written in. cube::Parameters stores their SQUARES, so
+  // run_cube squares on the way in and default_cube_tuning() takes the root on
+  // the way out.
+  float iho_fixed = 0.5f;      // fixed part of the budget, m (95% confidence)
+  float iho_percent = 0.013f;  // depth-proportional part, fraction of depth
   std::uint32_t median_length = 11;      // median pre-filter queue length
   float quotient_limit = 30.0f;          // outlier quotient upper limit
   float discount = 1.0f;                 // evolution noise discount factor
@@ -100,6 +121,26 @@ struct CubeTuning
 // The library's own defaults, read from a real cube::Parameters instance.
 CubeTuning default_cube_tuning();
 
+// The named IHO S-44 orders, kept as PRESETS that seed a CubeTuning's
+// iho_fixed / iho_percent (#45) — the run itself uses whatever those two
+// numbers currently are, never the label. Names are the cube::Parameters
+// vocabulary with ONE deliberate departure: "order1a/1b", because S-44's
+// order 1a and 1b carry the SAME vertical-uncertainty budget (0.5 m, 1.3%)
+// and differ only in the seafloor-search requirement, which CUBE does not
+// model — two dropdown entries where one is a silent no-op is misleading.
+std::vector<std::string> iho_preset_names();
+
+// The {iho_fixed, iho_percent} a preset seeds, or nullopt if `name` is not a
+// preset (including "custom").
+std::optional<std::pair<float, float>> iho_preset_limits(const std::string & name);
+
+// The inverse: the preset whose pair these values are, else "custom" — how an
+// edited threshold takes the selection off the named orders.
+std::string iho_order_for_limits(float iho_fixed, float iho_percent);
+
+// The selection name for values that match no preset.
+inline constexpr const char * kCustomIhoOrder = "custom";
+
 // Self-calibrated angular-response curve (#27, operator request 2026-08-18):
 // derive the residual empirically from a box's OWN beams instead of trusting
 // the campaign curve + physical TL model — kills whatever gain behaviour the
@@ -115,20 +156,34 @@ std::string derive_box_curve(
 
 // Run CUBE over `soundings` (already gathered and box-clipped, all in one
 // world frame; z up, seabed negative — the cube depth convention) on a grid
-// of `cell_m` cells under the given IHO order ("order1a" etc., the
-// cube::Parameters vocabulary) and tuning overrides. The grid covers the
+// of `cell_m` cells under the given tuning overrides. The grid covers the
 // soundings' bounding box plus one cell of margin.
+//
+// The uncertainty budget comes from `tuning.iho_fixed` / `tuning.iho_percent`
+// and nothing else (#45): there is no order-name argument to fall out of step
+// with the two numbers the operator edited.
 //
 // Per-sounding errors: the full cube_bathymetry ErrorModel needs the raw
 // detections + vessel/device config, which the explorer's cloud path does
-// not retain — so this uses a documented depth-dependent PLACEHOLDER
-// (vertical std 0.1 m + 0.7% of depth, horizontal std 0.2 m + 1% of depth,
-// stored as variances per the Sounding contract) until detections are
-// carried through (follow-up on #27).
+// not retain — so this uses a documented PLACEHOLDER, angle-aware since #49:
+// each beam's own angle and slant range propagated through
+// sounding_uncertainty.hpp (stored as variances per the Sounding contract),
+// seeded from cube::Device's defaults, until detections are carried through
+// (follow-up on #27). It replaced a depth-only formula that gave a swath-edge
+// beam the same confidence as a nadir one; it does NOT model refraction,
+// which is systematic (#28). A sounding carrying no beam geometry is skipped
+// rather than given a fabricated error, and the note says how many were.
+//
+// `cancel` (optional) is polled per sounding while the soundings are spread
+// over the node grid, and per node while the estimates are extracted (#44) —
+// the two loops a box-sized run spends its minutes in. cube::Node exposes no
+// finer unit than one insert / one extraction, and neither is itself long, so
+// these are the useful granularity. A cancelled run returns a surface that is
+// not ok(), noted "cancelled": never a partial grid dressed as an estimate.
 CubeSurface run_cube(
   const std::vector<MbesSounding> & soundings, double cell_m,
-  const std::string & iho_order = "order1a",
-  const CubeTuning & tuning = CubeTuning{});
+  const CubeTuning & tuning = CubeTuning{},
+  const std::shared_ptr<std::atomic<bool>> & cancel = {});
 
 // A renderable triangulation of a CubeSurface: positions in the surface's
 // world frame (xyz triples), per-vertex colours (rgb triples in [0,1]),

@@ -15,9 +15,11 @@
 #include "sidescan_drape.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -214,11 +216,22 @@ void drapePing(
 
 CubeSurface extend_surface_for_drape(
   const CubeSurface & surface, const std::vector<WindowPing> & pings,
-  std::uint64_t max_nodes, std::string & note)
+  std::uint64_t max_nodes, std::string & note,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
 {
   if (!surface.ok()) {
     return surface;
   }
+  const auto stop = [&cancel]() {
+      return cancel && cancel->load(std::memory_order_relaxed);
+    };
+  // Cancelled: no terrain at all (#44). A partly-seeded or partly-relaxed
+  // membrane still looks like a surface, and this function's contract — every
+  // node finite — would be a lie about it.
+  const auto abandon = [&note]() {
+      note = "cancelled";
+      return CubeSurface{};
+    };
   // Desired bounds: the old grid plus every usable ping's across-track
   // reach (sensor -> outer endpoint, with a small along-track margin).
   double min_x = surface.origin_x;
@@ -228,6 +241,7 @@ CubeSurface extend_surface_for_drape(
   const double margin = 2.0;
   bool any = false;
   for (const auto & p : pings) {
+    if (stop()) {return abandon();}
     const auto & g = p.geometry;
     // Mirror drapePing()'s ping-level gate, altitude included: a ping it will
     // always skip must not grow the grid it can never paint. The growth is
@@ -359,6 +373,7 @@ CubeSurface extend_surface_for_drape(
       }
     };
   while (!frontier.empty()) {
+    if (stop()) {return abandon();}
     next.clear();
     for (const auto i : frontier) {
       const int x = static_cast<int>(i % ext.nx);
@@ -372,6 +387,7 @@ CubeSurface extend_surface_for_drape(
   }
   std::vector<float> relaxed(ext.depth);
   for (int sweep = 0; sweep < 32; ++sweep) {
+    if (stop()) {return abandon();}
     for (std::size_t i = 0; i < n; ++i) {
       if (measured[i]) {
         continue;
@@ -395,7 +411,7 @@ CubeSurface extend_surface_for_drape(
 
 SidescanDrape drape_pass(
   const CubeSurface & surface, const std::vector<WindowPing> & pings,
-  RangeScoreMode range_mode)
+  RangeScoreMode range_mode, const std::shared_ptr<std::atomic<bool>> & cancel)
 {
   SidescanDrape out;
   if (!surface.ok()) {
@@ -415,6 +431,9 @@ SidescanDrape drape_pass(
   // turn cannot smear one ping across metres of seabed.
   const double kMaxHalfWidth = 2.0;
   for (std::size_t i = 0; i < pings.size(); ++i) {
+    if (cancel && cancel->load(std::memory_order_relaxed)) {
+      return SidescanDrape{};   // cancelled: a partial drape paints nothing (#44)
+    }
     double spacing = 0.0;
     const auto & g = pings[i].geometry;
     if (i > 0) {
