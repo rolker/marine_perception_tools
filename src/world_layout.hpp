@@ -65,17 +65,20 @@ inline std::filesystem::path defaultStoresDir(const std::filesystem::path & root
 /// order an operator reaches for them. Discovery still lists anything else it
 /// finds; this decides what comes first and what opens.
 ///
-/// `imagery/backscatter` appears twice on purpose. D3's provenance name is
-/// `processed`, but the populated backscatter layer on disk is named `survey`
-/// — the alias `marine_bathymetry_store` documents as deprecated and still
-/// accepts. Until that directory is renamed, dropping the alias would hide the
-/// only backscatter data we have.
+/// `imagery/backscatter` appears twice on purpose, and `survey` is the CURRENT
+/// name, not an alias awaiting a rename. uma-ADR-0007 A.2 collapsed that
+/// store's `draft` / `processed` overlay to a single `survey` layer, and
+/// uma-ADR-0010 D3 puts the provenance names (`chart` / `reference` / `draft` /
+/// `processed`) under `depths/` only — imagery layer names are not renamed to
+/// match the depth theme. So `imagery/backscatter/survey` is what a populated
+/// store holds today; `imagery/backscatter/processed` is kept below it, after
+/// the current name, for stores written before that collapse.
 inline const std::vector<std::string> & preferredLayerPaths()
 {
   static const std::vector<std::string> kPaths = {
     "depths/processed",
-    "imagery/backscatter/processed",
     "imagery/backscatter/survey",
+    "imagery/backscatter/processed",
     "imagery/sidescan/processed",
     "depths/reference",
     "depths/chart",

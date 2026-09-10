@@ -83,10 +83,12 @@ TEST(WorldLayout, PreferredPathsAreTheTaxonomyNotTheOldGuesses)
   EXPECT_FALSE(has("sidescan/processed"));
 }
 
-// The one populated backscatter layer on disk carries the deprecated `survey`
-// name. Both spellings stay listed until that directory is renamed, and the
-// D3 name is preferred over the alias.
-TEST(WorldLayout, BackscatterKeepsBothTheD3NameAndTheDeprecatedAlias)
+// `survey` is the MBES backscatter store's current layer name — uma-ADR-0007
+// A.2 collapsed its `draft` / `processed` overlay to that single layer, and
+// uma-ADR-0010 D3 scopes the provenance names to `depths/`. So `survey` is
+// preferred, and `processed` stays listed below it only for stores written
+// before that collapse.
+TEST(WorldLayout, BackscatterPrefersTheCurrentSurveyNameOverThePreCollapseOne)
 {
   const auto & paths = preferredLayerPaths();
   const auto at = [&paths](const std::string & p) {
@@ -96,7 +98,7 @@ TEST(WorldLayout, BackscatterKeepsBothTheD3NameAndTheDeprecatedAlias)
   ASSERT_LT(at("imagery/backscatter/processed"), paths.size());
   ASSERT_LT(at("imagery/backscatter/survey"), paths.size());
   EXPECT_LT(
-    at("imagery/backscatter/processed"), at("imagery/backscatter/survey"));
+    at("imagery/backscatter/survey"), at("imagery/backscatter/processed"));
 }
 
 // No duplicates: a repeated path would list the same layer twice in the combo.
