@@ -201,26 +201,13 @@ MbesWindowResult read_mbes_window(
       // (measured: 50 s for a ~1M-sounding window; ~1 s without).
       const std::vector<MbesSounding> sensor = project_detections(det);
       for (const auto & s : sensor) {
-        double rx = 0.0;
-        double ry = 0.0;
-        double rz = 0.0;
-        rotate_by_quat(
-          tf.transform.rotation.x, tf.transform.rotation.y,
-          tf.transform.rotation.z, tf.transform.rotation.w,
-          s.x, s.y, s.z, rx, ry, rz);
-        MbesSounding w;
-        w.x = tf.transform.translation.x + rx;
-        w.y = tf.transform.translation.y + ry;
-        w.z = tf.transform.translation.z + rz;
-        w.intensity = s.intensity;
-        // The beam's own geometry rides along: angle and slant range are
-        // measured in the SENSOR frame, so a rigid lift to world leaves them
-        // unchanged — and both the ARA/TL correction (#27) and the angle-aware
-        // per-sounding uncertainty (#49) read them off the world sounding.
-        // Dropping them here left every bag-loaded sounding with a NaN angle.
-        w.beam_angle = s.beam_angle;
-        w.slant_range = s.slant_range;
-        result.world_soundings.push_back(w);
+        result.world_soundings.push_back(
+          lift_sounding_to_world(
+            s,
+            tf.transform.translation.x, tf.transform.translation.y,
+            tf.transform.translation.z,
+            tf.transform.rotation.x, tf.transform.rotation.y,
+            tf.transform.rotation.z, tf.transform.rotation.w));
       }
       ++result.used_pings;
     } catch (const std::exception &) {

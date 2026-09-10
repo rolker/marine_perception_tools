@@ -20,6 +20,7 @@
 #include <string>
 
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "mbes_geometry.hpp"
 
 namespace marine_perception_tools
 {
@@ -65,6 +66,35 @@ inline void rotate_by_quat(
   ox = vx + qw * tx + (qy * tz - qz * ty);
   oy = vy + qw * ty + (qz * tx - qx * tz);
   oz = vz + qw * tz + (qx * ty - qy * tx);
+}
+
+// Rigidly lift one sensor-frame sounding into the world frame: rotate its
+// position by `q`, translate by `t`, and CARRY EVERY OTHER FIELD UNCHANGED.
+//
+// The copy-then-overwrite shape is the point. A rigid transform moves the
+// position and nothing else — the beam angle and slant range are measured in
+// the sensor frame and are the same numbers in world, and the intensity is
+// not geometry at all. Building the world sounding field by field instead
+// silently drops whatever the author forgot, which is exactly how
+// `beam_angle` and `slant_range` came to be NaN on every bag-loaded sounding
+// (#42): both the ARA/TL correction (#27) and the angle-aware per-sounding
+// uncertainty (#49) read them off the world sounding, and the latter now
+// DROPS a sounding whose angle is not finite. Any field added to
+// MbesSounding rides along here for free, in both callers at once.
+inline MbesSounding lift_sounding_to_world(
+  const MbesSounding & s,
+  double tx, double ty, double tz,
+  double qx, double qy, double qz, double qw)
+{
+  double rx = 0.0;
+  double ry = 0.0;
+  double rz = 0.0;
+  rotate_by_quat(qx, qy, qz, qw, s.x, s.y, s.z, rx, ry, rz);
+  MbesSounding w = s;
+  w.x = tx + rx;
+  w.y = ty + ry;
+  w.z = tz + rz;
+  return w;
 }
 
 }  // namespace marine_perception_tools

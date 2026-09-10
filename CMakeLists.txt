@@ -209,6 +209,11 @@ if(BUILD_TESTING)
   target_include_directories(test_mbes_geometry PRIVATE src)
   ament_target_dependencies(test_mbes_geometry marine_acoustic_msgs)
 
+  # The one rigid sensor->world sounding lift, shared by both bag paths (#42).
+  ament_add_gtest(test_tf_lift test/test_tf_lift.cpp)
+  target_include_directories(test_tf_lift PRIVATE src)
+  ament_target_dependencies(test_tf_lift geometry_msgs marine_acoustic_msgs tf2)
+
   # Pure rolling-distance scrub policy (distance_buffer_policy.hpp) — header-only.
   ament_add_gtest(test_distance_buffer_policy test/test_distance_buffer_policy.cpp)
   target_include_directories(test_distance_buffer_policy PRIVATE src)
