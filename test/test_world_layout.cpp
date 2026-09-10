@@ -31,9 +31,47 @@ using marine_perception_tools::defaultWorldRoot;
 using marine_perception_tools::preferredLayerPaths;
 using marine_perception_tools::worldIndexPath;
 
+// HOME is process-wide, so a test that changes it and walks away leaks into
+// every test that runs afterwards — including code paths like session_index_io
+// that read it — and makes the suite order-dependent (flagged by Copilot). This
+// guard restores whatever was there, including "it was unset".
+class ScopedHome
+{
+public:
+  explicit ScopedHome(const char * value)
+  {
+    const char * previous = std::getenv("HOME");
+    had_home_ = previous != nullptr;
+    if (had_home_) {
+      previous_ = previous;   // copy before any mutation invalidates it
+    }
+    if (value == nullptr) {
+      ::unsetenv("HOME");
+    } else {
+      ::setenv("HOME", value, 1);
+    }
+  }
+
+  ~ScopedHome()
+  {
+    if (had_home_) {
+      ::setenv("HOME", previous_.c_str(), 1);
+    } else {
+      ::unsetenv("HOME");
+    }
+  }
+
+  ScopedHome(const ScopedHome &) = delete;
+  ScopedHome & operator=(const ScopedHome &) = delete;
+
+private:
+  bool had_home_ = false;
+  std::string previous_;
+};
+
 TEST(WorldLayout, RootIsUnderHome)
 {
-  ASSERT_EQ(0, ::setenv("HOME", "/home/tester", 1));
+  const ScopedHome home("/home/tester");
   EXPECT_EQ("/home/tester/data/world", defaultWorldRoot().string());
 }
 
@@ -41,10 +79,31 @@ TEST(WorldLayout, RootIsUnderHome)
 // resolve against whatever directory the app happened to be launched from.
 TEST(WorldLayout, RootIsEmptyWithoutHome)
 {
-  ASSERT_EQ(0, ::unsetenv("HOME"));
+  const ScopedHome home(nullptr);
   EXPECT_TRUE(defaultWorldRoot().empty());
   EXPECT_TRUE(worldIndexPath(defaultWorldRoot()).empty());
   EXPECT_TRUE(defaultStoresDir(defaultWorldRoot()).empty());
+}
+
+// The guard is the thing the other two rely on, so it is worth one test of its
+// own: HOME must come back exactly as it was, unset included.
+TEST(WorldLayout, ScopedHomeRestoresWhatItFound)
+{
+  const std::string before = std::getenv("HOME") ? std::getenv("HOME") : "";
+  const bool had = std::getenv("HOME") != nullptr;
+  {
+    const ScopedHome home("/home/somewhere-else");
+    ASSERT_STREQ("/home/somewhere-else", std::getenv("HOME"));
+    {
+      const ScopedHome nested(nullptr);
+      ASSERT_EQ(nullptr, std::getenv("HOME"));
+    }
+    EXPECT_STREQ("/home/somewhere-else", std::getenv("HOME"));
+  }
+  EXPECT_EQ(had, std::getenv("HOME") != nullptr);
+  if (had) {
+    EXPECT_EQ(before, std::getenv("HOME"));
+  }
 }
 
 // The index is a sibling of the layer themes, not a member of one.

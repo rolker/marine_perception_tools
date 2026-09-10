@@ -13,8 +13,10 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -168,8 +170,13 @@ TEST(LoadCoastline, MissingFileYieldsNoCoastline)
 
 TEST(LoadCoastline, ReadsAFileFromDisk)
 {
+  // Unique per process AND per test: a fixed name collides under parallel
+  // execution and leaves a stale file behind when a test aborts early
+  // (flagged by Copilot).
   const auto path = std::filesystem::temp_directory_path() /
-    "mpt_test_coastline.txt";
+    ("mpt_test_coastline_" +
+    std::to_string(static_cast<std::int64_t>(::getpid())) + "_" +
+    ::testing::UnitTest::GetInstance()->current_test_info()->name() + ".txt");
   {
     std::ofstream out(path);
     out << "# header\n> 43000 -70750\n10 10\n";
