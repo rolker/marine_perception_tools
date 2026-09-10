@@ -177,9 +177,26 @@ struct SoundingUncertainty
 /// the inversion. At nadir the two placements agree exactly: sigma_z there is
 /// max(percent*R, floor), which is cube::ErrorModel::range_error's own value.
 ///
+/// WHERE THE ANGLE WEIGHTING ACTUALLY ENGAGES. The 0.05 m floor is applied to
+/// each propagated component, so in shallow water it is the floor, not the
+/// geometry, that decides — and the angular term does nothing at all:
+///
+///   depth < 7.04 m   both nadir and 60 deg pinned at the floor; ratio 1.00
+///   7.04 - 10.00 m   60 deg has left the floor, nadir has not; ratio rises
+///   depth > 10.00 m  neither is floored; the full ~1.42x ratio applies
+///
+/// So over a 5 m lake bottom this model weights an outer beam exactly like a
+/// nadir one. That is a consequence of the floor's placement, not a bug in the
+/// propagation, but it means the feature is inert across much of the water this
+/// tool is used on. Whether the floor should shrink, move back onto the range,
+/// or stay is an open question (mpt#51) — it is recorded here rather than
+/// quietly worked around, and the operator-facing caveat below states the
+/// engagement depth rather than the bare ratio.
+///
 /// WHAT THIS MODEL DOES NOT CLAIM. Compare beams at a fixed DEPTH — two passes
-/// over one node, which is the comparison CUBE actually makes — and sigma_z
-/// rises monotonically with angle, by ~1.4x at 60 deg and ~1.9x at 70 deg.
+/// over one node, which is the comparison CUBE actually makes — and above the
+/// floor sigma_z rises monotonically with angle, by ~1.4x at 60 deg and ~1.9x
+/// at 70 deg.
 /// Compare them at a fixed SLANT RANGE and it FALLS, because an outer beam at
 /// the same range is measuring shallower water and its range error projects
 /// mostly sideways. That is a property of the geometry, not a bug, but it means
@@ -234,7 +251,9 @@ inline const char * sounding_uncertainty_caveat()
     "propagation of a 0.5%-of-range error and a 2 deg / 12 beam angular error "
     "through each beam's own angle and slant range (each component floored at "
     "0.05 m), so an outer beam is less trusted than a nadir beam over the same "
-    "depth — about half the weight at 60 deg. The explorer's cloud path does not "
+    "depth — about half the weight at 60 deg, but ONLY in water deeper than "
+    "about 7 m: shallower than that the floor pins every beam to 0.05 m and the "
+    "angle carries no weight at all (mpt#51). The explorer's cloud path does not "
     "carry the detections, attitude and vessel offsets the real CUBE error "
     "model needs, so these thresholds are still applied against synthetic "
     "uncertainty (mpt#27 follow-up). It does not correct the refraction smile "

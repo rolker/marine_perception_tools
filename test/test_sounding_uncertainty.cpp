@@ -20,6 +20,7 @@
 
 #include <cmath>
 #include <limits>
+#include <string>
 
 #include "sounding_uncertainty.hpp"
 
@@ -78,6 +79,47 @@ TEST(SoundingUncertainty, ShallowWaterNeverInvertsTheOrdering)
       previous = next;
     }
   }
+}
+
+// WHERE THE ANGLE WEIGHTING ENGAGES (mpt#51). The test above only asserts the
+// ordering never inverts, which a model with NO angular term would also pass.
+// This one pins the depths at which the floor stops deciding the answer, so the
+// feature's inertness in shallow water is a recorded property rather than a
+// surprise found on the water. The two transitions follow from the file's own
+// constants: the 60 deg beam leaves the 0.05 m floor at 7.04 m, nadir at
+// 10.00 m.
+TEST(SoundingUncertainty, TheFloorMakesTheAngleInertInShallowWater)
+{
+  const auto ratio = [](double depth) {
+      const double t = 60.0 * M_PI / 180.0;
+      return vertical_std(t, depth / std::cos(t)) / vertical_std(0.0, depth);
+    };
+
+  // Below 7.04 m both beams are pinned to the floor: an angle-blind model
+  // would give the same answer here, and that is the whole point of mpt#51.
+  EXPECT_NEAR(1.0, ratio(2.0), 1e-9);
+  EXPECT_NEAR(1.0, ratio(5.0), 1e-9);
+  EXPECT_NEAR(1.0, ratio(7.0), 1e-9);
+
+  // Between the two transitions the outer beam has left the floor and nadir
+  // has not, so the ratio climbs.
+  EXPECT_GT(ratio(8.0), 1.0);
+  EXPECT_LT(ratio(8.0), 1.42);
+
+  // Above 10 m neither is floored and the documented ratio applies.
+  EXPECT_NEAR(1.4196, ratio(12.0), 1e-3);
+  EXPECT_NEAR(1.4196, ratio(30.0), 1e-3);
+}
+
+// The caveat string is operator-facing, so it must not state the weighting
+// unconditionally while the floor holds it inert (mpt#51).
+TEST(SoundingUncertainty, TheCaveatDeclaresTheDepthAtWhichTheAngleCounts)
+{
+  const std::string caveat =
+    marine_perception_tools::sounding_uncertainty_caveat();
+  EXPECT_NE(std::string::npos, caveat.find("7 m"))
+    << "the caveat must say where the angle starts carrying weight";
+  EXPECT_NE(std::string::npos, caveat.find("mpt#51"));
 }
 
 // What the model does NOT claim, pinned so the absence is recorded rather than
