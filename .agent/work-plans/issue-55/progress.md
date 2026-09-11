@@ -32,3 +32,28 @@ issue: 55
 ### Open questions
 - [ ] Vessel speed-over-ground passed as NaN (no offline SOG source wired in) — follow-up issue or accept the floored speed-dependent term?
 - [ ] level_frame/tide_frame default to bizzy/base_link_north_up and bizzy/map_tide by convention; unverified against a real bag — acceptable given diagnostics + note will surface 100% missing_attitude/heave if wrong?
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-11 14:47 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-55/plan.md` at `c7b8bce`
+**PR**: PR-less (`--issue` mode; branch `feature/issue-55`, not pushed)
+**Verdict**: changes-requested
+
+### Findings
+- [ ] (must-fix) `sidescan_viewer_window.cpp:112,934` includes the header item 3 deletes and shows `sounding_uncertainty_caveat()` in the CUBE-tuning dialog (#45 put it where the numbers are set) — build break plus a lost operator caveat; `CloudLoadOutcome::notes` is a different surface — `plan.md:85,149`
+- [ ] (must-fix) `SidescanBagSession::readMbesWindow` has no TF lookup (it lifts with `MbesPing`'s pre-captured pose because `tf_buffer_` is a 30 s rolling cache filled only during the load scan); projecting from it at window time hits `lookupAtOrLatest`'s `TimePointZero` fallback and returns END-OF-BAG attitude with `missing_attitude == 0` — wrong data reported healthy — `plan.md:86-95`
+- [ ] (must-fix) `MbesWindowOptions` carries no base-link frame (`mbes_window_reader.hpp:42-43`), so `ProjectorParams::base_link_frame` stays the library default `base_link` while level/tide are `bizzy/…` — the attitude lookup can never resolve — `plan.md:96-99`
+- [ ] (must-fix) Missing attitude makes the errors NaN but leaves positions finite, so the range gate keeps the soundings, `report_projection_summary`'s frame-override warning (gated on `soundings == 0`) never fires, and the total loss shows only as `run_cube`'s "no beam geometry" note — decision 5's "degrades gracefully" is not honest for the estimator path — `plan.md:58-66,202-208`
+- [ ] (must-fix) New fields named `*_error` entrench the misnomer rolker/cube_bathymetry#158 is open to rename (it already counts sites "across cube and the explorer"); these are new fields with no compatibility burden — name them `*_variance` or say in the plan that it defers to #158 — `plan.md:36-46,82-84`
+- [ ] (must-fix) `ProjectionRunTotals`' `pings`/`beams`/`soundings` are not in `ProjectionDiagnostics`, so a summed-diagnostics field cannot fill the summary — `totals.pings` prints 0 and the zero-sounding warning can never fire — `plan.md:97-109`
+- [ ] (must-fix) The retired `project_detections` skips beams with non-positive travel time; `ErrorModel::compute` has no such guard and the default `minimum_range = 0.0` keeps a zero-range sounding at the sonar head — set a non-zero minimum range or filter twtt in `project_ping` — `plan.md:75-77`
+- [ ] (must-fix) `color_vocabulary.hpp:65-80` and `test_color_vocabulary.cpp:73-88` state as a verified gap that a sounding carries no uncertainty — false after this change; update the text and name (even if deferring) whether the point Uncertainty channel now opens — `plan.md:143-158`
+- [ ] (suggestion) Extend `test_tf_lift.cpp`'s NaN-carry-through test to the two new fields instead of asserting the property in prose only — `plan.md:180`
+- [ ] (suggestion) Decision 1's consumer list omits `sidescan_viewer_window.hpp` (4 sites incl. the self-cal `cube_soundings_`) and `cube_lab.{hpp,cpp}` — `plan.md:31-35`
+- [ ] (suggestion) Match `Parameters::influenceRadius`'s own gate (`vertical_error <= 0` rejected, not just negative) — `cube_lab.cpp` casts a NaN radius to int for its loop bounds — `plan.md:110-117`
+- [ ] (suggestion) Say that `horizontal_error` is radial/drms and feeds `influenceRadius`, so sounding spread — and the surface's look — changes with the real model — `plan.md:110-117`
+- [ ] (suggestion) Add a `.agents/README.md` row for the new `mbes_projection.{hpp,cpp}`, not only the two edited rows — `plan.md:139-141,158`
+- [ ] (verified, no change) NaN vessel speed is handled exactly as decision 4 claims: `error_model.cpp:205-218` floors the speed-dependent horizontal terms to 0; the note that it makes horizontal error optimistic is worth one line — `plan.md:52-57`
