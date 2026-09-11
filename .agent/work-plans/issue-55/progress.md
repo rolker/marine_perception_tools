@@ -57,3 +57,50 @@ issue: 55
 - [ ] (suggestion) Say that `horizontal_error` is radial/drms and feeds `influenceRadius`, so sounding spread — and the surface's look — changes with the real model — `plan.md:110-117`
 - [ ] (suggestion) Add a `.agents/README.md` row for the new `mbes_projection.{hpp,cpp}`, not only the two edited rows — `plan.md:139-141,158`
 - [ ] (verified, no change) NaN vessel speed is handled exactly as decision 4 claims: `error_model.cpp:205-218` floors the speed-dependent horizontal terms to 0; the note that it makes horizontal error optimistic is worth one line — `plan.md:52-57`
+
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-09-11 14:58 -04:00
+**By**: Claude Code Agent (Claude Sonnet 5)
+
+**Plan**: `.agent/work-plans/issue-55/plan.md` at `63164af` (revision 2)
+**Branch**: feature/issue-55 at `63164af`
+**Phases**: single
+
+### Revision 2 — must-fixes resolved
+- [x] `sidescan_viewer_window.cpp:112,934` build break / lost caveat — file added to Files-to-Change; dialog now includes `mbes_projection.hpp` and renders the new shared `offline_projection_caveat()` in place of `sounding_uncertainty_caveat()`
+- [x] Plan item 4 (cloud path) removed from scope entirely per operator decision; `SidescanBagSession::readMbesWindow`'s TF-lookup-at-window-time hazard is now moot for this issue and explicitly deferred to #56
+- [x] `MbesWindowOptions` gains `base_link_frame` (plus `level_frame`/`tide_frame`), with verified defaults `bizzy/base_link` / `bizzy/base_link_north_up` / `bizzy/map_tide` sourced from a real BizzyBoat M3 bag's TF tree (path recorded in the plan)
+- [x] Honest degradation: `MbesWindowResult` now carries a full `cube::ProjectionRunTotals` (not just `ProjectionDiagnostics`) so `report_projection_summary`'s missing-attitude/heave counts always print in the load note; `cube_lab.cpp`'s "no beam geometry" skip note reworded to stop misattributing frame-mismatch drops to beam geometry, and points at the load note; one-line doc note added that NaN vessel speed floors the horizontal speed-dependent terms to 0, making horizontal error optimistic
+- [x] New `MbesSounding` fields renamed `vertical_variance`/`horizontal_variance` (not `*_error`); plan states this leads cube_bathymetry#158 rather than following it; the `cube::Sounding::vertical_error`/`horizontal_error` -> renamed-field mapping happens once, inside the new `project_ping()` helper
+- [x] `ProjectionRunTotals` totals-only fields — resolved by the same `MbesWindowResult` change above; `mbes_pass_loader.cpp` accumulates a running `ProjectionRunTotals` across passes instead of summing bare `ProjectionDiagnostics`
+- [x] Non-positive travel time / zero-range sounding at the sonar head — `offline_projector_params()` sets `minimum_range = 0.05 m` (rationale and its limits stated; left as an Open Question whether 5 cm is right for the M3 specifically)
+- [x] `color_vocabulary.hpp`/`test_color_vocabulary.cpp`'s now-false verified-gap text — reworded; states real variances exist on some cloud sources after this issue but the Uncertainty colour channel itself opens in #56, once both cloud sources carry them
+
+### Suggestions folded in
+- [x] `test_tf_lift.cpp` extended to cover the two new fields
+- [x] Decision 1's consumer list corrected/completed: `sidescan_viewer_window.hpp` (4 sites incl. `cube_soundings_`) and `cube_lab.{hpp,cpp}` added
+- [x] `cube_lab.cpp`'s drop gate now reuses `Parameters::influenceRadius`'s own gate (rejects `vertical_variance <= 0`, not just negative) by branching on `influenceRadius`'s NaN result directly, instead of a separate hand-rolled check
+- [x] Plan states `horizontal_variance` is radial/drms and feeds `influenceRadius`, so sounding spread and the surface's look change under the real model
+- [x] `.agents/README.md` gets a new row for `mbes_projection.{hpp,cpp}`
+
+### Correction found during revision (not a review finding, self-caught)
+Revision 1 had the deletion scope backwards for the test suite: it said
+delete `test/test_mbes_geometry.cpp`, but decision 1 (keep
+`project_beam`/`project_detections` alive for the cloud path until #56)
+means that file's subject survives this issue — revision 2 keeps it
+unchanged. Also documented, in Context, that `mbes_pass_loader`'s output
+feeds the region-selection 3D point cloud directly (not only
+`cube_lab::run_cube`), so the operator's "cloud view keeps its placeholder"
+framing needed the qualification that ships in revision 2's Context section
+(data now flows through for that cloud source; only the colour-channel UI
+wiring is deferred).
+
+### Open questions
+- [ ] Vessel speed-over-ground passed as NaN (no offline SOG source wired
+  in) — follow-up issue or accept the floored, optimistic speed-dependent
+  horizontal term?
+- [ ] `minimum_range = 0.05 m` is a plan-time choice, not verified against
+  the M3's near-field spec — revisit if a real bag shows legitimate
+  detections inside 5 cm.
