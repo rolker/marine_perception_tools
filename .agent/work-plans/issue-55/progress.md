@@ -104,3 +104,30 @@ wiring is deferred).
 - [ ] `minimum_range = 0.05 m` is a plan-time choice, not verified against
   the M3's near-field spec — revisit if a real bag shows legitimate
   detections inside 5 cm.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 10:22 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-55/plan.md` at `63164af` (revision 2)
+**PR**: PR-less (`--issue` mode; branch `feature/issue-55`, not pushed)
+**Verdict**: changes-requested
+
+Revision 2 resolves all 8 prior must-fixes and folds in every suggestion;
+each claim it makes about the code was re-verified against source and holds
+(`sidescan_viewer_window.cpp:112,934`; `mbes_pass_loader.cpp:65` passing
+default `MbesWindowOptions`; `ProjectionRunTotals`' counts vs
+`ProjectionDiagnostics`; `color_vocabulary.hpp:65-80`; the CMake
+registrations; the `.agents/README.md` rows). Two structural risks it does
+not yet carry, plus a test gap, are below.
+
+### Findings
+- [ ] (must-fix) No test is planned for the new `mbes_projection.{hpp,cpp}` — the `vertical_error`→`vertical_variance` mapping, `offline_projector_params()`'s `minimum_range`/frame defaults, and the diagnostics passthrough are new production code; CMake gains the `.cpp` but registers no `test_mbes_projection`, and `test_mbes_window_reader.cpp`/`test_mbes_pass_loader.cpp` (whose types and behaviour change) are absent from Files-to-Change and today hold only pure-math/error-path tests — `plan.md:259-287,333`
+- [ ] (must-fix) `minimum_range = 0.05` does not replace the guard it retires: `project_detections` skipped `twtt <= 0` **or** `sound_speed <= 0`, but cube's gate is `range_sq in [min^2, max^2]`, so a NEGATIVE travel time or sound speed yields a mirrored sounding whose squared range passes the gate and reaches the estimator — only the exactly-zero case is caught, so the rationale's "excluding exactly the non-positive-range sentinel case" is inaccurate; filter non-positive twtt/sound speed in `project_ping` as well — `plan.md:137-147`
+- [ ] (must-fix) The real model changes CUBE's influence radius by ~10x and the plan does not say so: `cube::Vessel{}`'s `gps_drms = 2.0` enters `swath_horizontal` as a constant `total_gps_variance = 4.0 m^2` on every sounding (`error_model.cpp:105,395`), so `horizontal_error >= 4 m^2` always and `Parameters::influenceRadius` caps spread at `CONF_99PC*sqrt(h) ~ 5.2 m` against the placeholder's `0.2 + 0.01*depth` -> ~0.5 m; `run_cube`'s spread loop is O(radius^2/cell^2) per sounding, so up to ~100x more node inserts on a run already measured in minutes over ~1M soundings. State the magnitude, decide whether to override `gps_drms` for an RTK boat rather than take the generic-GPS default, and name the 2 m GPS assumption in `offline_projection_caveat()` — it outweighs "lever arms zero" — `plan.md:84-89,154-160,250-258`
+- [ ] (must-fix) Approach item 7 captures `report_projection_summary`'s two streams but appends only the summary line, discarding the `err` stream — which is where the default-beamwidth warning lives, and `kongsberg_em_bridge` leaves `rx_beamwidths` empty on every M3 ping, so that warning fires on 100% of beams in exactly this deployment; append the warnings too — `plan.md:206-217`
+- [ ] (suggestion) `read_mbes_window`'s existing `skipped_pings` (ping dropped for a missing world<-sensor TF, before projection) has no home in `ProjectionRunTotals` and so never reaches the note — surface it alongside the summary so both drop populations are visible — `plan.md:191-205`
+- [ ] (suggestion) Accumulate `beams` from `ProjectionDiagnostics::total` (`ErrorModel::compute` emits exactly one sounding per beam and never skips) rather than a separately-counted "ping's beam count", so the denominator cannot drift from the numerators — `plan.md:197-199`
+- [ ] (suggestion) Make `minimum_range`'s 0.05 a named constant in `mbes_projection.hpp` carrying the rationale, so the open question has one site to revisit — `plan.md:137-147`
+- [ ] (verified, no change) `cube::Sounding::sonar_relative_position` is pure sonar-frame geometry identical to `project_beam`'s formula, so lifting the projector's output with `tf_lift` does not double-apply attitude; `read_mbes_window` fills its TF buffer for the whole window before reading any detections, so the prior review's "END-OF-BAG attitude reported healthy" hazard does not recur on this path (a frame mismatch raises LookupException, counted as `missing_attitude`); and `run_cube` is fed only from `load_cloud_passes`, so no NaN-variance soundings arrive from the untouched cloud path
