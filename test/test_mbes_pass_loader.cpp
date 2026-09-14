@@ -29,6 +29,7 @@ using marine_perception_tools::CloudPassInfo;
 using marine_perception_tools::cube_surface_shares_cloud_frame;
 using marine_perception_tools::append_projection_notes;
 using marine_perception_tools::load_cloud_passes;
+using marine_perception_tools::MbesWindowOptions;
 using marine_perception_tools::offline_projection_caveat;
 
 TEST(MbesPassLoader, EmptyInputYieldsEmptyOutcome)
@@ -173,15 +174,93 @@ TEST(ProjectionNotes, DoNotReportPerSoundingGeoreferencing)
   EXPECT_FALSE(all.contains("earth transform")) << all.toStdString();
 }
 
-// A load that projected nothing says nothing: a summary of zeros reads as a
-// result, and the passes that failed have already left their own notes.
-TEST(ProjectionNotes, AreSilentWhenNothingWasProjected)
+// A load that projected nothing AND dropped nothing says nothing: a summary of
+// zeros reads as a result, and the passes that failed have already left their
+// own notes.
+TEST(ProjectionNotes, AreSilentWhenNothingWasProjectedAndNothingDropped)
 {
   QStringList notes;
   cube::ProjectionRunTotals empty;
   empty.reports_georeferencing = false;
   append_projection_notes(notes, empty, 0, 0, 0);
   EXPECT_TRUE(notes.isEmpty());
+}
+
+// ...but "projected nothing" is not "nothing happened". A bag whose every ping
+// carries an unusable sound speed never reaches the projector, so `pings` is
+// zero while the drop counters are not — and the note that accounts for those
+// pings is the ONLY thing that can tell the operator where his data went.
+TEST(ProjectionNotes, AccountForDropsEvenWhenNoPingWasProjected)
+{
+  QStringList notes;
+  cube::ProjectionRunTotals empty;
+  empty.reports_georeferencing = false;
+  append_projection_notes(notes, empty, 2, 40, 0);
+  const QString all = notes.join("\n");
+  ASSERT_FALSE(notes.isEmpty());
+  EXPECT_TRUE(all.contains("40 ping(s) with an unusable sound speed"))
+    << all.toStdString();
+  EXPECT_TRUE(all.contains("2 ping(s) with no world TF")) << all.toStdString();
+  // No summary of zeros alongside it.
+  EXPECT_FALSE(all.contains("Offline projection: 0 pings")) << all.toStdString();
+}
+
+// A missing-attitude ping is the quiet failure this whole note exists for: the
+// position still resolves, so its soundings load, draw and colour like any
+// others — and then run_cube drops every one for a NaN uncertainty. The count
+// alone does not say that; cube emits no warning for it; so the note says it,
+// in the frame names the projection actually used.
+TEST(ProjectionNotes, SayWhatAMissingAttitudeTransformWillCostTheRun)
+{
+  QStringList notes;
+  MbesWindowOptions frames;
+  append_projection_notes(notes, sampleTotals(), 0, 0, 0, frames);
+  const QString all = notes.join("\n");
+  EXPECT_TRUE(all.contains("3 ping(s) had no attitude transform"))
+    << all.toStdString();
+  EXPECT_TRUE(all.contains(QString::fromStdString(frames.level_frame)))
+    << all.toStdString();
+  EXPECT_TRUE(all.contains(QString::fromStdString(frames.base_link_frame)))
+    << all.toStdString();
+  EXPECT_TRUE(all.contains("drop every one of them")) << all.toStdString();
+}
+
+// ...and nothing is said when there were none: an operator who reads a line
+// about dropped pings on a clean load learns to ignore the line.
+TEST(ProjectionNotes, SayNothingAboutAttitudeWhenEveryPingHadIt)
+{
+  QStringList notes;
+  cube::ProjectionRunTotals t = sampleTotals();
+  t.missing_attitude = 0;
+  append_projection_notes(notes, t, 0, 0, 0);
+  EXPECT_FALSE(notes.join("\n").contains("no attitude transform"))
+    << notes.join("\n").toStdString();
+}
+
+// cube's warnings are written for its three command-line tools. One of them
+// tells the reader to check "--*-frame overrides" against a README section;
+// the explorer has no such flags, and an operator sent looking for one finds
+// nothing. The counts in front of the sentence are cube's and stay verbatim;
+// only the instruction is restated, naming the frames this window compiled in.
+TEST(ProjectionNotes, RestateTheCommandLineFrameAdviceForAWindowWithNoFlags)
+{
+  cube::ProjectionRunTotals t;
+  t.reports_georeferencing = false;
+  t.pings = 12;
+  t.beams = 384;
+  t.soundings = 0;          // every sounding lost...
+  t.filtered_range = 384;
+  t.missing_attitude = 12;  // ...to a frame the bag does not carry
+  QStringList notes;
+  MbesWindowOptions frames;
+  append_projection_notes(notes, t, 0, 0, 0, frames);
+  const QString all = notes.join("\n");
+  EXPECT_TRUE(all.contains("projected 0 soundings from 12 pings"))
+    << all.toStdString();
+  EXPECT_FALSE(all.contains("--*-frame")) << all.toStdString();
+  EXPECT_FALSE(all.contains("README")) << all.toStdString();
+  EXPECT_TRUE(all.contains(QString::fromStdString(frames.tide_frame)))
+    << all.toStdString();
 }
 
 // The same, through the loader: every pass here fails to open, so no ping

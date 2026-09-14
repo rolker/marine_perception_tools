@@ -33,6 +33,7 @@
 #include "cube_bathymetry/projection_summary.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "mbes_geometry.hpp"
+#include "mbes_window_reader.hpp"
 
 namespace marine_perception_tools
 {
@@ -106,13 +107,23 @@ inline bool cube_surface_shares_cloud_frame(
 // the dishonest outcome: a frame mismatch makes the error model's variances
 // NaN while leaving the POSITION finite, so the range gate keeps the sounding
 // and the only downstream symptom is run_cube's drop count — which cannot say
-// whether the cause was the frames or the data.
+// whether the cause was the frames or the data. When the summary counts
+// missing-attitude pings, the note therefore spells out what that costs, in
+// the frame names `frames` carries.
 //
-// Writes nothing when `totals.pings` is zero: a load that projected nothing
-// has nothing to report, and a summary of zeros would read as a result.
+// `frames` is the same MbesWindowOptions the passes were read with: the note
+// names the frames the projection actually used, and restates cube's one
+// command-line-shaped warning ("--*-frame overrides") for a window that has
+// no such flags.
+//
+// Writes nothing only when a load projected nothing AND dropped nothing: a
+// summary of zeros would read as a result, but pings refused for an unusable
+// sound speed never reach `totals.pings` at all, and going silent on them
+// would hide the only line that accounts for them.
 void append_projection_notes(
   QStringList & notes, const cube::ProjectionRunTotals & totals,
-  int skipped_pings, int invalid_pings, int invalid_beams);
+  int skipped_pings, int invalid_pings, int invalid_beams,
+  const MbesWindowOptions & frames = {});
 
 // Optional clip region: keep only soundings within `margin_m` horizontally
 // of the geographic point (a contact + margin, #24 desk finding — 6-7 passes
