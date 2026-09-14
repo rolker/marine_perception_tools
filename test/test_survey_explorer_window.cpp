@@ -432,7 +432,7 @@ void writeSyntheticBag(const std::string & uri, SyntheticBagSpec & spec)
     tf2_msgs::msg::TFMessage tfm;
     geometry_msgs::msg::TransformStamped pose;
     pose.header.frame_id = "bizzy/map";
-    pose.child_frame_id = "bizzy/base_link";
+    pose.child_frame_id = "bizzy/base_link_north_up";
     pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
     pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
     pose.transform.translation.x = 0.5 * i;
@@ -446,6 +446,26 @@ void writeSyntheticBag(const std::string & uri, SyntheticBagSpec & spec)
     anchor.transform.translation.y = -4470000.0;
     anchor.transform.translation.z = 4325000.0;
     tfm.transforms.push_back(anchor);
+
+    // The chains cube::DetectionsProjector needs (#55): attitude
+    // (base_link_north_up <- base_link) and heave (map_tide <- base_link).
+    // Without them the error model has no roll/pitch, every sounding's
+    // uncertainty comes out NaN, and run_cube drops the lot — so a bag that
+    // omits them is not a simpler bag, it is one this path cannot estimate
+    // from. The shape mirrors the real recording: base_link hangs off the
+    // level frame, and the tide frame off the map.
+    geometry_msgs::msg::TransformStamped level = pose;
+    level.header.frame_id = "bizzy/base_link_north_up";
+    level.child_frame_id = "bizzy/base_link";
+    level.transform.translation.x = 0.0;
+    level.transform.translation.y = 0.0;
+    level.transform.translation.z = 0.0;
+    tfm.transforms.push_back(level);
+
+    geometry_msgs::msg::TransformStamped tide = level;
+    tide.header.frame_id = "bizzy/map";
+    tide.child_frame_id = "bizzy/map_tide";
+    tfm.transforms.push_back(tide);
 
     writer.write(tfm, "/tf", rclcpp::Time(t));
   }
@@ -1184,7 +1204,7 @@ void writeLightBag(const std::string & uri, std::int64_t t0_ns, std::int64_t t1_
     tf2_msgs::msg::TFMessage tfm;
     geometry_msgs::msg::TransformStamped pose;
     pose.header.frame_id = "bizzy/map";
-    pose.child_frame_id = "bizzy/base_link";
+    pose.child_frame_id = "bizzy/base_link_north_up";
     pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
     pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
     pose.transform.translation.x = 0.1 * i;   // ~20 m of line, well inside a region
@@ -1198,6 +1218,27 @@ void writeLightBag(const std::string & uri, std::int64_t t0_ns, std::int64_t t1_
     anchor.transform.translation.y = ay;
     anchor.transform.translation.z = az;
     tfm.transforms.push_back(anchor);
+
+    // The chains cube::DetectionsProjector needs (#55): attitude
+    // (base_link_north_up <- base_link) and heave (map_tide <- base_link).
+    // Without them the error model has no roll/pitch, every sounding's
+    // uncertainty comes out NaN, and run_cube drops the lot — so a bag that
+    // omits them is not a simpler bag, it is one this path cannot estimate
+    // from. The shape mirrors the real recording: base_link hangs off the
+    // level frame, and the tide frame off the map.
+    geometry_msgs::msg::TransformStamped level = pose;
+    level.header.frame_id = "bizzy/base_link_north_up";
+    level.child_frame_id = "bizzy/base_link";
+    level.transform.translation.x = 0.0;
+    level.transform.translation.y = 0.0;
+    level.transform.translation.z = 0.0;
+    tfm.transforms.push_back(level);
+
+    geometry_msgs::msg::TransformStamped tide = level;
+    tide.header.frame_id = "bizzy/map";
+    tide.child_frame_id = "bizzy/map_tide";
+    tfm.transforms.push_back(tide);
+
     writer.write(tfm, "/tf", rclcpp::Time(t));
   }
 
@@ -1949,7 +1990,7 @@ void writeSidescanBag(const std::string & uri, std::int64_t t0_ns, std::int64_t 
     tf2_msgs::msg::TFMessage tfm;
     geometry_msgs::msg::TransformStamped pose;
     pose.header.frame_id = "bizzy/map";
-    pose.child_frame_id = "bizzy/base_link";
+    pose.child_frame_id = "bizzy/base_link_north_up";
     pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
     pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
     pose.transform.translation.x = 0.2 * i;   // ~24 m of line
@@ -1963,6 +2004,27 @@ void writeSidescanBag(const std::string & uri, std::int64_t t0_ns, std::int64_t 
     anchor.transform.translation.y = ay;
     anchor.transform.translation.z = az;
     tfm.transforms.push_back(anchor);
+
+    // The chains cube::DetectionsProjector needs (#55): attitude
+    // (base_link_north_up <- base_link) and heave (map_tide <- base_link).
+    // Without them the error model has no roll/pitch, every sounding's
+    // uncertainty comes out NaN, and run_cube drops the lot — so a bag that
+    // omits them is not a simpler bag, it is one this path cannot estimate
+    // from. The shape mirrors the real recording: base_link hangs off the
+    // level frame, and the tide frame off the map.
+    geometry_msgs::msg::TransformStamped level = pose;
+    level.header.frame_id = "bizzy/base_link_north_up";
+    level.child_frame_id = "bizzy/base_link";
+    level.transform.translation.x = 0.0;
+    level.transform.translation.y = 0.0;
+    level.transform.translation.z = 0.0;
+    tfm.transforms.push_back(level);
+
+    geometry_msgs::msg::TransformStamped tide = level;
+    tide.header.frame_id = "bizzy/map";
+    tide.child_frame_id = "bizzy/map_tide";
+    tfm.transforms.push_back(tide);
+
     writer.write(tfm, "/tf", rclcpp::Time(t));
   }
 
