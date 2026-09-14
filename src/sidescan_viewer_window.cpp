@@ -731,9 +731,9 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "params…, and the run uses whatever those are. Editing either one moves "
     "this to custom. S-44 order 1a and 1b share one budget (they differ in "
     "the seafloor-search requirement, which CUBE does not model), so they are "
-    "one entry here. NOTE: the budget is compared against a PLACEHOLDER "
-    "per-sounding error — angle-aware since mpt#49, but still a stand-in; "
-    "see params….");
+    "one entry here. The budget is compared against each sounding's REAL "
+    "cube::ErrorModel uncertainty (mpt#55) — computed on library-default "
+    "vessel and device settings, which params… spells out.");
   cube_run_btn_ = new QPushButton("Run CUBE", this);
   cube_run_btn_->setObjectName("cube_run_btn");
   cube_run_btn_->setEnabled(false);   // until a region has been drawn

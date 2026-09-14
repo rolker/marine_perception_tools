@@ -251,39 +251,58 @@ CUBE surface: **Depth**, **Uncertainty**, **Backscatter**, **Pass** and
 loading a multi-pass region defaults to it, but you can leave it for a scalar
 ramp and come back; it is not a mode that takes the selector away. An entry a
 layer cannot carry stays in the list, greyed, with the reason on the entry
-rather than silently missing: the points offer no **Uncertainty** (a sounding
-carries none — the per-beam errors CUBE consumes are a placeholder computed
-inside the estimator, and uncertainty is a property of the surface) and no
+rather than silently missing: the points offer no **Uncertainty** (not every
+cloud carries one yet — soundings loaded for the CUBE lab now carry real
+error-model variances, the scrub window's own cloud does not, and a channel
+that measured different things on different clouds would be worse than none;
+it opens when mpt#56 swaps the second path over) and no
 **Sidescan** (that is a drape painted onto CUBE nodes by marching the terrain),
 and the surface offers no **Pass** (a node merges every pass that touched it).
 
 ### Per-sounding uncertainty in the lab
 
-CUBE weights every sounding by its own uncertainty, and the lab has to supply
-one: the real `cube::ErrorModel` needs the raw detections, the platform
-attitude and the vessel offsets, none of which the explorer's cloud path
-carries. The stand-in is **angle-aware** (#49). For a beam at angle *t* from
-nadir at slant range *R*, with a range error σ_R and an angular error σ_θ:
+CUBE weights every sounding by its own uncertainty, and the lab supplies a real
+one (#55): soundings loaded for the CUBE lab are projected through
+`cube::DetectionsProjector` and `cube::ErrorModel` — the same code the boat
+runs live and the same code `import_bag`, `batch_regen_bag` and
+`bag_to_geotiff` run offline — so each sounding arrives with the vertical and
+horizontal variances the error model computed from the ping, the platform
+attitude and the heave. The angle-aware placeholder that used to stand in for
+them is gone. This path is the CUBE lab's multi-pass selection load only; the
+scrub window's own cloud still uses the simpler one-sound-speed projection and
+leaves both variances unset, which is why the **Uncertainty** point channel
+stays greyed until mpt#56.
 
-    σ_z² = (σ_R·cos t)² + (R·σ_θ·sin t)²
-    σ_y² = (σ_R·sin t)² + (R·σ_θ·cos t)²
+The error model needs a survey configuration the bag does not carry, so the
+lab runs the **library defaults** — and says so, in one caveat shown both in
+*params…* and in the load note. In order of consequence:
 
-σ_R is 0.5% of the slant range and σ_θ is a 2° beamwidth over twelve — both
-taken from `cube::Device`'s own documented defaults, and the beamwidth-to-σ
-divisor is the one `cube::ErrorModel` already uses, so the codebase turns a
-beamwidth into a σ exactly one way. Each component is floored at 0.05 m so no
-beam claims zero error. The effect over one depth is that a 60° beam carries
-about twice the variance of a nadir beam, so where two passes overlap the
-estimator prefers the clean near-nadir data — which is the point: an outer beam
-used to be trusted exactly as much as a nadir one. A sounding that arrives
-without beam geometry is skipped rather than given an invented error, and the
-run's note says how many were.
+1. A generic **2 m GPS drms** is assumed for every sounding, so no sounding's
+   horizontal variance falls below 4 m². This is not a lab shortcut: the live
+   projector and all three offline `cube_bathymetry` tools run the same
+   default, so the lab agrees with the store instead of inventing a tighter
+   number. It does **not** smear the surface — `Parameters::influenceRadius`
+   subtracts the 99% horizontal term from the depth-budget term and floors
+   what is left at the cell size, so at the cell sizes the lab runs each
+   sounding still influences one cell; the ~5.15 m radius that 4 m² allows is
+   a ceiling, reached only at coarse cells under a loose vertical budget.
+2. Lever arms are zero and the device is generic, so the M3's across-track
+   beamwidth falls back to the device default — and since
+   `kongsberg_em_bridge` currently reports no per-beam beamwidths
+   (marine_tools#85), that fallback applies to every beam. The load note
+   carries the library's own warning line, with the count.
+3. Speed over ground is unavailable offline and passed as NaN, which the error
+   model floors to zero. The speed-dependent latency terms drop out, so the
+   horizontal error is **optimistic** for a moving vessel.
 
-This is still a **placeholder** (mpt#27 follow-up), and it does **not** correct
-the refraction smile: that is a *systematic* error, which no uncertainty model
-removes — see #28. Compared at a fixed *slant range* rather than a fixed depth,
-σ_z falls with angle, because an outer beam at the same range is over shallower
-water; the model's claim is about beams over the same seabed.
+The general fix — a survey-configuration record the live node publishes and
+every offline tool reads — is unh_marine_autonomy#385.
+
+None of this corrects the refraction smile: that is a *systematic* error,
+which no uncertainty model removes — see #28. A sounding the error model
+cannot give a usable uncertainty (a missing attitude or heave transform will
+do it) is skipped rather than given an invented one, and the run's note says
+how many were, pointing at the load note where the causes are counted.
 
 A **Run CUBE** *adds* its surface over the soundings already loaded instead of
 replacing them: after a run you are still looking at your selection, now with a

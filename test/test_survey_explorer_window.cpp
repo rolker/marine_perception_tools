@@ -1178,6 +1178,26 @@ TEST_F(ExplorerWindowFixture, CubeOrderPresetsSeedTheUncertaintyBudget)
   EXPECT_FLOAT_EQ(window.cubeTuning().iho_percent, held_percent);
 }
 
+// The order dropdown's tooltip described the budget as being compared against
+// a PLACEHOLDER per-sounding error. That placeholder was deleted in #55 — the
+// budget now meets a real cube::ErrorModel variance — and an operator choosing
+// an IHO order off a tooltip that calls the other side of the comparison a
+// stand-in would discount a number that is no longer one.
+TEST_F(ExplorerWindowFixture, TheOrderTooltipDoesNotStillCallTheErrorAPlaceholder)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  auto * combo = window.findChild<QComboBox *>("cube_order_combo");
+  ASSERT_NE(combo, nullptr);
+  const QString tip = combo->toolTip();
+  EXPECT_FALSE(tip.contains("PLACEHOLDER")) << tip.toStdString();
+  EXPECT_FALSE(tip.contains("stand-in")) << tip.toStdString();
+  EXPECT_TRUE(tip.contains("cube::ErrorModel")) << tip.toStdString();
+}
+
 // --- a CUBE run adds a surface over the selection cloud (#36) ---------------
 
 // A light synthetic recording centred on the fixture position: enough beams
