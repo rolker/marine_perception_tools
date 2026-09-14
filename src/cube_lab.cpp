@@ -192,13 +192,14 @@ CubeSurface run_cube(
   const CubeTuning & tuning,
   const std::shared_ptr<std::atomic<bool>> & cancel)
 {
-  // Wall time for the whole run, reported in the note (#55). The real error
-  // model's horizontal variance carries a generic 2 m GPS drms, which floors
-  // the influence radius near 5 m against the retired placeholder's ~0.5 m,
-  // and the spread loop below is O(radius^2 / cell^2) per sounding. That cost
-  // is a prediction until somebody measures it on a real pass, so the run
-  // reports its own elapsed time rather than leaving the operator to guess
-  // whether the lab got slower.
+  // Wall time for the whole run, reported in the note (#55). Swapping the
+  // placeholder for the real error model changes every sounding's
+  // influence radius (see the cube_lab.hpp note: influenceRadius nets the
+  // horizontal term against the depth budget, so at these cell sizes it stays
+  // one cell — the swap is not expected to cost anything), and the spread
+  // loop below is O(radius^2 / cell^2) per sounding. "Not expected to" is a
+  // prediction, so the run reports its own elapsed time: a regression shows
+  // up as a number rather than leaving the operator to guess.
   const auto run_started = std::chrono::steady_clock::now();
   const auto stop = [&cancel]() {
       return cancel && cancel->load(std::memory_order_relaxed);

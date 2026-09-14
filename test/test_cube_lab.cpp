@@ -158,10 +158,13 @@ TEST(RunCube, SoundingsThatNeverReachedTheProjectorAreSkipped)
   }
 }
 
-// The run reports its own wall time (#55): the real error model's 2 m generic
-// GPS drms floors the influence radius near 5 m against the placeholder's
-// ~0.5 m, and the spread loop is quadratic in that radius, so the cost of the
-// swap has to be measurable from the lab itself rather than predicted.
+// The run reports its own wall time (#55): the spread loop is quadratic in
+// each sounding's influence radius, and the real error model changes the
+// variances that radius is computed from, so the cost of the swap has to be
+// measurable from the lab itself rather than predicted. (The prediction is
+// that it costs nothing — influenceRadius nets the horizontal term against
+// the depth budget and floors at the cell size, so at these cell sizes the
+// radius is one cell either way.)
 TEST(RunCube, ReportsItsOwnWallTime)
 {
   const auto surface = run_cube(flatPatch(), 0.5);

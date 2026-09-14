@@ -132,15 +132,25 @@ Plan Review's must-fixes):
    namespaced, and the attitude lookup (`level_frame <- base_link_frame`)
    could never resolve to the real boat.
 7. **Library-default vessel/device is what production already runs — say so,
-   measure the cost, do not override** (must-fix: the real model changes the
-   influence radius ~10×; operator decision 2026-09-14). `cube::Vessel{}`'s
-   `gps_drms = 2.0` enters `swath_horizontal` as a constant
-   `total_gps_variance = 4.0 m²` on every sounding (`error_model.cpp:105,395`),
-   so `horizontal_error >= 4 m²` always and `Parameters::influenceRadius`
-   caps spread at `CONF_99PC·sqrt(h) ≈ 5.2 m`, against the placeholder's
-   `0.2 + 0.01·depth ≈ 0.5 m`. `run_cube`'s spread loop is
-   O(radius²/cell²) per sounding, so up to ~100× more node inserts on a run
-   already measured in minutes over ~1M soundings.
+   measure the cost, do not override** (must-fix; operator decision
+   2026-09-14). `cube::Vessel{}`'s `gps_drms = 2.0` enters `swath_horizontal`
+   as a constant `total_gps_variance = 4.0 m²` on every sounding
+   (`error_model.cpp:105,395`), so `horizontal_error >= 4 m²` always.
+
+   **Corrected 2026-09-14 (Local Review round 1), and the correction matters**:
+   revision 2 of this plan read that floor as a ~5 m influence radius and a
+   ~100× spread cost. It is neither. `Parameters::influenceRadius`
+   (`parameters.cpp:72-110`) computes
+   `distance_scale·(ratio-1)^(1/distance_exponent) − max_radius` with
+   `max_radius = CONF_99PC·sqrt(horizontal_error)`, then caps at `max_radius`
+   and **floors at `distance_scale` (the cell size), last and winning**. The
+   horizontal term is SUBTRACTED, so the 4 m² floor makes a sounding spread
+   LESS, not more; `max_radius ≈ 5.15 m` is a CEILING, reachable only at
+   coarse cells under a vertical budget loose enough for the depth-budget term
+   to outrun it. At the cell sizes this lab runs (≤ 1 m) the radius is the
+   cell size — the same as under the retired placeholder — so the spread loop
+   does the same work and there is no ~100× slowdown to size. What the real
+   model changes is the WEIGHT each sounding carries, not its reach.
 
    Verified 2026-09-14: this is not a lab-only artefact. The live projector
    (`detections_to_pointcloud.cpp:128-137`) sets exactly three `Vessel`/
@@ -156,11 +166,12 @@ Plan Review's must-fixes):
    (with [cube_bathymetry#145](https://github.com/rolker/cube_bathymetry/issues/145)
    as its consumer half). Consequences in this plan:
    - `offline_projection_caveat()` names the **2 m generic-GPS assumption
-     first**, before lever arms and the device fallback, and says the
-     influence radius is therefore ~5 m (Approach item 1).
+     first**, before lever arms and the device fallback, and states its real
+     consequence: a 4 m² floor under every horizontal variance, which is a
+     ceiling on the influence radius rather than a smear (Approach item 1).
    - Approach item 12 adds a **runtime measurement** on a real pass so the
-     cost is a number in the PR, not a prediction; a performance follow-up
-     is filed only if that number hurts.
+     no-regression expectation is a number in the PR, not a prediction; a
+     performance follow-up is filed only if that number hurts.
 
 ## Approach
 
@@ -224,7 +235,9 @@ Plan Review's must-fixes):
    - `offline_projection_caveat()`: the one line of operator-facing text
      stating the library-defaults condition in order of consequence
      (decision 7 first: a generic 2 m GPS assumption on every sounding, so
-     the influence radius is ~5 m and the same as the live store's; then
+     the horizontal variance carries a 4 m² floor, the same one the live
+     store's soundings carry, and that this bounds rather than inflates the
+     influence radius; then
      decision 4: lever arms zero, generic device, M3 beamwidth = device
      fallback) **and** the NaN-speed consequence (decision 5: horizontal
      error is optimistic because the speed-dependent latency terms are
@@ -420,9 +433,12 @@ Plan Review's must-fixes):
     which is a one-line `std::chrono` addition and stays in). Record wall
     time, sounding count and node-insert count (if `run_cube` exposes one;
     otherwise wall time and soundings) in `progress.md`'s Implementation
-    entry and the PR body. A performance
-    follow-up is filed only if the measured slowdown makes the lab
-    unusable, with the number in it — not on the ~100× prediction alone.
+    entry and the PR body. **Why it is still owed after the decision-7
+    correction**: the measurement was originally sized to a ~100× slowdown
+    that does not exist. It stays because the expectation is now "no
+    regression", and an unmeasured expectation of no regression is still just
+    an expectation — the cheap confirmation is one before/after run. A
+    performance follow-up is filed only if the measured number hurts.
 
     **As built (2026-09-14)**: the wall-time line is in — `run_cube`'s note
     now reads "N of M nodes estimated in T.TT s", from a `std::chrono`

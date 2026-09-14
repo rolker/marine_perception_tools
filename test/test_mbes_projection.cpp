@@ -143,9 +143,10 @@ TEST(OfflineProjectorParams, RunsOnLibraryDefaultVesselAndDevice)
 }
 
 // The caveat is one string shared by the CUBE-tuning dialog and the load note.
-// Its ORDER is the point (decision 7): the 2 m GPS assumption is what changes
-// the influence radius, so it is stated first, then the generic device, then
-// the optimistic-horizontal consequence of the missing speed.
+// Its ORDER is the point (decision 7): the 2 m GPS assumption is the one that
+// sets a floor under every sounding's horizontal variance, so it is stated
+// first, then the generic device, then the optimistic-horizontal consequence
+// of the missing speed.
 TEST(OfflineProjectionCaveat, NamesTheGpsAssumptionFirstAndTheSpeedConsequence)
 {
   const std::string caveat = offline_projection_caveat();
@@ -159,6 +160,24 @@ TEST(OfflineProjectionCaveat, NamesTheGpsAssumptionFirstAndTheSpeedConsequence)
   EXPECT_LT(gps, speed) << caveat;
   EXPECT_NE(caveat.find("OPTIMISTIC"), std::string::npos) << caveat;
   EXPECT_NE(caveat.find("unh_marine_autonomy#385"), std::string::npos) << caveat;
+}
+
+// The 4 m² horizontal floor is real; the smeared surface it was once said to
+// cause is not. Parameters::influenceRadius subtracts the 99% horizontal term
+// from the depth-budget term and floors the result at the cell size, so at the
+// cell sizes the lab runs the radius is one cell and ~5.15 m is only a
+// ceiling. An operator who reads the caveat must not come away expecting a
+// 5 m smear, so the text is pinned both ways: the ceiling is named as a
+// ceiling, and the old claim that CUBE "spreads each sounding over an
+// influence radius of about 5 m" may not come back.
+TEST(OfflineProjectionCaveat, CallsTheHorizontalFloorACeilingNotASmear)
+{
+  const std::string caveat = offline_projection_caveat();
+  EXPECT_NE(caveat.find("4 m²"), std::string::npos) << caveat;
+  EXPECT_NE(caveat.find("CEILING"), std::string::npos) << caveat;
+  EXPECT_NE(caveat.find("one cell"), std::string::npos) << caveat;
+  EXPECT_EQ(caveat.find("influence radius of about 5 m"), std::string::npos)
+    << caveat;
 }
 
 // --- project_ping -----------------------------------------------------------

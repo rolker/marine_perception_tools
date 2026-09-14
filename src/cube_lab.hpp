@@ -182,10 +182,18 @@ std::string derive_box_curve(
 //     and the horizontal error is OPTIMISTIC for a moving vessel.
 //
 // horizontal_variance is RADIAL (drms-derived) and feeds
-// Parameters::influenceRadius directly, so it sets how far each sounding
-// spreads: under the real model a sounding reaches roughly ten times further
-// than under the retired placeholder, and the surface's visual character
-// changes with it. A sounding whose uncertainty CUBE's own influenceRadius
+// Parameters::influenceRadius directly. Read that function before predicting
+// what it does to the surface: it SUBTRACTS the 99% horizontal term
+// (CONF_99PC*sqrt(horizontal_variance), >= ~5.15 m under the library's 2 m
+// GPS drms) from the depth-budget term, caps what is left at that same
+// horizontal term, and floors it at the cell size — the floor applied last
+// and winning. So a bigger horizontal variance makes a sounding spread LESS,
+// not more, and at the cell sizes this lab runs the radius is simply one
+// cell, as it was under the retired placeholder. ~5.15 m is a ceiling,
+// reached only at coarse cells under a vertical budget loose enough for the
+// depth-budget term to outrun it. What the real model changes is the WEIGHT
+// each sounding carries into the hypotheses, not how far it reaches.
+// A sounding whose uncertainty CUBE's own influenceRadius
 // refuses — non-finite depth, non-positive vertical variance, negative
 // horizontal variance — is skipped rather than given a fabricated error, and
 // the note says how many were. It does NOT model refraction, which is
