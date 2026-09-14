@@ -403,3 +403,28 @@ with a plain `TMPDIR` is green. Nothing in the package changed to cause it.
 - [x] (suggestion) stale "#49 placeholder" comment in `test_survey_explorer_window.cpp` rewritten — `8702f66`
 - [x] (suggestion) labelled two-times CUBE sentence left as is (already distinguishable)
 - [x] (out of scope, fixed) `discoverBasemapLayers` `is_directory()` without `error_code` threw the window down on one bad symlink under `--stores` (= mpt#57); fixed with a test in `c81505c` because it blocked the suite in this environment — the PR should say whether it closes #57
+
+## Integrated Review
+
+**Status**: complete
+**When**: 2026-09-14 13:56 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**PR**: #58 at 468d432
+**Sources**: Copilot review 2026-09-14T17:43Z (4 inline + 2 suppressed) + Local Review (Pre-Push) rounds 1-2
+
+### Findings
+
+- [x] **1. Heave misattributed as a cause of NaN uncertainty** — VALID, confirmed against `cube_bathymetry/src/detections_projector.cpp`: a failed attitude lookup sets `platform.roll`/`platform.pitch` to NaN and counts `missing_attitude`; a failed heave lookup sets `platform.heave = 0.0f` and counts `missing_heave`, and the sounding survives with finite variances. Three sites conflated them — `README.md`'s "a missing attitude or heave transform will do it", and `src/cube_lab.cpp`'s skip-note comment plus the operator-facing text "see load notes for missing-attitude/heave counts", which sent the operator to a count that cannot explain his drop. Fixed in 16b7109: the skip note now reads "see the load notes' missing-attitude count", the README states which of the two costs a sounding and why the heave count is still printed (a 100% missing-heave load means the tide frame is wrong), and the comments say so. The explicit missing-attitude note in `src/mbes_pass_loader.cpp` and its header doc were checked and are correct as written — attitude only, no heave phrasing beside them. `test/test_mbes_pass_loader.cpp` gains `AMissingHeaveIsCountedButNotReportedAsCostingSoundings`, which pins that missing heave with no missing attitude is counted without the "drop every one of them" claim.
+- [x] **2. The #57 symlink fix had no regression test** — VALID. c81505c changed `discoverBasemapLayers` to the `error_code` overload of `is_directory` but added only the status-tooltip assertion to `test/test_survey_explorer_window.cpp`; the filesystem fix itself was pinned by nothing, having been found by 22 unrelated window tests failing against a recursive symlink that happened to be sitting in the shared temp dir. Fixed in f218aa0 by extending that file (not duplicating it): `ABrokenSymlinkBesideTheIndexCostsOneEntryNotTheWindow` builds a scan root holding a dangling symlink (ENOENT), a self-referential symlink (ELOOP) and an ordinary tile-holding layer, then asserts `openSurveyIndex` completes (`ASSERT_NO_THROW` — the throw came from inside the open) and the layer is still offered. Both symlinks were observed taking the skip branch when the test was run directly, so it exercises the path rather than walking past it. The basemap layer combo gains the `objectName` every other test-reached widget in this window already carries.
+- [x] **3. The skipped entry was not logged** — VALID: the fix traded a crash for silence, leaving "the layer isn't in the list" as the only symptom of a store the operator expected. Fixed in f218aa0 — `qWarning()` (this file's existing convention, used by the coastline loader immediately above) naming `e.path()` and `entry_ec.message()`, guarded on `entry_ec` being set so an ordinary non-directory still says nothing.
+- [x] **4. No end-to-end missing-attitude coverage** — VALID. The three pieces of the honest-degradation story (projector NaNs roll/pitch, load note says what that costs, `run_cube` refuses the sounding) were each pinned in isolation and nothing drove a bag through all three, which is exactly the failure an operator meets as "my selection produced no surface". Fixed in 468d432: `writeLightBag` (the fixture writer given the full chain in 65bd251) gains a `with_attitude_chain` flag rather than a fourth copy — false publishes the same recording with `base_link` hanging straight off the map and no level frame, so the world <- sensor lookup still resolves while `level_frame <- base_link_frame` cannot; heave stays published so missing attitude is the only difference. `ABagWithNoAttitudeChainLoadsSoundingsThatTheRunThenDrops` drives `read_mbes_window` -> `load_cloud_passes` -> `run_cube` and asserts positions finite, both variances NaN, `missing_attitude == diagnostics.pings` (the frame tree, not a few unlucky stamps), `missing_heave == 0`, `skipped_pings == 0`, the load note carrying both frame names and the "drop every one of them" claim, and the run estimating 0 nodes with every sounding named in its skip note and every depth NaN.
+
+### Verification
+
+- `ui_ws/build.sh marine_perception_tools` — warning-clean.
+- `ui_ws/test.sh marine_perception_tools` — **807 tests, 0 errors, 0 failures, 97 skipped** (804 before; +3 new tests). `cpplint`, `uncrustify`, `cppcheck` and `copyright` all report `failures="0"`.
+- The window tests were run with `TMPDIR` pointed at a fresh session scratchpad directory; the "Too many levels of symbolic links" failures seen earlier came from a stale sandbox dir under `/tmp`, not from the code.
+
+### Not done
+
+- Nothing outstanding from this review. No push (per instruction); the three commits sit on `feature/issue-55` at 468d432.
