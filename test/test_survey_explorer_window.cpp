@@ -399,7 +399,15 @@ struct SyntheticBagSpec
   std::int64_t t0_ns = 1700000000000000000LL;
   std::int64_t t1_ns = 0;      // filled in by writeSyntheticBag
   int tf_messages = 12000;     // dynamic /tf samples across the window
-  int pings = 4000;            // detection pings across the window
+  // Halved from 4000 with #55. The load now runs cube::DetectionsProjector
+  // and the full error model over every beam instead of a one-sound-speed
+  // re-derivation, and at 4000 pings x 512 beams the baseline load in
+  // ClosingDuringACloudLoadReturnsPromptly measured ~4.7 s against
+  // process_until's 5 s ceiling — passing alone, failing under a parallel
+  // test run. 2000 keeps that test's job comfortably long (its own
+  // baseline_ms > 300 ms guard fails loudly if it ever stops being) while
+  // leaving the margin the bound needs to mean what it says.
+  int pings = 2000;            // detection pings across the window
   int beams = 512;             // beams per ping
 };
 
