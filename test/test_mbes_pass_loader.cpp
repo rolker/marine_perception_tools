@@ -20,13 +20,16 @@
 #include <vector>
 
 #include "mbes_pass_loader.hpp"
+#include "mbes_projection.hpp"
 
 namespace
 {
 
 using marine_perception_tools::CloudPassInfo;
 using marine_perception_tools::cube_surface_shares_cloud_frame;
+using marine_perception_tools::append_projection_notes;
 using marine_perception_tools::load_cloud_passes;
+using marine_perception_tools::offline_projection_caveat;
 
 TEST(MbesPassLoader, EmptyInputYieldsEmptyOutcome)
 {
@@ -103,6 +106,95 @@ TEST(MbesPassLoader, UnsetCancelTokenLoadsNormally)
   ASSERT_EQ(out.pass_clouds.size(), 2u);
   EXPECT_EQ(out.skipped_passes, 2);
   ASSERT_EQ(out.notes.size(), 2);
+  EXPECT_TRUE(out.notes[0].contains("bag read failed"));
+}
+
+// --- the load's projection note (#55) ---------------------------------------
+
+// Totals shaped like a real M3 load: every beam on the default beamwidth
+// (kongsberg_em_bridge reports no per-beam beamwidths), a few range-filtered,
+// a few pings with no attitude.
+cube::ProjectionRunTotals sampleTotals()
+{
+  cube::ProjectionRunTotals t;
+  t.reports_georeferencing = false;
+  t.pings = 120;
+  t.beams = 3840;
+  t.soundings = 3800;
+  t.filtered_range = 40;
+  t.missing_attitude = 3;
+  t.missing_heave = 2;
+  t.default_beamwidth_beams = 3840;
+  t.missing_rx_angle_beams = 12;
+  return t;
+}
+
+// One note per load, carrying all four parts: cube's own summary line, the
+// warning lines it writes to the error stream, the drop populations that
+// summary has no field for, and the offline-defaults caveat.
+TEST(ProjectionNotes, CarryTheSummaryTheWarningsTheDropsAndTheCaveat)
+{
+  QStringList notes;
+  append_projection_notes(notes, sampleTotals(), 5, 1, 7);
+  const QString all = notes.join("\n");
+
+  EXPECT_TRUE(all.contains("Offline projection: 120 pings")) << all.toStdString();
+  EXPECT_TRUE(all.contains("3800 soundings")) << all.toStdString();
+  // The counts that make a frame mismatch visible even when soundings survive.
+  EXPECT_TRUE(all.contains("3 missing attitude")) << all.toStdString();
+  EXPECT_TRUE(all.contains("2 missing heave")) << all.toStdString();
+  // THE WARNING THIS DEPLOYMENT ALWAYS PRODUCES: every M3 beam falls back to
+  // the generic device beamwidth. It lives on the error stream, so dropping
+  // that stream would hide it entirely.
+  EXPECT_TRUE(all.contains("WARNING")) << all.toStdString();
+  EXPECT_TRUE(all.contains("generic device across-track beamwidth"))
+    << all.toStdString();
+  EXPECT_TRUE(all.contains("no usable receive angle")) << all.toStdString();
+  // Every other way a sounding can vanish, in the same note.
+  EXPECT_TRUE(all.contains("5 ping(s) with no world TF")) << all.toStdString();
+  EXPECT_TRUE(all.contains("1 ping(s) with an unusable sound speed"))
+    << all.toStdString();
+  EXPECT_TRUE(all.contains("7 sounding(s) with an unusable slant range"))
+    << all.toStdString();
+  // And the caveat, ONCE — the same string the CUBE-tuning dialog shows.
+  EXPECT_EQ(notes.filter(QString::fromUtf8(offline_projection_caveat())).size(), 1);
+}
+
+// The summary must not claim a georeferencing pass this path does not do: its
+// earth-anchor reprojection relates one bag's world frame to another's, which
+// is a different thing. Left true, the note would report "0 georeferenced into
+// the grid" and warn about a localization chain that was never in question.
+TEST(ProjectionNotes, DoNotReportPerSoundingGeoreferencing)
+{
+  QStringList notes;
+  append_projection_notes(notes, sampleTotals(), 0, 0, 0);
+  const QString all = notes.join("\n");
+  EXPECT_FALSE(all.contains("georeferenced into the grid")) << all.toStdString();
+  EXPECT_FALSE(all.contains("earth transform")) << all.toStdString();
+}
+
+// A load that projected nothing says nothing: a summary of zeros reads as a
+// result, and the passes that failed have already left their own notes.
+TEST(ProjectionNotes, AreSilentWhenNothingWasProjected)
+{
+  QStringList notes;
+  cube::ProjectionRunTotals empty;
+  empty.reports_georeferencing = false;
+  append_projection_notes(notes, empty, 0, 0, 0);
+  EXPECT_TRUE(notes.isEmpty());
+}
+
+// The same, through the loader: every pass here fails to open, so no ping
+// reaches the projector and the outcome carries only the per-pass failures.
+TEST(ProjectionNotes, AreAbsentFromALoadThatOpenedNoBag)
+{
+  CloudPassInfo pass;
+  pass.bag_path = "/nonexistent/bag_dir";
+  pass.label = "2026-06-15 15:10:00  (bag_a)";
+  pass.t_start_ns = 1000;
+  pass.t_end_ns = 2000;
+  const auto out = load_cloud_passes({pass});
+  ASSERT_EQ(out.notes.size(), 1);
   EXPECT_TRUE(out.notes[0].contains("bag read failed"));
 }
 

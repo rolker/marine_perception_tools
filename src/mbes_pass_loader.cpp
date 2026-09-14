@@ -20,13 +20,58 @@
 #include <atomic>
 #include <exception>
 #include <memory>
+#include <sstream>
+#include <string>
 #include <utility>
 
+#include "cube_bathymetry/projection_summary.h"
+
+#include "mbes_projection.hpp"
 #include "mbes_window_reader.hpp"
 #include "sidescan_geometry.hpp"
 
 namespace marine_perception_tools
 {
+
+void append_projection_notes(
+  QStringList & notes, const cube::ProjectionRunTotals & totals,
+  int skipped_pings, int invalid_pings, int invalid_beams)
+{
+  if (totals.pings == 0) {
+    return;   // nothing was projected; a summary of zeros would read as one
+  }
+  std::ostringstream summary;
+  std::ostringstream warnings;
+  // cube_bathymetry's own formatter, not a local paraphrase: the counts and
+  // the wording then cannot drift from the three offline tools'. The summary
+  // line always carries the missing-attitude/heave counts, so a frame mismatch
+  // shows even when it does not zero the sounding count.
+  cube::report_projection_summary(totals, summary, warnings);
+  const auto append_lines = [&notes](const std::string & text) {
+      std::istringstream in(text);
+      std::string line;
+      while (std::getline(in, line)) {
+        if (!line.empty()) {
+          notes << QString::fromStdString(line);
+        }
+      }
+    };
+  append_lines(summary.str());
+  // EVERY warning line, not just the summary. This is where the
+  // default-beamwidth warning lives, and kongsberg_em_bridge leaves
+  // rx_beamwidths empty on every M3 ping — so it fires on 100% of beams in
+  // exactly this deployment. Discarding it would hide the one warning this
+  // deployment always produces.
+  append_lines(warnings.str());
+  // The drop populations ProjectionRunTotals has no field for, so that every
+  // place a sounding can vanish is visible in the same note.
+  notes << QString(
+    "Dropped before/around projection: %1 ping(s) with no world TF, "
+    "%2 ping(s) with an unusable sound speed, %3 sounding(s) with an "
+    "unusable slant range")
+    .arg(skipped_pings).arg(invalid_pings).arg(invalid_beams);
+  notes << QString::fromUtf8(offline_projection_caveat());
+}
 
 CloudLoadOutcome load_cloud_passes(
   const std::vector<CloudPassInfo> & passes, const std::optional<GeoClip> & clip,
@@ -55,6 +100,13 @@ CloudLoadOutcome load_cloud_passes(
   bool ref_has_geo = false;
   geometry_msgs::msg::TransformStamped ref_earth_from_world;
 
+  // The whole load's projection accounting (#55), summed pass by pass so the
+  // note describes what the operator actually got — not what one pass got.
+  cube::ProjectionRunTotals totals;
+  totals.reports_georeferencing = false;
+  int invalid_pings = 0;
+  int invalid_beams = 0;
+
   for (std::size_t i = 0; i < passes.size(); ++i) {
     if (stop()) {
       return abandon();
@@ -73,6 +125,16 @@ CloudLoadOutcome load_cloud_passes(
       return abandon();   // the reader stopped mid-bag; so does the loader
     }
     out.skipped_pings += res.skipped_pings;
+    totals.pings += res.diagnostics.pings;
+    totals.beams += res.diagnostics.beams;
+    totals.soundings += res.diagnostics.soundings;
+    totals.filtered_range += res.diagnostics.filtered_range;
+    totals.missing_attitude += res.diagnostics.missing_attitude;
+    totals.missing_heave += res.diagnostics.missing_heave;
+    totals.default_beamwidth_beams += res.diagnostics.default_beamwidth_beams;
+    totals.missing_rx_angle_beams += res.diagnostics.missing_rx_angle_beams;
+    invalid_pings += res.invalid_pings;
+    invalid_beams += res.invalid_beams;
 
     // Contact clip: drop soundings outside the margin, in THIS bag's own
     // world frame (geo point -> ECEF -> inverse earth anchor). Without a geo
@@ -165,6 +227,9 @@ CloudLoadOutcome load_cloud_passes(
     }
     out.sounding_counts[i] = static_cast<int>(cloud.size());
   }
+
+  append_projection_notes(
+    out.notes, totals, out.skipped_pings, invalid_pings, invalid_beams);
   return out;
 }
 
