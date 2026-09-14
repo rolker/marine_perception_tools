@@ -15,8 +15,10 @@
 #include "cube_lab.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -31,7 +33,6 @@
 #include "cube_bathymetry/parameters.h"
 #include "cube_bathymetry/sizes.h"
 #include "cube_bathymetry/sounding.h"
-#include "sounding_uncertainty.hpp"
 
 namespace marine_perception_tools
 {
@@ -191,6 +192,14 @@ CubeSurface run_cube(
   const CubeTuning & tuning,
   const std::shared_ptr<std::atomic<bool>> & cancel)
 {
+  // Wall time for the whole run, reported in the note (#55). The real error
+  // model's horizontal variance carries a generic 2 m GPS drms, which floors
+  // the influence radius near 5 m against the retired placeholder's ~0.5 m,
+  // and the spread loop below is O(radius^2 / cell^2) per sounding. That cost
+  // is a prediction until somebody measures it on a real pass, so the run
+  // reports its own elapsed time rather than leaving the operator to guess
+  // whether the lab got slower.
+  const auto run_started = std::chrono::steady_clock::now();
   const auto stop = [&cancel]() {
       return cancel && cancel->load(std::memory_order_relaxed);
     };
@@ -301,25 +310,19 @@ CubeSurface run_cube(
   // spread mirrors Grid::insert's effect square exactly (influence radius,
   // node-centre distance test).
   std::vector<std::unique_ptr<cube::Node>> nodes(n_nodes);
-  std::size_t dropped_no_geometry = 0;   // beams with no usable angle/range
+  std::size_t dropped_bad_uncertainty = 0;   // soundings CUBE's own gate refuses
   for (const auto & s : soundings) {
     if (stop()) {return abandon();}
-    // Angle-aware placeholder errors (#49, see sounding_uncertainty.hpp):
-    // first-order propagation through this beam's own angle and slant range,
-    // so the estimator can prefer a pass's near-nadir coverage over another
-    // pass's outer beams. Already variances — the contract cube::Sounding
-    // carries — so they are stored as computed, not squared again.
-    // A beam whose geometry is missing or non-finite is DROPPED: no sounding
-    // is better than one carrying a fabricated confidence.
-    SoundingUncertainty u;
-    if (!sounding_uncertainty(s.beam_angle, s.slant_range, &u)) {
-      ++dropped_no_geometry;
-      continue;
-    }
+    // REAL per-sounding uncertainty (#55): cube::ErrorModel's own variances,
+    // computed at projection time from the ping's detections and the boat's
+    // TF-derived attitude, and carried here on the sounding. They are already
+    // variances — the contract cube::Sounding carries — so they are stored as
+    // computed, not squared again. The field names differ only because
+    // MbesSounding names them for what they are (see mbes_geometry.hpp).
     // World z is up (seabed negative) — the cube depth convention directly.
     cube::Sounding cs(static_cast<float>(s.z));
-    cs.vertical_error = static_cast<float>(u.vertical_variance);
-    cs.horizontal_error = static_cast<float>(u.horizontal_variance);
+    cs.vertical_error = s.vertical_variance;
+    cs.horizontal_error = s.horizontal_variance;
     // CUBE-settled backscatter (ADR-0007): the intensity rides the
     // hypothesis queue bound to its depth and comes back per node, with
     // its beam angle + slant range so the ARA/TL corrections can act.
@@ -327,7 +330,19 @@ CubeSurface run_cube(
     cs.beam_angle = s.beam_angle;
     cs.slant_range = s.slant_range;
 
+    // ONE gate, and it is CUBE's own. influenceRadius already refuses a
+    // non-finite depth, a non-finite or NON-POSITIVE vertical variance, and a
+    // non-finite or negative horizontal one, returning NaN. Branching on its
+    // result instead of hand-rolling a second check is what keeps the two from
+    // drifting: the check this replaced tested only non-finite/negative, so a
+    // ZERO vertical variance passed it and reached the spread loop as a NaN
+    // radius cast to int. A sounding that fails is DROPPED — no sounding is
+    // better than one carrying a fabricated confidence.
     const double radius = params.influenceRadius(cs);
+    if (!std::isfinite(radius)) {
+      ++dropped_bad_uncertainty;
+      continue;
+    }
     int min_x = static_cast<int>(std::floor(((s.x - radius) - out.origin_x) / cell_m));
     int max_x = static_cast<int>(std::ceil(((s.x + radius) - out.origin_x) / cell_m));
     int min_y = static_cast<int>(std::floor(((s.y - radius) - out.origin_y) / cell_m));
@@ -375,13 +390,25 @@ CubeSurface run_cube(
       ++estimated;
     }
   }
-  out.note = std::to_string(estimated) + " of " +
-    std::to_string(n_nodes) + " nodes estimated" + ara_note;
-  if (dropped_no_geometry > 0) {
-    // Never silent: a beam without angle/slant range gets no uncertainty and
-    // so is not inserted at all (#49).
-    out.note += "; " + std::to_string(dropped_no_geometry) +
-      " sounding(s) skipped — no beam geometry";
+  const double elapsed_s = std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - run_started).count();
+  {
+    char elapsed_text[32];
+    std::snprintf(elapsed_text, sizeof(elapsed_text), "%.2f", elapsed_s);
+    out.note = std::to_string(estimated) + " of " +
+      std::to_string(n_nodes) + " nodes estimated in " + elapsed_text + " s" +
+      ara_note;
+  }
+  if (dropped_bad_uncertainty > 0) {
+    // Never silent — and no longer mis-attributed (#55). The drop used to be
+    // reported as "no beam geometry", which was true when the uncertainty was
+    // derived from the beam angle alone. The real error model can also NaN a
+    // sounding through a missing attitude or heave TF, so the note names the
+    // symptom and points at the load note, where the causes are counted,
+    // instead of guessing at one.
+    out.note += "; " + std::to_string(dropped_bad_uncertainty) +
+      " sounding(s) skipped — invalid uncertainty (see load notes for "
+      "missing-attitude/heave counts)";
   }
   return out;
 }

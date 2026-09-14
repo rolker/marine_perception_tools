@@ -163,16 +163,33 @@ std::string derive_box_curve(
 // and nothing else (#45): there is no order-name argument to fall out of step
 // with the two numbers the operator edited.
 //
-// Per-sounding errors: the full cube_bathymetry ErrorModel needs the raw
-// detections + vessel/device config, which the explorer's cloud path does
-// not retain — so this uses a documented PLACEHOLDER, angle-aware since #49:
-// each beam's own angle and slant range propagated through
-// sounding_uncertainty.hpp (stored as variances per the Sounding contract),
-// seeded from cube::Device's defaults, until detections are carried through
-// (follow-up on #27). It replaced a depth-only formula that gave a swath-edge
-// beam the same confidence as a nadir one; it does NOT model refraction,
-// which is systematic (#28). A sounding carrying no beam geometry is skipped
-// rather than given a fabricated error, and the note says how many were.
+// Per-sounding errors: the REAL cube::ErrorModel (#55). Each sounding arrives
+// carrying the vertical and horizontal variances the model computed at
+// projection time from the ping's own detections and the boat's TF-derived
+// roll/pitch/heave — see mbes_projection.hpp — and run_cube stores them
+// straight into cube::Sounding rather than deriving anything itself.
+//
+// Two conditions on that, both operator-visible in the load note (they are
+// stated once, in mbes_projection.hpp's offline_projection_caveat()):
+//   * The projector runs on LIBRARY-DEFAULT vessel and device settings —
+//     there is no offline survey configuration to read
+//     (unh_marine_autonomy#385). That includes a generic 2 m GPS drms on
+//     every sounding, which is what the live boat and the offline cube tools
+//     also run, so the lab agrees with the store rather than inventing a
+//     tighter number.
+//   * Speed over ground is unavailable offline and passed as NaN, which the
+//     error model floors to zero — the speed-dependent latency terms drop out
+//     and the horizontal error is OPTIMISTIC for a moving vessel.
+//
+// horizontal_variance is RADIAL (drms-derived) and feeds
+// Parameters::influenceRadius directly, so it sets how far each sounding
+// spreads: under the real model a sounding reaches roughly ten times further
+// than under the retired placeholder, and the surface's visual character
+// changes with it. A sounding whose uncertainty CUBE's own influenceRadius
+// refuses — non-finite depth, non-positive vertical variance, negative
+// horizontal variance — is skipped rather than given a fabricated error, and
+// the note says how many were. It does NOT model refraction, which is
+// systematic (#28).
 //
 // `cancel` (optional) is polled per sounding while the soundings are spread
 // over the node grid, and per node while the estimates are extracted (#44) —
