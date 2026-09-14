@@ -1569,6 +1569,34 @@ TEST_F(ExplorerWindowFixture, TheHoveredFixTimeFollowsTheUtcToggle)
   EXPECT_EQ(readout->text(), timeline->formatTime(1000));
 }
 
+// The status label is width-Ignored so a long note cannot resize the window,
+// which means it CLIPS — and the CUBE-lab load note is ~1.5 kB of frame and
+// drop counts plus the offline-defaults caveat, i.e. the clipped part is the
+// part worth reading (#55 review). Every write mirrors the whole line into
+// the tooltip, including the opening message, so hovering recovers it and no
+// tooltip outlives the text it described.
+TEST_F(ExplorerWindowFixture, TheStatusTooltipCarriesTheWholeLineThroughEveryUpdate)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  auto * status = window.findChild<QLabel *>("status");
+  ASSERT_NE(status, nullptr);
+  EXPECT_FALSE(status->text().isEmpty());
+  EXPECT_EQ(status->toolTip(), status->text());
+
+  // ...and it FOLLOWS the text: a later, shorter status must not leave the
+  // earlier note's tooltip behind.
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  ASSERT_NE(canvas, nullptr);
+  emit canvas->cubeBoxSelected(kLat - 0.001, kLon - 0.001, kLat + 0.001, kLon + 0.001);
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(status->text().contains("CUBE box")) << status->text().toStdString();
+  EXPECT_EQ(status->toolTip(), status->text());
+}
+
 // The point of the whole feature: the click cues. It goes through the same
 // path a committed time on the time bar takes, so there is one cueing
 // implementation and the map and the tape cannot disagree.

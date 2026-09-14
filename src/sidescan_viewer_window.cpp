@@ -709,7 +709,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
     "max-nodes limit in params....");
   cube_cell_spin->setClampNotice(
     [this](double typed, double applied) {
-      status_->setText(
+      setStatusText(
         QString(
           "Cell size %1 m is outside %2 - %3 m - using %4 m.")
         .arg(typed, 0, 'g', 4)
@@ -1064,7 +1064,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         settings.setValue(
           "ara_curve_path", QString::fromStdString(cube_tuning_.ara_curve_path));
       }
-      status_->setText("CUBE parameters updated — press Run CUBE to apply.");
+      setStatusText("CUBE parameters updated — press Run CUBE to apply.");
     });
   connect(cube_points_check_, &QCheckBox::toggled,
     this, [this](bool on) {cloud_->setPointsVisible(on);});
@@ -1122,7 +1122,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
           ++painted;
         }
       }
-      status_->setText(QString("Drape: %1 pings, %2 cells painted, in %3 s%4")
+      setStatusText(QString("Drape: %1 pings, %2 cells painted, in %3 s%4")
       .arg(cube_drape_.pings_used)
       .arg(painted)
       .arg(ticket.elapsed_ms / 1000.0, 0, 'f', 1)
@@ -1139,7 +1139,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_surface_ = std::move(ticket.surface);
       if (!cube_surface_.ok()) {
         cloud_->clearSurface();
-        status_->setText(QString("CUBE: %1%2")
+        setStatusText(QString("CUBE: %1%2")
         .arg(QString::fromStdString(cube_surface_.note))
         .arg(ticket.notes.isEmpty() ? "" : "  [" + ticket.notes.join("; ") + "]"));
         cube_run_btn_->setEnabled(cube_box_.has_value());
@@ -1201,7 +1201,7 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_drape_terrain_ = CubeSurface{};
       populateDrapePasses();
       refreshCubeSurface();
-      status_->setText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5%6")
+      setStatusText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5%6")
       .arg(cube_surface_.cell_m)
       .arg(cube_surface_.soundings_in)
       .arg(QString::fromStdString(cube_surface_.note))
@@ -1219,20 +1219,20 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       const double h_m = (n - s) * kMetersPerDegLat;
       const double w_m = (e - w) * kMetersPerDegLat *
       std::max(0.01, std::cos(0.5 * (s + n) * M_PI / 180.0));
-      status_->setText(QString("CUBE box: %1 x %2 m — press Run CUBE.")
+      setStatusText(QString("CUBE box: %1 x %2 m — press Run CUBE.")
       .arg(w_m, 0, 'f', 0).arg(h_m, 0, 'f', 0));
     });
   connect(canvas_, &SidescanCanvas::cubeBoxCleared, this, [this]() {
       cube_box_.reset();
       cube_run_btn_->setEnabled(false);
-      status_->setText("CUBE box cleared.");
+      setStatusText("CUBE box cleared.");
     });
 }
 
 void SidescanViewerWindow::selfCalibrateBackscatter()
 {
   if (cube_soundings_.empty()) {
-    status_->setText("Self-cal: run CUBE first — no beams held.");
+    setStatusText("Self-cal: run CUBE first — no beams held.");
     return;
   }
   // Compose with the same absorption the currently-loaded curve uses (the
@@ -1264,7 +1264,7 @@ void SidescanViewerWindow::selfCalibrateBackscatter()
     QSettings settings("UNH-CCOM", "survey_explorer");
     settings.setValue("ara_curve_path", path);
   }
-  status_->setText(
+  setStatusText(
     QString("Self-cal curve written to %1 — re-running CUBE with it.")
     .arg(path));
   runCubeLab();
@@ -1287,7 +1287,7 @@ void SidescanViewerWindow::runCubeLab()
       cube_box_->south, cube_box_->west, cube_box_->north, cube_box_->east,
       "mbes-bathy");
   } catch (const std::exception & e) {
-    status_->setText(QString("CUBE pass query failed: %1").arg(e.what()));
+    setStatusText(QString("CUBE pass query failed: %1").arg(e.what()));
     return;
   }
   std::vector<CloudPassInfo> passes;
@@ -1300,7 +1300,7 @@ void SidescanViewerWindow::runCubeLab()
     passes.push_back(std::move(info));
   }
   if (passes.empty()) {
-    status_->setText("CUBE: no MBES passes intersect the box.");
+    setStatusText("CUBE: no MBES passes intersect the box.");
     return;
   }
 
@@ -1341,7 +1341,7 @@ void SidescanViewerWindow::runCubeLab()
         .arg(static_cast<qulonglong>(tuning.max_nodes)),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
       if (answer != QMessageBox::Yes) {
-        status_->setText("CUBE run cancelled (grid over the max-nodes limit).");
+        setStatusText("CUBE run cancelled (grid over the max-nodes limit).");
         return;
       }
       tuning.max_nodes = static_cast<std::uint64_t>(est_nodes * 2.0) + 1;
@@ -1351,7 +1351,7 @@ void SidescanViewerWindow::runCubeLab()
   supersede_token(cube_cancel_);   // ...and the job serving it stops
   const auto gen = cube_gen_;
   cube_run_btn_->setEnabled(false);
-  status_->setText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
+  setStatusText(QString("CUBE: loading %1 pass%2 + estimating at %3 m …")
     .arg(passes.size()).arg(passes.size() == 1 ? "" : "es").arg(cell_m));
   const auto cancel = cube_cancel_;
   cube_watcher_.setFuture(
@@ -1492,7 +1492,7 @@ void SidescanViewerWindow::refreshCubeSurface()
     if (!cube_drape_.ok() ||
       cube_drape_.amplitude.size() != n_nodes)
     {
-      status_->setText(
+      setStatusText(
         "Sidescan shade: pick a pass in the drape combo (and re-run after a "
         "new CUBE).");
       cloud_->clearSurface();
@@ -1648,7 +1648,7 @@ std::optional<MapGeoAffine> SidescanViewerWindow::earthAnchorAffine(
 void SidescanViewerWindow::onExportSurfaceData()
 {
   if (!cube_surface_.ok()) {
-    status_->setText("Export: run CUBE first — no surface yet.");
+    setStatusText("Export: run CUBE first — no surface yet.");
     return;
   }
   const auto anchor = cubeSurfaceAnchor();
@@ -1672,7 +1672,7 @@ void SidescanViewerWindow::onExportSurfaceData()
       this, "Export CUBE surface", QString::fromStdString(err));
     return;
   }
-  status_->setText(QString(
+  setStatusText(QString(
       "Exported %1x%2 nodes (depth/uncertainty/backscatter Float32) to %3")
     .arg(cube_surface_.nx).arg(cube_surface_.ny).arg(path));
 }
@@ -1680,7 +1680,7 @@ void SidescanViewerWindow::onExportSurfaceData()
 void SidescanViewerWindow::onExportSurfaceRgba()
 {
   if (!cube_surface_.ok()) {
-    status_->setText("Export: run CUBE first — no surface yet.");
+    setStatusText("Export: run CUBE first — no surface yet.");
     return;
   }
   const auto anchor = cubeSurfaceAnchor();
@@ -1709,7 +1709,7 @@ void SidescanViewerWindow::onExportSurfaceRgba()
       static_cast<std::size_t>(terrain.nx) *
       static_cast<std::size_t>(terrain.ny);
     if (!cube_drape_.ok() || cube_drape_.amplitude.size() != n) {
-      status_->setText("Export: no drape yet — pick a pass first.");
+      setStatusText("Export: no drape yet — pick a pass first.");
       return;
     }
     srf = &terrain;
@@ -1801,7 +1801,7 @@ void SidescanViewerWindow::onExportSurfaceRgba()
       this, "Export CUBE surface", QString::fromStdString(err));
     return;
   }
-  status_->setText(QString("Exported %1x%2 coloured nodes to %3")
+  setStatusText(QString("Exported %1x%2 coloured nodes to %3")
     .arg(srf->nx).arg(srf->ny).arg(path));
 }
 
@@ -1893,7 +1893,7 @@ void SidescanViewerWindow::requestDrape()
   ++drape_gen_;
   supersede_token(drape_cancel_);   // ...and the job serving it stops
   const auto gen = drape_gen_;
-  status_->setText(targets.size() == 1 ?
+  setStatusText(targets.size() == 1 ?
     QString("Draping %1 …")
     .arg(QFileInfo(QString::fromStdString(targets.front().bag_path)).fileName()) :
     QString("Draping composite of %1 passes …").arg(targets.size()));
@@ -2001,11 +2001,15 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
     "resolution = window / this, so raising it for a slow (dense-ping) survey "
     "both renders more pings and refines the map.");
 
-  status_ = new QLabel("Open a bag to begin (File → Open Bag).", this);
+  status_ = new QLabel(this);
   status_->setObjectName("status");
   // The status line must never dictate the window size: a long load note was
-  // resizing the whole window (desk finding). Long text clips instead.
+  // resizing the whole window (desk finding). Long text clips instead — and
+  // setStatusText() mirrors every line into the tooltip so the clipped part
+  // stays readable. The opening message goes through it too, so the tooltip
+  // is never absent rather than merely short.
   status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  setStatusText("Open a bag to begin (File → Open Bag).");
 
   // Indeterminate "busy" bar shown only while a bag loads off-thread.
   progress_ = new QProgressBar(this);
@@ -2401,7 +2405,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
       const QString label =
       (li >= 0 && li < static_cast<int>(basemap_layers_.size())) ?
       basemap_layers_[static_cast<std::size_t>(li)].first : QString();
-      status_->setText(QString("Basemap %1: %2 tile%3%4")
+      setStatusText(QString("Basemap %1: %2 tile%3%4")
       .arg(label).arg(n_tiles).arg(n_tiles == 1 ? "" : "s")
       .arg(basemap_lod_->note()));
     });
@@ -2691,7 +2695,7 @@ void SidescanViewerWindow::copyMapContextMenuPosition()
   // Copying is silent otherwise — nothing on screen changes — so the status
   // row is the only thing that can tell him it happened, and it shows what
   // landed on the clipboard so he can check it without pasting.
-  status_->setText(tr("Copied %1 to the clipboard.").arg(text));
+  setStatusText(tr("Copied %1 to the clipboard.").arg(text));
 }
 
 void SidescanViewerWindow::connectHoverReadout()
@@ -2878,7 +2882,7 @@ void SidescanViewerWindow::scheduleOpen(
   // recording and pay it. A wait the operator understands is a different
   // thing from one he does not. (Making it CHEAP is the cursor-to-absolute-
   // time work discussed against #36, not this.)
-  status_->setText(
+  setStatusText(
     QString("Cueing %1 — that time is in another recording, which has to be "
       "reopened and indexed …")
     .arg(QFileInfo(QString::fromStdString(bag_uri)).fileName()));
@@ -2955,7 +2959,7 @@ void SidescanViewerWindow::openBag(
   scrub_->blockSignals(false);
   progress_->setVisible(true);
   loading_ = true;
-  status_->setText(QString("Opening %1 …").arg(QString::fromStdString(bag_uri)));
+  setStatusText(QString("Opening %1 …").arg(QString::fromStdString(bag_uri)));
 
   // Open + index off the UI thread; the progress callback emits a queued signal
   // so the UI grows the range + track as the bag resolves. The session lives in
@@ -3039,7 +3043,7 @@ void SidescanViewerWindow::onSessionOpened(quint64 epoch)
     return;   // superseded while opening: discard (its scan is cancelled)
   }
   session_ = std::move(session);
-  status_->setText(
+  setStatusText(
     QString("Indexing %1 …").arg(QString::fromStdString(current_bag_uri_)));
 }
 
@@ -3051,7 +3055,7 @@ void SidescanViewerWindow::onOpenFailed(quint64 epoch, const QString & message)
   loading_ = false;
   progress_->setVisible(false);
   current_bag_uri_.clear();
-  status_->setText("Open a bag to begin (File → Open Bag).");
+  setStatusText("Open a bag to begin (File → Open Bag).");
   QMessageBox::critical(this, "Open bag failed", message);
 }
 
@@ -3111,7 +3115,7 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
         static_cast<std::int64_t>(t0 * 1e9), static_cast<std::int64_t>(t1 * 1e9));
       time_bar_->setVisible(time_bar_->hasExtent());
     }
-    status_->setText(QString(
+    setStatusText(QString(
         "%1 pings (%2 port, %3 stbd, %4 down) • %5 m track • alt: %6 • geo: %7")
       .arg(session_->pingCount())
       .arg(session_->channelCount(SidescanChannel::Port))
@@ -3135,16 +3139,16 @@ void SidescanViewerWindow::onIndexProgress(quint64 epoch, double resolved_m, boo
         // valueChanged re-renders on a move; if head equals the current value
         // the earlier requestRender() in this handler already covers it.
         scrub_->setValue(static_cast<int>(std::lround(head)));
-        status_->setText(status_->text() + QString(" • cued to %1–%2 m")
+        setStatusText(status_->text() + QString(" • cued to %1–%2 m")
           .arg(interval->first, 0, 'f', 0).arg(interval->second, 0, 'f', 0));
       } else {
-        status_->setText(status_->text() + " • cue window matched no posed pings");
+        setStatusText(status_->text() + " • cue window matched no posed pings");
       }
       pending_cue_start_ns_ = 0;
       pending_cue_end_ns_ = 0;
     }
   } else {
-    status_->setText(QString("Indexing… %1 m resolved").arg(resolved_m, 0, 'f', 0));
+    setStatusText(QString("Indexing… %1 m resolved").arg(resolved_m, 0, 'f', 0));
   }
 }
 
@@ -3236,7 +3240,7 @@ void SidescanViewerWindow::onExportGeoJson()
     msg += QString(" %1 skipped (no geo reference — open a bag with an earth→map "
       "transform to resolve lat/lon).").arg(r.skipped);
   }
-  status_->setText(msg);
+  setStatusText(msg);
 }
 
 void SidescanViewerWindow::onLoadContacts()
@@ -3350,6 +3354,17 @@ void SidescanViewerWindow::refreshContacts()
   mbes_waterfall_->setContacts(boxes);   // project contacts onto the backscatter pane too
 }
 
+void SidescanViewerWindow::setStatusText(const QString & text)
+{
+  if (!status_) {
+    return;
+  }
+  status_->setText(text);
+  // Plain text, not rich: the notes carry '<' and '&' from frame names and
+  // arithmetic, and QToolTip word-wraps a long plain string on its own.
+  status_->setToolTip(text);
+}
+
 void SidescanViewerWindow::updateScrubStep()
 {
   // Slider units are metres: arrow keys step 20% of the window, PageUp/Down a full
@@ -3432,7 +3447,7 @@ void SidescanViewerWindow::onRenderFinished()
   if (!r.ok) {
     // The render worker hit an exception (e.g. the bag became unreadable); keep the
     // last good view rather than crashing or clearing.
-    status_->setText("Render failed (bag unreadable?) — showing the last view.");
+    setStatusText("Render failed (bag unreadable?) — showing the last view.");
     if (render_pending_) {
       render_pending_ = false;
       requestRender();
@@ -3495,7 +3510,7 @@ void SidescanViewerWindow::onRenderFinished()
     echogram_->addPings(r.down_images);
   }
   if (r.has_center) {canvas_->setCenter(r.center_x, r.center_y);}
-  status_->setText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted%6")
+  setStatusText(QString("scrub %1 / %2 m • window [%3, %4] m • %5 pings painted%6")
     .arg(r.head_m, 0, 'f', 1)
     .arg(r.total_m, 0, 'f', 1)
     .arg(r.win_lo, 0, 'f', 1)
@@ -3593,12 +3608,12 @@ void SidescanViewerWindow::openSurveyIndex(
 
   if (box) {
     canvas_->fitGeo(box->south, box->west, box->north, box->east);
-    status_->setText(
+    setStatusText(
       QString("Survey index: %1 tiles indexed — drag on the map to select a "
         "region and load its passes; click to clear.")
       .arg(indexed_tiles_.size()));
   } else {
-    status_->setText("Survey index holds no passes — nothing to explore.");
+    setStatusText("Survey index holds no passes — nothing to explore.");
   }
 
   // Basemap: discover the store layers next to the index and load the
@@ -3751,7 +3766,7 @@ void SidescanViewerWindow::requestBasemapLoad()
   const auto palette_idx = static_cast<std::size_t>(
     std::max(0, basemap_cmap_->currentIndex()));
 
-  status_->setText(QString("Loading basemap %1…").arg(label));
+  setStatusText(QString("Loading basemap %1…").arg(label));
   basemap_lod_->open(dir, palette_idx, zero_is_nodata);
 }
 
@@ -3785,7 +3800,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
   }
   if (selection.empty()) {
     exitSelectionCloud();
-    status_->setText("Tile selection cleared.");
+    setStatusText("Tile selection cleared.");
     return;
   }
 
@@ -3793,7 +3808,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
   try {
     rows = bridge_->queryTiles(selection);
   } catch (const std::exception & e) {
-    status_->setText(QString("Pass query failed: %1").arg(e.what()));
+    setStatusText(QString("Pass query failed: %1").arg(e.what()));
     return;
   }
   const auto passes = coalescePasses(rows);
@@ -3862,7 +3877,7 @@ void SidescanViewerWindow::onTileSelectionChanged()
     cloud_frame_ = CloudFrame::None;   // an empty pane places nothing (#47)
     refreshCloudColorChannels();
     cloud_->setBoat(0.0, 0.0, 0.0, 0.0, false);
-    status_->setText(
+    setStatusText(
       QString("%1 tile%2 selected, %3 pass%4 — none mbes-bathy; nothing to "
         "load into the cloud.")
       .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
@@ -3883,14 +3898,14 @@ void SidescanViewerWindow::onTileSelectionChanged()
       }
     }
     if (!clip) {
-      status_->setText(
+      setStatusText(
         "Clip to contact: select a contact with a geo position first — "
         "loading unclipped.");
     }
   }
 
   cloud_passes_ = cloud_passes;
-  status_->setText(
+  setStatusText(
     QString("Loading %1 mbes-bathy pass%2 from %3 selected tile%4%5…")
     .arg(cloud_passes.size()).arg(cloud_passes.size() == 1 ? "" : "es")
     .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
@@ -4013,10 +4028,10 @@ void SidescanViewerWindow::onTimelinePassActivated(
     if (interval) {
       const double head = std::min(interval->first + window_len_m_, interval->second);
       scrub_->setValue(static_cast<int>(std::lround(head)));
-      status_->setText(QString("Cued to pass %1–%2 m")
+      setStatusText(QString("Cued to pass %1–%2 m")
         .arg(interval->first, 0, 'f', 0).arg(interval->second, 0, 'f', 0));
     } else {
-      status_->setText("Pass window matched no posed pings in the open bag.");
+      setStatusText("Pass window matched no posed pings in the open bag.");
     }
     return;
   }
@@ -4050,7 +4065,7 @@ void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)
   const auto cue_into_loading_bag = [this, t0, t1, t_ns]() {
       pending_cue_start_ns_ = t0;
       pending_cue_end_ns_ = t1;
-      status_->setText(QString("Will cue to %1 once %2 finishes indexing.")
+      setStatusText(QString("Will cue to %1 once %2 finishes indexing.")
         .arg(time_bar_->formatTime(static_cast<std::int64_t>(t_ns)))
         .arg(QFileInfo(QString::fromStdString(current_bag_uri_)).fileName()));
     };
@@ -4090,7 +4105,7 @@ void SidescanViewerWindow::onTimeSelected(qlonglong t_ns)
       return;
     }
   }
-  status_->setText(
+  setStatusText(
     QString("No data at %1 in the open bag or campaign.")
     .arg(time_bar_->formatTime(static_cast<std::int64_t>(t_ns))));
 }
@@ -4304,7 +4319,7 @@ void SidescanViewerWindow::onCloudPassesLoaded()
     }
     message += " — " + shown.join("; ");
   }
-  status_->setText(message);
+  setStatusText(message);
   status_->setToolTip(out.notes.join("\n"));   // the full list, on hover
 }
 
