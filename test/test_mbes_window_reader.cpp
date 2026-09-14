@@ -191,3 +191,124 @@ TEST(ReadMbesWindow, MissingBagThrows)
 }
 
 }  // namespace
+
+namespace
+{
+
+using marine_perception_tools::MbesWindowOptions;
+using marine_perception_tools::MbesWindowResult;
+using marine_perception_tools::PingProjection;
+using marine_perception_tools::accumulate_ping;
+
+// --- the projector's frames and its run totals (#55) ------------------------
+
+// These three defaults were read out of a real BizzyBoat M3 recording, not
+// taken from cube::ProjectorParams. The library's own default base_link_frame
+// is the unprefixed "base_link", and these bags carry a
+// `bizzy/base_link -> base_link -> base_link_frd` alias chain, so an
+// unprefixed lookup would resolve without throwing and take the boat's
+// attitude — and every sounding's uncertainty — from the wrong frame. A
+// silent wrong answer is what this test exists to keep out.
+TEST(MbesWindowOptionsFrames, DefaultToTheFramesVerifiedAgainstARealBag)
+{
+  const MbesWindowOptions options;
+  EXPECT_EQ(options.base_link_frame, "bizzy/base_link");
+  EXPECT_EQ(options.level_frame, "bizzy/base_link_north_up");
+  EXPECT_EQ(options.tide_frame, "bizzy/map_tide");
+  // All three namespaced, like the world frame that was already here.
+  EXPECT_EQ(options.world_frame, "bizzy/map");
+}
+
+// One ping's projection with distinguishable counts in every field, so a
+// field that is not accumulated shows up as a wrong total rather than as a
+// number that happens to match its neighbour.
+PingProjection samplePing(std::size_t kept, std::size_t filtered, std::size_t invalid)
+{
+  PingProjection p;
+  p.soundings.resize(kept);
+  p.diagnostics.total = kept + filtered + invalid;
+  p.diagnostics.filtered_range = filtered;
+  p.diagnostics.missing_attitude = 1;
+  p.diagnostics.missing_heave = 1;
+  p.diagnostics.default_beamwidth_beams = p.diagnostics.total;
+  p.diagnostics.missing_rx_angle_beams = filtered;
+  p.invalid_beams = invalid;
+  return p;
+}
+
+// Every field of the run totals accumulates, across pings — the counts the
+// lab's load note is built from.
+TEST(MbesWindowDiagnostics, AccumulateEveryFieldAcrossPings)
+{
+  MbesWindowResult result;
+  result.diagnostics.reports_georeferencing = false;
+  accumulate_ping(result, samplePing(10, 2, 1));
+  accumulate_ping(result, samplePing(6, 3, 2));
+
+  EXPECT_EQ(result.diagnostics.pings, 2u);
+  EXPECT_EQ(result.diagnostics.soundings, 16u);
+  EXPECT_EQ(result.diagnostics.beams, 24u);
+  EXPECT_EQ(result.diagnostics.filtered_range, 5u);
+  EXPECT_EQ(result.diagnostics.missing_attitude, 2u);
+  EXPECT_EQ(result.diagnostics.missing_heave, 2u);
+  EXPECT_EQ(result.diagnostics.default_beamwidth_beams, 24u);
+  EXPECT_EQ(result.diagnostics.missing_rx_angle_beams, 5u);
+  EXPECT_EQ(result.invalid_beams, 3);
+  EXPECT_EQ(result.invalid_pings, 0);
+  // The arithmetic the note asks a reader to check.
+  EXPECT_EQ(
+    result.diagnostics.beams,
+    result.diagnostics.soundings + result.diagnostics.filtered_range +
+    static_cast<std::size_t>(result.invalid_beams));
+}
+
+// A ping refused for a non-positive sound speed is counted ONCE, in
+// invalid_pings, and not in diagnostics.pings: that field means "pings handed
+// to DetectionsProjector::project()", and this one never was. It is not
+// bookkeeping pedantry — cube's summary warns on `pings > 0 && soundings == 0`
+// by telling the operator to check his FRAMES, so counting these pings there
+// would report a bag of bad sound speeds as a frame problem (#55 review).
+TEST(MbesWindowDiagnostics, AnInvalidPingIsCountedOnlyAsInvalid)
+{
+  MbesWindowResult result;
+  PingProjection bad;
+  bad.invalid_pings = 1;
+  accumulate_ping(result, bad);
+  accumulate_ping(result, samplePing(4, 0, 0));
+
+  EXPECT_EQ(result.invalid_pings, 1);
+  EXPECT_EQ(result.diagnostics.pings, 1u);
+  EXPECT_EQ(result.diagnostics.beams, 4u);
+  EXPECT_EQ(result.diagnostics.soundings, 4u);
+}
+
+// The whole point, end to end: a window in which EVERY ping carries an
+// unusable sound speed must not look like a projection that produced nothing.
+TEST(MbesWindowDiagnostics, AWindowOfBadSoundSpeedsProjectedNoPingsAtAll)
+{
+  MbesWindowResult result;
+  for (int i = 0; i < 12; ++i) {
+    PingProjection bad;
+    bad.invalid_pings = 1;
+    accumulate_ping(result, bad);
+  }
+  EXPECT_EQ(result.invalid_pings, 12);
+  EXPECT_EQ(result.diagnostics.pings, 0u);
+  EXPECT_EQ(result.diagnostics.beams, 0u);
+}
+
+// This path does not georeference per sounding: its earth-anchor reprojection
+// (has_geo / earth_from_world) relates one bag's world frame to another's,
+// which is a different thing. Left true, report_projection_summary would print
+// "0 georeferenced into the grid, 0 dropped (no earth TF)" and then warn about
+// a localization chain that was never in question.
+TEST(MbesWindowDiagnostics, DoNotClaimPerSoundingGeoreferencing)
+{
+  MbesWindowResult result;
+  EXPECT_TRUE(cube::ProjectionRunTotals{}.reports_georeferencing)
+    << "the library default is what makes this an explicit choice";
+  result.diagnostics.reports_georeferencing = false;
+  EXPECT_FALSE(result.diagnostics.reports_georeferencing);
+}
+
+}  // namespace

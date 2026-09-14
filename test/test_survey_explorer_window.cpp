@@ -49,12 +49,15 @@
 
 #include <sqlite3.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <optional>
 #include <set>
 #include <utility>
 #include <stdexcept>
@@ -72,6 +75,8 @@
 #include "marine_sonar_widgets/echogram_widget.hpp"
 #include "marine_sonar_widgets/waterfall_widget.hpp"
 #include "marine_survey_index/schema.hpp"
+#include "mbes_pass_loader.hpp"
+#include "mbes_window_reader.hpp"
 #include "color_vocabulary.hpp"
 #include "point_cloud_view.hpp"
 #include "sidescan_geometry.hpp"
@@ -306,9 +311,13 @@ TEST_F(ExplorerWindowFixture, PointAndSurfaceSelectorsShareOneColourVocabulary)
     EXPECT_EQ(surface->itemText(i), expected[i]);
   }
 
-  // A sounding carries no uncertainty (run_cube computes its own placeholder
-  // from the beam's angle and slant range, #49) and no sidescan (that is a
-  // drape onto CUBE nodes), so both are greyed — and each says why.
+  // Uncertainty stays greyed for the points, but not because a sounding has
+  // none: since #55 the CUBE-lab load projects through the real
+  // cube::ErrorModel and carries per-beam variances. The scrub window's own
+  // cloud still does not, so the channel would mean different things on
+  // different clouds; it opens when both sources carry them (mpt#56).
+  // Sidescan is greyed because it is a drape onto CUBE nodes, not something
+  // a sounding carries. Both say why.
   for (const QString & name : {QString("Uncertainty"), QString("Sidescan")}) {
     const int row = comboRowOf(*points, name);
     ASSERT_GE(row, 0);
@@ -399,7 +408,15 @@ struct SyntheticBagSpec
   std::int64_t t0_ns = 1700000000000000000LL;
   std::int64_t t1_ns = 0;      // filled in by writeSyntheticBag
   int tf_messages = 12000;     // dynamic /tf samples across the window
-  int pings = 4000;            // detection pings across the window
+  // Halved from 4000 with #55. The load now runs cube::DetectionsProjector
+  // and the full error model over every beam instead of a one-sound-speed
+  // re-derivation, and at 4000 pings x 512 beams the baseline load in
+  // ClosingDuringACloudLoadReturnsPromptly measured ~4.7 s against
+  // process_until's 5 s ceiling — passing alone, failing under a parallel
+  // test run. 2000 keeps that test's job comfortably long (its own
+  // baseline_ms > 300 ms guard fails loudly if it ever stops being) while
+  // leaving the margin the bound needs to mean what it says.
+  int pings = 2000;            // detection pings across the window
   int beams = 512;             // beams per ping
 };
 
@@ -432,7 +449,7 @@ void writeSyntheticBag(const std::string & uri, SyntheticBagSpec & spec)
     tf2_msgs::msg::TFMessage tfm;
     geometry_msgs::msg::TransformStamped pose;
     pose.header.frame_id = "bizzy/map";
-    pose.child_frame_id = "bizzy/base_link";
+    pose.child_frame_id = "bizzy/base_link_north_up";
     pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
     pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
     pose.transform.translation.x = 0.5 * i;
@@ -446,6 +463,26 @@ void writeSyntheticBag(const std::string & uri, SyntheticBagSpec & spec)
     anchor.transform.translation.y = -4470000.0;
     anchor.transform.translation.z = 4325000.0;
     tfm.transforms.push_back(anchor);
+
+    // The chains cube::DetectionsProjector needs (#55): attitude
+    // (base_link_north_up <- base_link) and heave (map_tide <- base_link).
+    // Without them the error model has no roll/pitch, every sounding's
+    // uncertainty comes out NaN, and run_cube drops the lot — so a bag that
+    // omits them is not a simpler bag, it is one this path cannot estimate
+    // from. The shape mirrors the real recording: base_link hangs off the
+    // level frame, and the tide frame off the map.
+    geometry_msgs::msg::TransformStamped level = pose;
+    level.header.frame_id = "bizzy/base_link_north_up";
+    level.child_frame_id = "bizzy/base_link";
+    level.transform.translation.x = 0.0;
+    level.transform.translation.y = 0.0;
+    level.transform.translation.z = 0.0;
+    tfm.transforms.push_back(level);
+
+    geometry_msgs::msg::TransformStamped tide = level;
+    tide.header.frame_id = "bizzy/map";
+    tide.child_frame_id = "bizzy/map_tide";
+    tfm.transforms.push_back(tide);
 
     writer.write(tfm, "/tf", rclcpp::Time(t));
   }
@@ -1150,6 +1187,26 @@ TEST_F(ExplorerWindowFixture, CubeOrderPresetsSeedTheUncertaintyBudget)
   EXPECT_FLOAT_EQ(window.cubeTuning().iho_percent, held_percent);
 }
 
+// The order dropdown's tooltip described the budget as being compared against
+// a PLACEHOLDER per-sounding error. That placeholder was deleted in #55 — the
+// budget now meets a real cube::ErrorModel variance — and an operator choosing
+// an IHO order off a tooltip that calls the other side of the comparison a
+// stand-in would discount a number that is no longer one.
+TEST_F(ExplorerWindowFixture, TheOrderTooltipDoesNotStillCallTheErrorAPlaceholder)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  auto * combo = window.findChild<QComboBox *>("cube_order_combo");
+  ASSERT_NE(combo, nullptr);
+  const QString tip = combo->toolTip();
+  EXPECT_FALSE(tip.contains("PLACEHOLDER")) << tip.toStdString();
+  EXPECT_FALSE(tip.contains("stand-in")) << tip.toStdString();
+  EXPECT_TRUE(tip.contains("cube::ErrorModel")) << tip.toStdString();
+}
+
 // --- a CUBE run adds a surface over the selection cloud (#36) ---------------
 
 // A light synthetic recording centred on the fixture position: enough beams
@@ -1157,7 +1214,15 @@ TEST_F(ExplorerWindowFixture, CubeOrderPresetsSeedTheUncertaintyBudget)
 // finish inside a test. Unlike writeSyntheticBag (whose job is to be SLOW),
 // the earth<-map anchor here is the fixture position itself, so the region
 // drawn on the map really does clip to these soundings.
-void writeLightBag(const std::string & uri, std::int64_t t0_ns, std::int64_t t1_ns)
+// `with_attitude_chain` false writes the SAME recording minus the one edge the
+// error model needs (#58 review): the level frame is not published at all and
+// base_link hangs straight off the map, so the world <- sensor lookup that
+// places every sounding still resolves while `level_frame <- base_link_frame`
+// cannot. The heave chain is left intact, so missing attitude is the only
+// thing wrong with the bag and the assertions can say so.
+void writeLightBag(
+  const std::string & uri, std::int64_t t0_ns, std::int64_t t1_ns,
+  bool with_attitude_chain = true)
 {
   double ax = 0.0;
   double ay = 0.0;
@@ -1184,7 +1249,8 @@ void writeLightBag(const std::string & uri, std::int64_t t0_ns, std::int64_t t1_
     tf2_msgs::msg::TFMessage tfm;
     geometry_msgs::msg::TransformStamped pose;
     pose.header.frame_id = "bizzy/map";
-    pose.child_frame_id = "bizzy/base_link";
+    pose.child_frame_id =
+      with_attitude_chain ? "bizzy/base_link_north_up" : "bizzy/base_link";
     pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
     pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
     pose.transform.translation.x = 0.1 * i;   // ~20 m of line, well inside a region
@@ -1198,6 +1264,36 @@ void writeLightBag(const std::string & uri, std::int64_t t0_ns, std::int64_t t1_
     anchor.transform.translation.y = ay;
     anchor.transform.translation.z = az;
     tfm.transforms.push_back(anchor);
+
+    // The chains cube::DetectionsProjector needs (#55): attitude
+    // (base_link_north_up <- base_link) and heave (map_tide <- base_link).
+    // Without the attitude edge the error model has no roll/pitch, every
+    // sounding's uncertainty comes out NaN, and run_cube drops the lot — so a
+    // bag that omits it is not a simpler bag, it is one this path cannot
+    // estimate from. The shape mirrors the real recording: base_link hangs
+    // off the level frame, and the tide frame off the map.
+    if (with_attitude_chain) {
+      geometry_msgs::msg::TransformStamped level = pose;
+      level.header.frame_id = "bizzy/base_link_north_up";
+      level.child_frame_id = "bizzy/base_link";
+      level.transform.translation.x = 0.0;
+      level.transform.translation.y = 0.0;
+      level.transform.translation.z = 0.0;
+      tfm.transforms.push_back(level);
+    }
+
+    // Heave stays published either way. The tide frame under the map and
+    // base_link under it (directly, in the no-attitude bag) means
+    // `map_tide <- base_link` resolves in both, so missing attitude is the
+    // only difference between the two recordings.
+    geometry_msgs::msg::TransformStamped tide = pose;
+    tide.header.frame_id = "bizzy/map";
+    tide.child_frame_id = "bizzy/map_tide";
+    tide.transform.translation.x = 0.0;
+    tide.transform.translation.y = 0.0;
+    tide.transform.translation.z = 0.0;
+    tfm.transforms.push_back(tide);
+
     writer.write(tfm, "/tf", rclcpp::Time(t));
   }
 
@@ -1222,6 +1318,95 @@ void writeLightBag(const std::string & uri, std::int64_t t0_ns, std::int64_t t1_
     det.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
     writer.write(det, "/bizzy/sensors/m3/detections", rclcpp::Time(t));
   }
+}
+
+// HONEST DEGRADATION, END TO END (#58 review). Every part of the missing-
+// attitude story was pinned in isolation — the projector's NaN roll/pitch,
+// the load note's wording, run_cube's drop gate — and nothing drove a real
+// recording through all three. This does, on the bag the flag above writes: a
+// resolvable world <- sensor chain and no `bizzy/base_link_north_up <-
+// bizzy/base_link`.
+//
+// What it pins is the SHAPE of the failure, not merely that it fails. The
+// soundings are positioned, so they load, draw and colour like any others and
+// the operator has no visual cue at all; their uncertainty is not, so the run
+// refuses every one; the load note names both frames, which is the only thing
+// that tells him it is his TF tree and not his selection; and the run's note
+// says where they went. Break any one of those and the failure goes quiet
+// again.
+TEST_F(ExplorerWindowFixture, ABagWithNoAttitudeChainLoadsSoundingsThatTheRunThenDrops)
+{
+  using marine_perception_tools::CloudPassInfo;
+  using marine_perception_tools::MbesWindowOptions;
+  using marine_perception_tools::load_cloud_passes;
+  using marine_perception_tools::read_mbes_window;
+  using marine_perception_tools::run_cube;
+
+  const std::string bag_uri =
+    std::string(::testing::TempDir()) + "/explorer_no_attitude_bag";
+  std::filesystem::remove_all(bag_uri);
+  const std::int64_t t0 = 1700000000000000000LL;
+  const std::int64_t t1 = t0 + 20000000000LL;
+  writeLightBag(bag_uri, t0, t1, /* with_attitude_chain= */ false);
+
+  // 1. THE READ. The position lookup resolves and the attitude lookup does
+  //    not — for EVERY ping that reached the projector, which is what makes
+  //    this the frame tree rather than a few unlucky stamps. Heave is still
+  //    published, so it is the one difference from the good bag.
+  const auto win = read_mbes_window(bag_uri, t0, t1);
+  ASSERT_GT(win.diagnostics.pings, 0u);
+  ASSERT_FALSE(win.world_soundings.empty());
+  EXPECT_EQ(win.diagnostics.missing_attitude, win.diagnostics.pings);
+  EXPECT_EQ(win.diagnostics.missing_heave, 0u);
+  EXPECT_EQ(win.skipped_pings, 0);
+  for (const auto & s : win.world_soundings) {
+    ASSERT_TRUE(std::isfinite(s.x) && std::isfinite(s.y) && std::isfinite(s.z))
+      << "a missing attitude must not move the sounding — only its error";
+    ASSERT_TRUE(std::isnan(s.vertical_variance));
+    ASSERT_TRUE(std::isnan(s.horizontal_variance));
+  }
+
+  // 2. THE LOAD NOTE, from the loader the explorer actually calls. The count
+  //    alone cannot be acted on; the frame names can.
+  CloudPassInfo pass;
+  pass.bag_path = bag_uri;
+  pass.label = "no-attitude";
+  pass.t_start_ns = t0;
+  pass.t_end_ns = t1;
+  const auto out = load_cloud_passes(
+    {pass}, std::nullopt, std::make_shared<std::atomic<bool>>(false));
+  ASSERT_EQ(out.pass_clouds.size(), 1u);
+  ASSERT_FALSE(out.pass_clouds[0].empty());
+  const QString notes = out.notes.join("\n");
+  const MbesWindowOptions frames;
+  EXPECT_TRUE(notes.contains("had no attitude transform")) << notes.toStdString();
+  EXPECT_TRUE(notes.contains(QString::fromStdString(frames.level_frame)))
+    << notes.toStdString();
+  EXPECT_TRUE(notes.contains(QString::fromStdString(frames.base_link_frame)))
+    << notes.toStdString();
+  EXPECT_TRUE(notes.contains("drop every one of them")) << notes.toStdString();
+
+  // 3. THE RUN. Not one node is estimated, every sounding is accounted for in
+  //    the skip note, and the note sends the reader to the count that can
+  //    explain it. The grid still exists — the positions were fine — so the
+  //    only thing separating this from a real surface is the note.
+  const auto surface = run_cube(out.pass_clouds[0], 1.0);
+  ASSERT_TRUE(surface.ok()) << surface.note;
+  EXPECT_EQ(surface.soundings_in, out.pass_clouds[0].size());
+  EXPECT_EQ(surface.note.rfind("0 of ", 0), 0u) << surface.note;
+  EXPECT_NE(
+    surface.note.find(
+      std::to_string(out.pass_clouds[0].size()) + " sounding(s) skipped"),
+    std::string::npos) << surface.note;
+  EXPECT_NE(surface.note.find("invalid uncertainty"), std::string::npos)
+    << surface.note;
+  EXPECT_NE(surface.note.find("missing-attitude count"), std::string::npos)
+    << surface.note;
+  for (const float d : surface.depth) {
+    ASSERT_TRUE(std::isnan(d)) << "a dropped sounding must leave no estimate";
+  }
+
+  std::filesystem::remove_all(bag_uri);
 }
 
 // The operator's second complaint, as a test: a CUBE run must ADD a surface
@@ -1498,6 +1683,96 @@ TEST_F(ExplorerWindowFixture, TheHoveredFixTimeFollowsTheUtcToggle)
   utc->setChecked(true);
   EXPECT_TRUE(readout->text().endsWith(" UTC"));
   EXPECT_EQ(readout->text(), timeline->formatTime(1000));
+}
+
+// The status label is width-Ignored so a long note cannot resize the window,
+// which means it CLIPS — and the CUBE-lab load note is ~1.5 kB of frame and
+// drop counts plus the offline-defaults caveat, i.e. the clipped part is the
+// part worth reading (#55 review). Every write mirrors the whole line into
+// the tooltip, including the opening message, so hovering recovers it and no
+// tooltip outlives the text it described.
+TEST_F(ExplorerWindowFixture, TheStatusTooltipCarriesTheWholeLineThroughEveryUpdate)
+{
+  app();
+  if (!gl_available()) {
+    GTEST_SKIP() << "no usable offscreen GL context";
+  }
+  SidescanViewerWindow window;
+  auto * status = window.findChild<QLabel *>("status");
+  ASSERT_NE(status, nullptr);
+  EXPECT_FALSE(status->text().isEmpty());
+  EXPECT_EQ(status->toolTip(), status->text());
+
+  // ...and it FOLLOWS the text: a later, shorter status must not leave the
+  // earlier note's tooltip behind.
+  auto * canvas = window.findChild<SidescanCanvas *>();
+  ASSERT_NE(canvas, nullptr);
+  emit canvas->cubeBoxSelected(kLat - 0.001, kLon - 0.001, kLat + 0.001, kLon + 0.001);
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(status->text().contains("CUBE box")) << status->text().toStdString();
+  EXPECT_EQ(status->toolTip(), status->text());
+
+  // The invariant the one-way rule actually buys, stated so it also covers
+  // the one site that adds to the tooltip rather than only mirroring it: the
+  // cloud load summarizes past the first few per-pass notes and passes the
+  // rest as setStatusText's `detail`, which is APPENDED. That site needs a
+  // bag-backed async load to reach, so it is not driven here; what is pinned
+  // here is that the tooltip never DROPS the line it belongs to.
+  EXPECT_TRUE(status->toolTip().startsWith(status->text()))
+    << status->toolTip().toStdString();
+}
+
+// The #57 fix, pinned (#58 review). discoverBasemapLayers walks whatever sits
+// beside the index, three levels deep, and used to do it with the THROWING
+// directory_entry::is_directory(). A symlink it could not follow escaped as a
+// filesystem_error out of openSurveyIndex — taking the window down rather
+// than costing it one candidate layer; that is how 22 window tests failed at
+// once against a recursive symlink that happened to be sitting in the shared
+// temp dir. Both shapes that do it are here, beside an ordinary layer: a
+// symlink to nothing (status() -> ENOENT) and one that points at itself
+// (status() -> ELOOP). What must survive is the layer.
+TEST_F(ExplorerWindowFixture, ABrokenSymlinkBesideTheIndexCostsOneEntryNotTheWindow)
+{
+  app();
+  namespace fs = std::filesystem;
+  const fs::path root = fs::path(::testing::TempDir()) / "basemap_symlink_root";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  fs::create_directories(root / "extra_layer", ec);
+  ASSERT_FALSE(ec) << ec.message();
+  {
+    // has_tif() classifies by extension only, and BasemapLod degrades to "no
+    // store tiles" on a name it cannot parse — so the layer needs to exist,
+    // not to be a readable GeoTIFF.
+    std::ofstream tif((root / "extra_layer" / "placeholder.tif").string());
+    tif << "not a real tif";
+  }
+  fs::create_symlink("nowhere_at_all", root / "dangling", ec);
+  ASSERT_FALSE(ec) << ec.message();
+  fs::create_symlink(root / "loop", root / "loop", ec);
+  ASSERT_FALSE(ec) << ec.message();
+
+  const fs::path index = root / "survey_index.db";
+  fs::copy_file(db_path_, index, fs::copy_options::overwrite_existing, ec);
+  ASSERT_FALSE(ec) << ec.message();
+
+  SidescanViewerWindow window;
+  // The throw the fix removed came from HERE, during the open — so the
+  // assertion is the call itself completing.
+  ASSERT_NO_THROW(window.openSurveyIndex(index.string(), std::string()));
+
+  auto * layers = window.findChild<QComboBox *>("basemap_layer_combo");
+  ASSERT_NE(layers, nullptr);
+  bool found = false;
+  for (int i = 0; i < layers->count(); ++i) {
+    if (layers->itemText(i).contains("extra_layer")) {
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found)
+    << "the valid layer beside the bad symlinks was not discovered";
+
+  fs::remove_all(root, ec);
 }
 
 // The point of the whole feature: the click cues. It goes through the same
@@ -1949,7 +2224,7 @@ void writeSidescanBag(const std::string & uri, std::int64_t t0_ns, std::int64_t 
     tf2_msgs::msg::TFMessage tfm;
     geometry_msgs::msg::TransformStamped pose;
     pose.header.frame_id = "bizzy/map";
-    pose.child_frame_id = "bizzy/base_link";
+    pose.child_frame_id = "bizzy/base_link_north_up";
     pose.header.stamp.sec = static_cast<std::int32_t>(t / 1000000000LL);
     pose.header.stamp.nanosec = static_cast<std::uint32_t>(t % 1000000000LL);
     pose.transform.translation.x = 0.2 * i;   // ~24 m of line
@@ -1963,6 +2238,27 @@ void writeSidescanBag(const std::string & uri, std::int64_t t0_ns, std::int64_t 
     anchor.transform.translation.y = ay;
     anchor.transform.translation.z = az;
     tfm.transforms.push_back(anchor);
+
+    // The chains cube::DetectionsProjector needs (#55): attitude
+    // (base_link_north_up <- base_link) and heave (map_tide <- base_link).
+    // Without them the error model has no roll/pitch, every sounding's
+    // uncertainty comes out NaN, and run_cube drops the lot — so a bag that
+    // omits them is not a simpler bag, it is one this path cannot estimate
+    // from. The shape mirrors the real recording: base_link hangs off the
+    // level frame, and the tide frame off the map.
+    geometry_msgs::msg::TransformStamped level = pose;
+    level.header.frame_id = "bizzy/base_link_north_up";
+    level.child_frame_id = "bizzy/base_link";
+    level.transform.translation.x = 0.0;
+    level.transform.translation.y = 0.0;
+    level.transform.translation.z = 0.0;
+    tfm.transforms.push_back(level);
+
+    geometry_msgs::msg::TransformStamped tide = level;
+    tide.header.frame_id = "bizzy/map";
+    tide.child_frame_id = "bizzy/map_tide";
+    tfm.transforms.push_back(tide);
+
     writer.write(tfm, "/tf", rclcpp::Time(t));
   }
 

@@ -21,9 +21,11 @@
 #include <string>
 #include <vector>
 
+#include "cube_bathymetry/projection_summary.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 
 #include "mbes_geometry.hpp"
+#include "mbes_projection.hpp"
 #include "tf_lift.hpp"
 
 namespace marine_perception_tools
@@ -37,11 +39,29 @@ namespace marine_perception_tools
 // there) up to the window end, then a seek to the window for the detections.
 
 // Frame/topic knobs, defaulting to the same conventions as SidescanBagOptions.
+//
+// The three projector frames (#55) are the ones cube::DetectionsProjector
+// needs to resolve attitude (level <- base_link) and heave (tide <- base_link)
+// for the error model. Their defaults are NOT the cube library's — they were
+// read out of a real BizzyBoat M3 recording (the 2026-08-20 bizzy_timing bag)
+// and are namespaced to match, like SidescanBagOptions::base_frame.
+//
+// This matters more than a default usually does. cube::ProjectorParams
+// defaults base_link_frame to an unprefixed "base_link", and these bags carry
+// a `bizzy/base_link -> base_link -> base_link_frd` alias chain, so an
+// unprefixed lookup resolves to SOMETHING without throwing: the attitude would
+// silently come from a frame that is not the boat, and every sounding's
+// uncertainty with it. Carrying the frame here, next to the two that were
+// already namespaced, is what stops that.
 struct MbesWindowOptions
 {
   std::string world_frame = "bizzy/map";  // local-tangent ENU render frame
   std::string geo_frame = "earth";        // geo anchor for cross-bag reprojection
   std::string detections_topic;           // empty -> kMbesDetectionsTopic
+  // cube::DetectionsProjector frames, verified against a real bag (#55).
+  std::string base_link_frame = "bizzy/base_link";
+  std::string level_frame = "bizzy/base_link_north_up";
+  std::string tide_frame = "bizzy/map_tide";
 };
 
 struct MbesWindowResult
@@ -51,6 +71,19 @@ struct MbesWindowResult
   std::vector<MbesSounding> world_soundings;
   int used_pings = 0;
   int skipped_pings = 0;  // detections in the window with no resolvable TF
+  // What the real projector did with this window (#55), in the accumulator
+  // type cube_bathymetry's own offline tools use — so report_projection_summary
+  // can format it, and so a caller can sum several windows field by field.
+  // `reports_georeferencing` is false: this path's "georeferenced" concept
+  // (has_geo / earth_from_world, the cross-bag earth-anchor reprojection) is a
+  // different thing from per-sounding georeferencing, and the summary must not
+  // conflate the two.
+  cube::ProjectionRunTotals diagnostics;
+  // Drops the projector's own counters have no field for: a ping refused for a
+  // non-positive sound speed, and a sounding refused for a non-positive slant
+  // range. See project_ping().
+  int invalid_pings = 0;
+  int invalid_beams = 0;
   // earth<-world at the window midpoint, when the bag carries the geo anchor.
   bool has_geo = false;
   geometry_msgs::msg::TransformStamped earth_from_world;
@@ -60,6 +93,42 @@ struct MbesWindowResult
   // one as data.
   bool cancelled = false;
 };
+
+// Fold one ping's projection into a window result's running totals (#55).
+//
+// Named and exposed rather than inlined in the read loop so it can be checked
+// without a bag: it is the step every count in the lab's load note is built
+// from, and a silent slip here (a field added to ProjectionDiagnostics and not
+// accumulated, say) would understate a drop population rather than fail.
+//
+// `beams` comes from ProjectionDiagnostics::total — the soundings the error
+// model produced BEFORE the range gate, one per beam — so
+// beams = soundings + filtered_range + invalid_beams holds per ping and
+// therefore over the sum. A ping refused for an unusable sound speed
+// contributes to none of them: it is counted once, in `invalid_pings`.
+inline void accumulate_ping(MbesWindowResult & result, const PingProjection & p)
+{
+  // `ProjectionRunTotals::pings` means "pings handed to
+  // DetectionsProjector::project()", and a ping refused for an unusable sound
+  // speed was never handed to it — project_ping returns before that call. It
+  // is counted in `invalid_pings` instead. Counting it here too would both
+  // double-count it and mislead: cube's summary warns on
+  // `pings > 0 && soundings == 0` by telling the operator to check his
+  // FRAMES, so a bag whose every ping carries a bad sound speed would be
+  // reported as a frame problem (#55 review).
+  if (p.invalid_pings == 0) {
+    result.diagnostics.pings += 1;
+  }
+  result.diagnostics.beams += p.diagnostics.total;
+  result.diagnostics.soundings += p.soundings.size();
+  result.diagnostics.filtered_range += p.diagnostics.filtered_range;
+  result.diagnostics.missing_attitude += p.diagnostics.missing_attitude;
+  result.diagnostics.missing_heave += p.diagnostics.missing_heave;
+  result.diagnostics.default_beamwidth_beams += p.diagnostics.default_beamwidth_beams;
+  result.diagnostics.missing_rx_angle_beams += p.diagnostics.missing_rx_angle_beams;
+  result.invalid_pings += static_cast<int>(p.invalid_pings);
+  result.invalid_beams += static_cast<int>(p.invalid_beams);
+}
 
 // `cancel` (optional) is polled per bag message in every read loop — the TF
 // prepasses and the detections pass alike (#44). A window read is minutes of

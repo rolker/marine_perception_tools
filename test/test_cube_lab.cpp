@@ -37,9 +37,59 @@ using marine_perception_tools::MbesSounding;
 using marine_perception_tools::build_cube_mesh;
 using marine_perception_tools::run_cube;
 
+
+// THE PLACEHOLDER FORMULA, kept here as a TEST-ONLY helper (#55).
+//
+// run_cube used to compute each sounding's uncertainty itself, from the beam
+// angle and slant range, through src/sounding_uncertainty.hpp. It now reads
+// real cube::ErrorModel variances off the sounding, and that header is gone —
+// but several tests below are characterisations whose expected numbers were
+// produced under that formula, and whose subject is CUBE's response to a
+// variance RATIO across the swath, not the formula itself. Re-deriving their
+// numbers under the real model would change what they measure and lose the
+// recorded comparison.
+//
+// So the formula moves here, verbatim in effect, and the synthetic soundings
+// are stamped with it explicitly. It is no longer production code and no
+// longer claims to be a model of anything: it is the fixture that keeps these
+// tests measuring what they measured before.
+//
+//   sigma_z^2 = max(hypot(sigma_R cos t, R sigma_theta sin t), floor)^2
+//   sigma_y^2 = max(hypot(hypot(sigma_R sin t, R sigma_theta cos t),
+//                         sigma_pos), floor)^2
+//
+// with sigma_R = 0.5% of slant range, sigma_theta = 2 deg / 12, floor 0.05 m,
+// and sigma_pos = 0.2 m + 1% of depth. Geometry that cannot produce an answer
+// (non-finite, or a negative range) leaves both variances NaN — which is what
+// run_cube's gate now refuses.
+void stampPlaceholderVariances(MbesSounding & s)
+{
+  const double angle = s.beam_angle;
+  const double range = s.slant_range;
+  if (!std::isfinite(angle) || !std::isfinite(range) || range < 0.0) {
+    s.vertical_variance = std::numeric_limits<float>::quiet_NaN();
+    s.horizontal_variance = std::numeric_limits<float>::quiet_NaN();
+    return;
+  }
+  constexpr double kFloorM = 0.05;
+  const double sigma_r = std::fabs(range) * 0.005;
+  const double angular = range * ((2.0 * M_PI / 180.0) / 12.0);
+  const double cos_t = std::cos(angle);
+  const double sin_t = std::sin(angle);
+  const double depth = range * std::fabs(cos_t);
+  const double sigma_pos = 0.2 + 0.01 * depth;
+  const double sigma_z =
+    std::fmax(std::hypot(sigma_r * cos_t, angular * sin_t), kFloorM);
+  const double sigma_y = std::fmax(
+    std::hypot(std::hypot(sigma_r * sin_t, angular * cos_t), sigma_pos), kFloorM);
+  s.vertical_variance = static_cast<float>(sigma_z * sigma_z);
+  s.horizontal_variance = static_cast<float>(sigma_y * sigma_y);
+}
+
 // A dense flat patch at z = -10 m: 0.25 m sounding spacing over 5x5 m. Every
-// beam is nadir over its own depth — geometry run_cube now requires to give a
-// sounding an uncertainty at all (#49); a beam with none is dropped.
+// beam is nadir over its own depth, and carries the variances that geometry
+// produced under the placeholder formula above — run_cube reads them off the
+// sounding now (#55) and drops one whose uncertainty it cannot use.
 std::vector<MbesSounding> flatPatch(float z = -10.0f, float intensity = -30.0f)
 {
   std::vector<MbesSounding> out;
@@ -52,25 +102,78 @@ std::vector<MbesSounding> flatPatch(float z = -10.0f, float intensity = -30.0f)
       s.intensity = intensity;
       s.beam_angle = 0.0f;
       s.slant_range = std::abs(z);
+      stampPlaceholderVariances(s);
       out.push_back(s);
     }
   }
   return out;
 }
 
-// A sounding with no beam geometry cannot be given an angle-aware uncertainty
-// (#49), so it is dropped rather than inserted with a fabricated one — and the
-// run says so instead of quietly estimating from fewer beams than it was given.
-TEST(RunCube, SoundingsWithoutBeamGeometryAreSkippedAndNoted)
+// A sounding whose uncertainty CUBE cannot use is dropped rather than inserted
+// with a fabricated one — and the run says so instead of quietly estimating
+// from fewer soundings than it was given.
+//
+// The gate is CUBE's own (Parameters::influenceRadius, #55), which is stricter
+// than the check it replaced in one way that matters: a ZERO vertical variance
+// is refused too, not only a negative or non-finite one. A sounding of perfect
+// vertical certainty produced a NaN radius that was then cast to int for the
+// spread loop's bounds.
+TEST(RunCube, SoundingsWithUnusableUncertaintyAreSkippedAndNoted)
 {
   auto soundings = flatPatch();
-  soundings[0].beam_angle = std::numeric_limits<float>::quiet_NaN();
-  soundings[1].slant_range = std::numeric_limits<float>::quiet_NaN();
+  soundings[0].vertical_variance = std::numeric_limits<float>::quiet_NaN();
+  soundings[1].horizontal_variance = std::numeric_limits<float>::quiet_NaN();
+  soundings[2].vertical_variance = 0.0f;          // the case the old gate let through
+  soundings[3].horizontal_variance = -1.0f;
   const auto surface = run_cube(soundings, 0.5);
   ASSERT_TRUE(surface.ok()) << surface.note;
   EXPECT_EQ(surface.soundings_in, soundings.size());   // what it was handed
-  EXPECT_NE(surface.note.find("2 sounding(s) skipped"), std::string::npos)
+  EXPECT_NE(surface.note.find("4 sounding(s) skipped"), std::string::npos)
     << surface.note;
+  // The note names the symptom and points at where the causes are counted,
+  // rather than attributing every drop to the beam geometry.
+  EXPECT_NE(surface.note.find("invalid uncertainty"), std::string::npos)
+    << surface.note;
+}
+
+// A sounding that never went through the real projector carries no variances
+// at all (MbesSounding defaults both to NaN). It must be dropped, not read as
+// a sounding of unknown-but-acceptable quality.
+TEST(RunCube, SoundingsThatNeverReachedTheProjectorAreSkipped)
+{
+  auto soundings = flatPatch();
+  for (auto & s : soundings) {
+    s.vertical_variance = std::numeric_limits<float>::quiet_NaN();
+    s.horizontal_variance = std::numeric_limits<float>::quiet_NaN();
+  }
+  const auto surface = run_cube(soundings, 0.5);
+  // Every sounding is refused, so the grid exists but nothing is estimated —
+  // an empty surface the note accounts for, never a surface built from
+  // soundings of assumed quality.
+  EXPECT_NE(
+    surface.note.find(std::to_string(soundings.size()) + " sounding(s) skipped"),
+    std::string::npos) << surface.note;
+  for (const float d : surface.depth) {
+    EXPECT_FALSE(std::isfinite(d)) << surface.note;
+  }
+}
+
+// The run reports its own wall time (#55): the spread loop is quadratic in
+// each sounding's influence radius, and the real error model changes the
+// variances that radius is computed from, so the cost of the swap has to be
+// measurable from the lab itself rather than predicted. (The prediction is
+// that it costs nothing at the fine cells — influenceRadius nets the
+// horizontal term against the depth budget and floors at the cell size, so
+// below ~0.75 m cells the radius is one cell either way, at any IHO budget.
+// Coarser cells reach the >= ~5.15 m cap and cost a few times that, which is
+// exactly why the run reports its own time.)
+TEST(RunCube, ReportsItsOwnWallTime)
+{
+  const auto surface = run_cube(flatPatch(), 0.5);
+  ASSERT_TRUE(surface.ok()) << surface.note;
+  EXPECT_NE(surface.note.find("nodes estimated in "), std::string::npos)
+    << surface.note;
+  EXPECT_NE(surface.note.find(" s"), std::string::npos) << surface.note;
 }
 
 TEST(RunCube, FlatPatchEstimatesThePlane)
@@ -204,6 +307,7 @@ TEST(RunCube, SelfCalCurveFlattensArbitraryGainBehaviour)
       const double tl = 40.0 * std::log10(s.slant_range) +
         2.0 * alpha * s.slant_range;
       s.intensity = static_cast<float>(-30.0 - tl - 0.005 * a * a);
+      stampPlaceholderVariances(s);
       soundings.push_back(s);
     }
   }
@@ -331,8 +435,9 @@ TEST(RunCube, UsesTheBudgetInTheTuningNotAPresetName)
       s.y = 200.0 + 1.0 * j;
       s.z = -5.0;
       s.intensity = -30.0f;
-      s.beam_angle = 0.0f;      // nadir beams (#49: geometry or no sounding)
+      s.beam_angle = 0.0f;      // nadir beams
       s.slant_range = 5.0f;
+      stampPlaceholderVariances(s);
       sparse.push_back(s);
     }
   }
@@ -542,9 +647,11 @@ TEST(BuildCubeMesh, EmptySurfaceYieldsEmptyMesh)
 // plain averaging (the old, looser model) is hard to beat, and the angular
 // weighting shows up inside a hypothesis rather than in which one wins.
 //
-// The weighting itself is real and unit-tested (test_sounding_uncertainty):
-// a 65 deg beam carries about twice the vertical variance of a nadir beam over
-// the same depth. What this test records is that a variance ratio is not by
+// The weighting itself is real: a 65 deg beam carries about twice the vertical
+// variance of a nadir beam over the same depth. It is stamped onto these
+// soundings by stampPlaceholderVariances() above — the formula run_cube used
+// to apply internally, kept as a test fixture (#55) so the numbers this test
+// records stay comparable. What this test records is that a variance ratio is not by
 // itself a surface improvement on unbiased noise.
 //
 // It also does NOT correct a refraction SMILE: that bias is systematic, and
@@ -566,6 +673,7 @@ TEST(RunCube, TwoPassSurfaceOverACleanAndANoisyPassIsCharacterised)
       a.intensity = -30.0f;
       a.beam_angle = static_cast<float>(5.0 * M_PI / 180.0);
       a.slant_range = static_cast<float>(-truth / std::cos(a.beam_angle));
+      stampPlaceholderVariances(a);
       both.push_back(a);
       // Pass B: the same ground at the swath edge, scattered. Deterministic
       // (a fixed sawtooth), so the number this test reports is reproducible.
@@ -578,6 +686,7 @@ TEST(RunCube, TwoPassSurfaceOverACleanAndANoisyPassIsCharacterised)
       b.intensity = -30.0f;
       b.beam_angle = static_cast<float>(65.0 * M_PI / 180.0);
       b.slant_range = static_cast<float>(-truth / std::cos(b.beam_angle));
+      stampPlaceholderVariances(b);
       both.push_back(b);
     }
   }
@@ -638,6 +747,7 @@ TEST(RunCube, AngleCorrelatedNoiseIsSuppressedWhereSwathsOverlap)
         s.intensity = -30.0f;
         s.beam_angle = static_cast<float>(angle);
         s.slant_range = static_cast<float>(range);
+        stampPlaceholderVariances(s);
         v.push_back(s);
       }
     }

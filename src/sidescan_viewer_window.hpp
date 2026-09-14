@@ -382,6 +382,23 @@ private:
   // to a full window (slider units are metres).
   void updateScrubStep();
 
+  // THE one way to write the status line. The label is width-Ignored on
+  // purpose — a long load note must not resize the window — so long text
+  // CLIPS, and the CUBE-lab load note is ~1.5 kB of frame/drop counts and the
+  // offline-defaults caveat: the part that clips is the part worth reading
+  // (#55 review). This mirrors the whole line into the label's tooltip, so
+  // hovering recovers it. Every status write goes through here rather than
+  // one site setting a tooltip, because a tooltip set once outlives the text
+  // it described and would then report an earlier status.
+  //
+  // `detail` is for the one case where the line is a SUMMARY of something
+  // longer — the cloud load elides past the first few per-pass notes — and
+  // the hover should recover the rest. It is APPENDED to the line rather
+  // than replacing it, so the tooltip always still carries the status it
+  // belongs to, and it still goes through this one function so the mirror
+  // cannot be bypassed.
+  void setStatusText(const QString & text, const QString & detail = QString());
+
   SidescanCanvas * canvas_ = nullptr;
   QSlider * scrub_ = nullptr;
   QDoubleSpinBox * grid_spin_ = nullptr;
