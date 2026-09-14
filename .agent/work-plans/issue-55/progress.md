@@ -131,3 +131,23 @@ not yet carry, plus a test gap, are below.
 - [ ] (suggestion) Accumulate `beams` from `ProjectionDiagnostics::total` (`ErrorModel::compute` emits exactly one sounding per beam and never skips) rather than a separately-counted "ping's beam count", so the denominator cannot drift from the numerators — `plan.md:197-199`
 - [ ] (suggestion) Make `minimum_range`'s 0.05 a named constant in `mbes_projection.hpp` carrying the rationale, so the open question has one site to revisit — `plan.md:137-147`
 - [ ] (verified, no change) `cube::Sounding::sonar_relative_position` is pure sonar-frame geometry identical to `project_beam`'s formula, so lifting the projector's output with `tf_lift` does not double-apply attitude; `read_mbes_window` fills its TF buffer for the whole window before reading any detections, so the prior review's "END-OF-BAG attitude reported healthy" hazard does not recur on this path (a frame mismatch raises LookupException, counted as `missing_attitude`); and `run_cube` is fed only from `load_cloud_passes`, so no NaN-variance soundings arrive from the untouched cloud path
+
+## Plan Authored
+**Status**: complete (revision 3)
+**When**: 2026-09-14 11:05 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+
+**Plan**: `.agent/work-plans/issue-55/plan.md` at `0722993`
+**Source**: Plan Review round 2 at `6ce1992` (changes-requested: 4 must-fix, 3 suggestions)
+
+### Resolved
+- [x] (must-fix) tests: new `test/test_mbes_projection.cpp` + additions to `test_mbes_window_reader.cpp` / `test_mbes_pass_loader.cpp` — Approach item 13, Files to Change
+- [x] (must-fix) validity guard: `project_ping` drops `sound_speed <= 0` pings and `twtt <= 0` beams (zero and negative) with `invalid_pings`/`invalid_beams` counts — Approach item 1
+- [x] (must-fix) GPS default / influence radius: decision 7 — operator (2026-09-14) chose library defaults, matching the boat and every offline tool; 2 m GPS named first in the caveat; runtime measured on a real pass (Approach item 12); general fix parked as unh_marine_autonomy#385
+- [x] (must-fix) `err` stream of `report_projection_summary` appended to the load note — Approach item 7
+- [x] (suggestion) `skipped_pings` + invalid counts surfaced in the note — Approach item 7
+- [x] (suggestion) `beams` accumulated from `ProjectionDiagnostics::total` — Approach item 6
+- [x] (suggestion) `kOfflineMinimumRangeM` named constant — Approach item 1, Open Questions
+
+### Findings
+- [ ] Ready for Plan Review round 3
