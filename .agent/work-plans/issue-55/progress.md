@@ -151,3 +151,33 @@ not yet carry, plus a test gap, are below.
 
 ### Findings
 - [ ] Ready for Plan Review round 3
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 10:59 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-55/plan.md` at `0722993` (revision 3)
+**PR**: PR-less (`--issue` mode; branch `feature/issue-55`, not pushed)
+**Verdict**: changes-requested
+
+All four round-2 must-fixes and all three suggestions are present in revision 3,
+and each new claim was re-verified against source: decision 7 is accurate
+(`detections_to_pointcloud.cpp:128-137` sets exactly `ellipsoidal_referenced`,
+`range_error_percent`, `range_error_floor_m` on `Vessel`/`Device`;
+`bizzyboat.yaml:100-104` sets only the three frame names; `import_bag_main.cpp:819`,
+`batch_regen_main.cpp:531`, `bag_to_geotiff.cpp:286` all default-construct
+`ProjectorParams`; `error_model.h:109` `gps_drms = 2.0`; `error_model.cpp:105,395`;
+`parameters.cpp:80-102`'s gate and `CONF_99PC*sqrt(h)` cap all read as the plan
+states). `ErrorModel::compute` (`error_model.cpp:440-480`) is indeed 1:1 per beam,
+so the `beams += ProjectionDiagnostics::total` suggestion holds. Two structural
+findings below; the first is a correctness error in the new guard.
+
+### Findings
+- [ ] (must-fix) The per-beam drop is index-based, but `DetectionsProjector::project` applies its range gate BEFORE returning (`detections_projector.cpp:200-209`), so `result.soundings[i]` is not beam `i` whenever any beam is range-filtered — and with `minimum_range = 0.05` plus NaN-position beams (absent/non-finite `rx_angles`) that is the normal case, so the wrong sounding gets dropped; drop by VALUE instead — `cube::Sounding::slant_range` is `twtt * sound_speed / 2` (`sounding.h:45-49`), so `slant_range <= 0 || !isfinite` is an exact, index-free witness of the retired `twtt <= 0` guard — `plan.md:186-190`
+- [ ] (must-fix) Target-level build consequence missing: `mbes_window_reader.cpp` lives in `sidescan_core`, whose `SIDESCAN_CORE_DEPS` (`CMakeLists.txt:105-116`) does NOT include `cube_bathymetry`, and every cube_bathymetry consumer in this file also needs the `CUBE_BATHYMETRY_INCLUDE_ROOT` SYSTEM include (`CMakeLists.txt:26-29`) because the exported interface misses a level. Putting `mbes_projection.cpp` in the library and `cube::ProjectionRunTotals` in the public `MbesWindowResult` propagates that to `sidescan_probe`, `test_mbes_window_reader`, `test_mbes_pass_loader` and `test_session_index_io`. The Context line "already a `find_package`d dependency — no new dependency" is true per-package and false per-target; say which targets gain `cube_bathymetry` + the include root — `plan.md:28-29,426`
+- [ ] (suggestion) State the note's arithmetic: an invalid beam dropped after projection PASSED the range gate, so it is counted in `beams` and in neither `soundings` nor `filtered_range`; say `beams = soundings + filtered_range + invalid_beams` so the load note reconciles instead of appearing to lose beams — `plan.md:186-190,242-254`
+- [ ] (suggestion) Approach item 12's measurement has no headless path: `run_cube`'s only non-GUI caller is `test_cube_lab.cpp`; the survey-explorer GUI is the only thing that loads a real multi-pass selection. Name how the before/after timing is taken (a temporary bench target over `load_cloud_passes` + `run_cube`, or an operator-run GUI measurement) or the number will be quietly skipped at implementation time — `plan.md:375-383`
+- [ ] (suggestion) `kOfflineMinimumRangeM = 0.05` is itself a divergence from the production store decision 7 otherwise matches: the live node's `minimum_range` default is `0.0` and BizzyBoat does not override it (`detections_to_pointcloud.cpp:347`, `bizzyboat.yaml:100-104`; lr30 sets 5.0). Negligible in effect, but one clause in the caveat/plan keeps "the lab runs what the boat runs" honest — `plan.md:171-178`
+- [ ] (suggestion) `test_tf_lift.cpp:52` `IdentityTransformCarriesEveryField` is the test whose name promises every field; extend it to the two new fields as well, not only the NaN and rotated-lift cases — `plan.md:339-344`
+- [ ] (verified, no change) Round-2's four must-fixes and three suggestions are all genuinely present in the plan text, not merely claimed in the Plan Authored entry; every referenced issue exists as described (marine_perception_tools#56, unh_marine_autonomy#385, cube_bathymetry#158/#145), the 2026-08-20 bag path in decision 6 resolves on the NAS, and the cited line numbers in `sidescan_viewer_window.cpp:112,934`, `cube_lab.cpp:305-330`, `test_cube_lab.cpp:545-552`, `test_tf_lift.cpp` and `CMakeLists.txt` all match
