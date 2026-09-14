@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -65,6 +66,9 @@ MbesWindowResult read_mbes_window(
 {
   MbesWindowResult result;
   result.world_frame = options.world_frame;
+  // This path does not georeference per sounding; its own earth-anchor
+  // reprojection (has_geo) is a different concept (see MbesWindowResult).
+  result.diagnostics.reports_georeferencing = false;
   const auto stop = [&cancel]() {
       return cancel && cancel->load(std::memory_order_relaxed);
     };
@@ -73,6 +77,12 @@ MbesWindowResult read_mbes_window(
   const auto abandon = [&result]() {
       result.world_soundings.clear();
       result.used_pings = 0;
+      // The counters describe soundings that no longer exist; a cancelled read
+      // reports no projection run at all rather than a partial one.
+      result.diagnostics = cube::ProjectionRunTotals{};
+      result.diagnostics.reports_georeferencing = false;
+      result.invalid_pings = 0;
+      result.invalid_beams = 0;
       result.cancelled = true;
       return result;
     };
@@ -155,6 +165,13 @@ MbesWindowResult read_mbes_window(
     }
   }
 
+  // One projector for the whole window: its params (frames, range gate,
+  // library-default vessel/device) do not vary per ping, and it owns an
+  // ErrorModel whose static terms are computed once in the constructor.
+  const cube::DetectionsProjector projector(
+    offline_projector_params(
+      options.base_link_frame, options.level_frame, options.tide_frame));
+
   // Detections pass: seek to the window (sequential-scan fallback when the
   // storage doesn't support seek — the readMbesWindow precedent), filtered to
   // the detections topic. Window membership tests the HEADER stamp (what the
@@ -196,11 +213,19 @@ MbesWindowResult read_mbes_window(
         ++result.skipped_pings;
         continue;
       }
+      // The REAL projection (#55): cube::DetectionsProjector + cube::ErrorModel
+      // through project_ping, in place of the one-sound-speed re-derivation
+      // this path used to do with project_detections. Speed over ground is NaN
+      // — there is no odometry source here, and the error model accepts it
+      // (flooring the speed-dependent latency terms to zero, which makes the
+      // horizontal error optimistic; the load note says so).
+      const PingProjection projected = project_ping(
+        projector, det, tf_buffer, std::numeric_limits<float>::quiet_NaN());
+      accumulate_ping(result, projected);
       // No per-ping reserve: reserve(size+n) allocates EXACTLY, so calling it
       // each ping defeats amortized doubling and turns the append quadratic
       // (measured: 50 s for a ~1M-sounding window; ~1 s without).
-      const std::vector<MbesSounding> sensor = project_detections(det);
-      for (const auto & s : sensor) {
+      for (const auto & s : projected.soundings) {
         result.world_soundings.push_back(
           lift_sounding_to_world(
             s,
