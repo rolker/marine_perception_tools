@@ -181,3 +181,22 @@ findings below; the first is a correctness error in the new guard.
 - [ ] (suggestion) `kOfflineMinimumRangeM = 0.05` is itself a divergence from the production store decision 7 otherwise matches: the live node's `minimum_range` default is `0.0` and BizzyBoat does not override it (`detections_to_pointcloud.cpp:347`, `bizzyboat.yaml:100-104`; lr30 sets 5.0). Negligible in effect, but one clause in the caveat/plan keeps "the lab runs what the boat runs" honest — `plan.md:171-178`
 - [ ] (suggestion) `test_tf_lift.cpp:52` `IdentityTransformCarriesEveryField` is the test whose name promises every field; extend it to the two new fields as well, not only the NaN and rotated-lift cases — `plan.md:339-344`
 - [ ] (verified, no change) Round-2's four must-fixes and three suggestions are all genuinely present in the plan text, not merely claimed in the Plan Authored entry; every referenced issue exists as described (marine_perception_tools#56, unh_marine_autonomy#385, cube_bathymetry#158/#145), the 2026-08-20 bag path in decision 6 resolves on the NAS, and the cited line numbers in `sidescan_viewer_window.cpp:112,934`, `cube_lab.cpp:305-330`, `test_cube_lab.cpp:545-552`, `test_tf_lift.cpp` and `CMakeLists.txt` all match
+
+## Plan Authored
+**Status**: complete (revision 4)
+**When**: 2026-09-14 11:40 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+
+**Plan**: `.agent/work-plans/issue-55/plan.md` (revision 4, commit after `b76602d`)
+**Source**: Plan Review round 3 at `b76602d` (changes-requested: 2 must-fix, 4 suggestions; both must-fixes mechanical, so folded in by the host and carried to the implementation checkpoint rather than a fourth review round)
+
+### Resolved
+- [x] (must-fix) invalid beams dropped by value (`slant_range <= 0 || !isfinite`), not by index — Approach item 1
+- [x] (must-fix) `cube_bathymetry` dep + SYSTEM include added to `sidescan_core` as PUBLIC so `sidescan_probe`, `test_mbes_window_reader`, `test_mbes_pass_loader`, `test_session_index_io`, `test_cube_lab` inherit it — Files to Change (CMakeLists.txt)
+- [x] (suggestion) load-note arithmetic `beams = soundings + filtered_range + invalid_beams` stated — Approach item 1
+- [x] (suggestion) runtime measurement driven through the explorer, wall-time line in the notes — Approach item 12
+- [x] (suggestion) `kOfflineMinimumRangeM` noted as a small divergence from production's `0.0` — Approach item 1
+- [x] (suggestion) `IdentityTransformCarriesEveryField` extended to the two new fields — Files to Change
+
+### Findings
+- [ ] Awaiting the operator's implementation checkpoint
