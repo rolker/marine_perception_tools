@@ -162,9 +162,11 @@ TEST(RunCube, SoundingsThatNeverReachedTheProjectorAreSkipped)
 // each sounding's influence radius, and the real error model changes the
 // variances that radius is computed from, so the cost of the swap has to be
 // measurable from the lab itself rather than predicted. (The prediction is
-// that it costs nothing — influenceRadius nets the horizontal term against
-// the depth budget and floors at the cell size, so at these cell sizes the
-// radius is one cell either way.)
+// that it costs nothing at the fine cells — influenceRadius nets the
+// horizontal term against the depth budget and floors at the cell size, so
+// below ~0.75 m cells the radius is one cell either way, at any IHO budget.
+// Coarser cells reach the >= ~5.15 m cap and cost a few times that, which is
+// exactly why the run reports its own time.)
 TEST(RunCube, ReportsItsOwnWallTime)
 {
   const auto surface = run_cube(flatPatch(), 0.5);

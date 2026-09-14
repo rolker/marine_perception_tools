@@ -282,10 +282,15 @@ lab runs the **library defaults** — and says so, in one caveat shown both in
    projector and all three offline `cube_bathymetry` tools run the same
    default, so the lab agrees with the store instead of inventing a tighter
    number. It does **not** smear the surface — `Parameters::influenceRadius`
-   subtracts the 99% horizontal term from the depth-budget term and floors
-   what is left at the cell size, so at the cell sizes the lab runs each
-   sounding still influences one cell; the ~5.15 m radius that 4 m² allows is
-   a ceiling, reached only at coarse cells under a loose vertical budget.
+   subtracts the 99% horizontal term from the depth-budget term, caps what is
+   left at that same horizontal term, and floors it at the cell size. The cap
+   is a ceiling of **at least ~5.15 m** (4 m² is a floor on the horizontal
+   variance and the other horizontal terms add to it), and it is reached only
+   at coarse cells. At fine cells — **below ~0.75 m — each sounding influences
+   one cell whatever the IHO budget**; at a 1 m cell it stays one cell for
+   order 1a or tighter and reaches ~1.5–2 m at order 2; the ceiling is not
+   reached until roughly 2 m cells. A coarse cell therefore costs a few times
+   the one-cell spread loop, not a hundred times.
 2. Lever arms are zero and the device is generic, so the M3's across-track
    beamwidth falls back to the device default — and since
    `kongsberg_em_bridge` currently reports no per-beam beamwidths

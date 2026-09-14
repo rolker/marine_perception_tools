@@ -183,16 +183,26 @@ std::string derive_box_curve(
 //
 // horizontal_variance is RADIAL (drms-derived) and feeds
 // Parameters::influenceRadius directly. Read that function before predicting
-// what it does to the surface: it SUBTRACTS the 99% horizontal term
-// (CONF_99PC*sqrt(horizontal_variance), >= ~5.15 m under the library's 2 m
-// GPS drms) from the depth-budget term, caps what is left at that same
-// horizontal term, and floors it at the cell size — the floor applied last
-// and winning. So a bigger horizontal variance makes a sounding spread LESS,
-// not more, and at the cell sizes this lab runs the radius is simply one
-// cell, as it was under the retired placeholder. ~5.15 m is a ceiling,
-// reached only at coarse cells under a vertical budget loose enough for the
-// depth-budget term to outrun it. What the real model changes is the WEIGHT
-// each sounding carries into the hypotheses, not how far it reaches.
+// what it does to the surface: with M = CONF_99PC*sqrt(horizontal_variance)
+// (>= ~5.15 m under the library's 2 m GPS drms — 4 m² is a FLOOR on the
+// variance and the other horizontal terms add to it) and D the depth-budget
+// term cell*sqrt(ratio-1), the radius is D - M, capped at M, floored at the
+// cell size — the floor applied last and winning. Two consequences, both
+// bounded:
+//   * A bigger horizontal variance makes a sounding spread LESS, not more —
+//     but only while the SUBTRACTION binds, i.e. while M > D/2. Once
+//     D > 2*M the cap binds instead, and there a bigger horizontal variance
+//     spreads MORE.
+//   * The radius is one cell only at FINE cells. With the library-default
+//     vertical variance (a ~0.006 m² floor) and the 4 m² horizontal floor:
+//     below ~0.75 m cells it is one cell at ANY IHO budget; at a 1 m cell it
+//     stays one cell for order 1a or tighter and reaches ~1.5-2 m at order 2;
+//     the >= ~5.15 m cap is reached around 2 m cells. The cell size is
+//     operator-set (the spin box spans 0.001-50 m), so coarse cells are
+//     reachable — they cost a few times the one-cell spread loop, not a
+//     hundred times.
+// What the real model changes is the WEIGHT each sounding carries into the
+// hypotheses; at fine cells it does not change how far one reaches at all.
 // A sounding whose uncertainty CUBE's own influenceRadius
 // refuses — non-finite depth, non-positive vertical variance, negative
 // horizontal variance — is skipped rather than given a fabricated error, and

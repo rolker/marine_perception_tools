@@ -164,9 +164,10 @@ TEST(OfflineProjectionCaveat, NamesTheGpsAssumptionFirstAndTheSpeedConsequence)
 
 // The 4 m² horizontal floor is real; the smeared surface it was once said to
 // cause is not. Parameters::influenceRadius subtracts the 99% horizontal term
-// from the depth-budget term and floors the result at the cell size, so at the
-// cell sizes the lab runs the radius is one cell and ~5.15 m is only a
-// ceiling. An operator who reads the caveat must not come away expecting a
+// from the depth-budget term, caps the result at that same term and floors it
+// at the cell size, so below ~0.75 m cells the radius is one cell at any IHO
+// budget and the >= ~5.15 m cap is only a ceiling, reached around 2 m cells.
+// An operator who reads the caveat must not come away expecting a
 // 5 m smear, so the text is pinned both ways: the ceiling is named as a
 // ceiling, and the old claim that CUBE "spreads each sounding over an
 // influence radius of about 5 m" may not come back.

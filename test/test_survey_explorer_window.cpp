@@ -306,9 +306,13 @@ TEST_F(ExplorerWindowFixture, PointAndSurfaceSelectorsShareOneColourVocabulary)
     EXPECT_EQ(surface->itemText(i), expected[i]);
   }
 
-  // A sounding carries no uncertainty (run_cube computes its own placeholder
-  // from the beam's angle and slant range, #49) and no sidescan (that is a
-  // drape onto CUBE nodes), so both are greyed — and each says why.
+  // Uncertainty stays greyed for the points, but not because a sounding has
+  // none: since #55 the CUBE-lab load projects through the real
+  // cube::ErrorModel and carries per-beam variances. The scrub window's own
+  // cloud still does not, so the channel would mean different things on
+  // different clouds; it opens when both sources carry them (mpt#56).
+  // Sidescan is greyed because it is a drape onto CUBE nodes, not something
+  // a sounding carries. Both say why.
   for (const QString & name : {QString("Uncertainty"), QString("Sidescan")}) {
     const int row = comboRowOf(*points, name);
     ASSERT_GE(row, 0);

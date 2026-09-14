@@ -195,8 +195,10 @@ CubeSurface run_cube(
   // Wall time for the whole run, reported in the note (#55). Swapping the
   // placeholder for the real error model changes every sounding's
   // influence radius (see the cube_lab.hpp note: influenceRadius nets the
-  // horizontal term against the depth budget, so at these cell sizes it stays
-  // one cell — the swap is not expected to cost anything), and the spread
+  // horizontal term against the depth budget, so below ~0.75 m cells it stays
+  // one cell at any IHO budget and past that grows to at most the >= ~5.15 m
+  // cap — a few times the one-cell loop at the coarsest cells the spin box
+  // allows, not a hundred times), and the spread
   // loop below is O(radius^2 / cell^2) per sounding. "Not expected to" is a
   // prediction, so the run reports its own elapsed time: a regression shows
   // up as a number rather than leaving the operator to guess.

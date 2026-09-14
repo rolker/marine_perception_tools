@@ -145,12 +145,21 @@ Plan Review's must-fixes):
    `max_radius = CONF_99PC·sqrt(horizontal_error)`, then caps at `max_radius`
    and **floors at `distance_scale` (the cell size), last and winning**. The
    horizontal term is SUBTRACTED, so the 4 m² floor makes a sounding spread
-   LESS, not more; `max_radius ≈ 5.15 m` is a CEILING, reachable only at
-   coarse cells under a vertical budget loose enough for the depth-budget term
-   to outrun it. At the cell sizes this lab runs (≤ 1 m) the radius is the
-   cell size — the same as under the retired placeholder — so the spread loop
-   does the same work and there is no ~100× slowdown to size. What the real
-   model changes is the WEIGHT each sounding carries, not its reach.
+   LESS, not more — but only while the subtraction is what binds
+   (`max_radius > D/2`, `D` the depth-budget term); past `D > 2·max_radius`
+   the cap binds and a larger horizontal term spreads MORE.
+   `max_radius >= ~5.15 m` (4 m² is a floor on the horizontal variance and the
+   other horizontal terms add to it) is a CEILING, reached only at coarse
+   cells.
+
+   **Bounded precisely** (library-default vertical variance, a ~0.006 m²
+   floor; 4 m² horizontal floor): below ~0.75 m cells the radius is one cell
+   **at any IHO budget**; at a 1 m cell it stays one cell for order 1a or
+   tighter and reaches ~1.5–2 m at order 2; the ceiling is reached around 2 m
+   cells. The lab's cell spin spans 0.001–50 m, so coarse cells are
+   reachable — the spread loop then costs a few times the one-cell case, not
+   the ~100× revision 2 feared. What the real model changes is the WEIGHT each
+   sounding carries; at fine cells it does not change its reach at all.
 
    Verified 2026-09-14: this is not a lab-only artefact. The live projector
    (`detections_to_pointcloud.cpp:128-137`) sets exactly three `Vessel`/
