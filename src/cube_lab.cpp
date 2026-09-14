@@ -408,12 +408,16 @@ CubeSurface run_cube(
     // Never silent — and no longer mis-attributed (#55). The drop used to be
     // reported as "no beam geometry", which was true when the uncertainty was
     // derived from the beam angle alone. The real error model can also NaN a
-    // sounding through a missing attitude or heave TF, so the note names the
-    // symptom and points at the load note, where the causes are counted,
-    // instead of guessing at one.
+    // sounding through a missing ATTITUDE TF: no `level <- base_link` means no
+    // roll/pitch, and both variances come out NaN. A missing HEAVE TF does not
+    // do this and must not be named alongside it (#58 review) — the projector
+    // defaults the heave to zero, so those soundings keep finite variances and
+    // survive the run. So the note names the symptom and points at the load
+    // note's missing-attitude count, instead of sending the operator to a
+    // count that cannot explain the drop.
     out.note += "; " + std::to_string(dropped_bad_uncertainty) +
-      " sounding(s) skipped — invalid uncertainty (see load notes for "
-      "missing-attitude/heave counts)";
+      " sounding(s) skipped — invalid uncertainty (see the load notes' "
+      "missing-attitude count)";
   }
   return out;
 }

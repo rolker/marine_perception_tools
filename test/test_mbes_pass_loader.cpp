@@ -238,6 +238,28 @@ TEST(ProjectionNotes, SayNothingAboutAttitudeWhenEveryPingHadIt)
     << notes.join("\n").toStdString();
 }
 
+// THE DISTINCTION THIS NOTE MUST KEEP (#58 review). Missing attitude and
+// missing heave are not two spellings of one failure, and the note may not
+// read as though they were. cube::DetectionsProjector NaNs roll and pitch
+// when the attitude chain is missing — which NaNs both variances and costs
+// every one of that ping's soundings at the run. When the HEAVE chain is
+// missing it defaults the heave to 0.0f instead: the variances stay finite
+// and the soundings survive. The count is still worth printing (a load that
+// is 100% missing heave says the tide frame is wrong), so what is pinned here
+// is that it is printed WITHOUT the drop claim that belongs to attitude.
+TEST(ProjectionNotes, AMissingHeaveIsCountedButNotReportedAsCostingSoundings)
+{
+  QStringList notes;
+  cube::ProjectionRunTotals t = sampleTotals();
+  t.missing_attitude = 0;
+  t.missing_heave = 17;
+  append_projection_notes(notes, t, 0, 0, 0);
+  const QString all = notes.join("\n");
+  EXPECT_TRUE(all.contains("17 missing heave")) << all.toStdString();
+  EXPECT_FALSE(all.contains("drop every one of them")) << all.toStdString();
+  EXPECT_FALSE(all.contains("NaN uncertainty")) << all.toStdString();
+}
+
 // cube's warnings are written for its three command-line tools. One of them
 // tells the reader to check "--*-frame overrides" against a README section;
 // the explorer has no such flags, and an operator sent looking for one finds

@@ -305,9 +305,19 @@ every offline tool reads — is unh_marine_autonomy#385.
 
 None of this corrects the refraction smile: that is a *systematic* error,
 which no uncertainty model removes — see #28. A sounding the error model
-cannot give a usable uncertainty (a missing attitude or heave transform will
-do it) is skipped rather than given an invented one, and the run's note says
-how many were, pointing at the load note where the causes are counted.
+cannot give a usable uncertainty is skipped rather than given an invented one,
+and the run's note says how many were, pointing at the load note where the
+cause is counted.
+
+That cause is a **missing attitude** transform. With no `level <- base_link`
+at the ping stamp the projector has no roll or pitch, so both variances come
+out NaN — while the position stays finite, which is why such soundings load,
+draw and colour like any others and only vanish at the run. A missing **heave**
+transform is a different matter and must not be read as the same failure: the
+projector defaults the heave to zero, the variances stay finite, and the
+sounding survives the run. Its count is in the load note because a load that
+is 100% missing heave says the tide frame is wrong — not because it costs a
+sounding.
 
 A **Run CUBE** *adds* its surface over the soundings already loaded instead of
 replacing them: after a run you are still looking at your selection, now with a
