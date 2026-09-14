@@ -318,8 +318,10 @@ CubeSurface run_cube(
     // computed at projection time from the ping's detections and the boat's
     // TF-derived attitude, and carried here on the sounding. They are already
     // variances — the contract cube::Sounding carries — so they are stored as
-    // computed, not squared again. The field names differ only because
-    // MbesSounding names them for what they are (see mbes_geometry.hpp).
+    // computed, not squared again. THE RENAME SITE, OUTBOUND: the field names
+    // differ only because MbesSounding names them for what they are (see
+    // mbes_geometry.hpp); project_ping() in mbes_projection.cpp is the
+    // matching inbound site, and there are no others.
     // World z is up (seabed negative) — the cube depth convention directly.
     cube::Sounding cs(static_cast<float>(s.z));
     cs.vertical_error = s.vertical_variance;

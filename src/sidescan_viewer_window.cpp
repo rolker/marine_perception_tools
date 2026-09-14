@@ -1201,7 +1201,13 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
       cube_drape_terrain_ = CubeSurface{};
       populateDrapePasses();
       refreshCubeSurface();
-      setStatusText(QString("CUBE %1 m: %2 soundings, %3 in %4 s%5%6")
+      // Two different elapsed times, so each one says which it is (#55
+      // review): run_cube's note carries the ESTIMATOR's own wall time, while
+      // the ticket times the whole job — the bag reads included, which on a
+      // multi-pass selection dominate. Run together as "… in 0.4 s in 31.2 s"
+      // they read as one confused measurement.
+      setStatusText(QString("CUBE %1 m: %2 soundings — %3. Whole job %4 s, "
+      "bag reads included.%5%6")
       .arg(cube_surface_.cell_m)
       .arg(cube_surface_.soundings_in)
       .arg(QString::fromStdString(cube_surface_.note))

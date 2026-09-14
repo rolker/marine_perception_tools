@@ -75,9 +75,10 @@ PingProjection project_ping(
     s.intensity = cs.intensity;
     s.beam_angle = cs.beam_angle;
     s.slant_range = cs.slant_range;
-    // THE ONE RENAME SITE (#55, leading cube_bathymetry#158): cube::Sounding
-    // spells these two variances `*_error`; MbesSounding names them for what
-    // they are. No other file translates between the two spellings.
+    // THE RENAME SITE, INBOUND (#55, leading cube_bathymetry#158):
+    // cube::Sounding spells these two variances `*_error`; MbesSounding names
+    // them for what they are. The only translation the other way is
+    // run_cube() in cube_lab.cpp, feeding the pair back to cube::Sounding.
     s.vertical_variance = cs.vertical_error;
     s.horizontal_variance = cs.horizontal_error;
     out.soundings.push_back(s);
@@ -102,8 +103,9 @@ const char * offline_projection_caveat()
     "reached only at coarse cells under a loose vertical budget; (2) lever "
     "arms are zero and "
     "the device is generic, so the M3's across-track beamwidth falls back to "
-    "the device default (kongsberg_em_bridge reports no per-beam beamwidths, "
-    "so this applies to every beam); (3) speed over ground is unavailable "
+    "the device default (kongsberg_em_bridge currently reports no per-beam "
+    "beamwidths — marine_tools#85 — so this applies to every beam); (3) speed "
+    "over ground is unavailable "
     "offline and is passed as NaN, which the error model floors to zero — the "
     "speed-dependent latency terms therefore drop out and the horizontal "
     "error is OPTIMISTIC for a moving vessel. It does not correct the "

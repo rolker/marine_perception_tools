@@ -113,7 +113,8 @@ TEST(MbesPassLoader, UnsetCancelTokenLoadsNormally)
 // --- the load's projection note (#55) ---------------------------------------
 
 // Totals shaped like a real M3 load: every beam on the default beamwidth
-// (kongsberg_em_bridge reports no per-beam beamwidths), a few range-filtered,
+// (kongsberg_em_bridge currently reports none — marine_tools#85), a few
+// range-filtered,
 // a few pings with no attitude.
 cube::ProjectionRunTotals sampleTotals()
 {

@@ -72,8 +72,10 @@ struct MbesSounding
   // `vertical_error` / `horizontal_error` even though both are variances;
   // cube_bathymetry#158 is open to rename them there. These fields are new and
   // carry no compatibility burden, so they lead that rename instead of
-  // propagating the misnomer. The one place the two spellings meet is
-  // project_ping() in mbes_projection.cpp — no other file translates them.
+  // propagating the misnomer. Exactly two sites translate between the
+  // spellings, one each way: project_ping() in mbes_projection.cpp coming out
+  // of cube, and run_cube() in cube_lab.cpp going back in. Anything else that
+  // needs the pair is wrong; extend one of those two.
   //
   // `horizontal_variance` is RADIAL (a drms-derived variance in the horizontal
   // plane), not an error along one axis; cube::Parameters::influenceRadius
