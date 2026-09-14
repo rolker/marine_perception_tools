@@ -104,8 +104,19 @@ target_link_libraries(sea_surface_tuner
 # offline georeferenced sidescan viewer / target tracker (issue #7). Kept Qt-free
 # and separate from tuner_core so the projection math is unit-tested without a
 # display, mirroring the tuner_core split.
+#
+# cube_bathymetry is in this list (#55) because mbes_projection.cpp — the
+# CUBE-lab path's real projector/error-model wiring — lives in this library,
+# and because MbesWindowResult now carries a cube::ProjectionRunTotals in its
+# PUBLIC header. "cube_bathymetry was already a dependency" is true of the
+# PACKAGE and was false of this TARGET. Both the dependency and the
+# header-root include below are PUBLIC so every sidescan_core consumer
+# (sidescan_probe, test_mbes_window_reader, test_mbes_pass_loader,
+# test_session_index_io, test_cube_lab) gets them, instead of each target
+# being patched separately.
 set(SIDESCAN_CORE_DEPS
   builtin_interfaces
+  cube_bathymetry
   geographic_msgs
   marine_acoustic_msgs
   marine_interfaces
@@ -120,8 +131,11 @@ add_library(sidescan_core
   src/session_index_io.cpp
   src/coverage_raster.cpp
   src/mbes_window_reader.cpp
+  src/mbes_projection.cpp
 )
 target_include_directories(sidescan_core PUBLIC src)
+target_include_directories(sidescan_core SYSTEM PUBLIC
+  ${CUBE_BATHYMETRY_INCLUDE_ROOT})
 ament_target_dependencies(sidescan_core ${SIDESCAN_CORE_DEPS})
 
 # Headless ingest verification (the sidescan analogue of --probe).
@@ -276,11 +290,13 @@ if(BUILD_TESTING)
   target_include_directories(test_nav_track_lookup PRIVATE src)
   ament_target_dependencies(test_nav_track_lookup marine_survey_index)
 
-  # The CUBE lab's angle-aware per-sounding uncertainty (sounding_uncertainty.hpp,
-  # #49) — header-only, no deps: the propagation formula, its nadir reduction,
-  # and its refusal to answer for missing beam geometry.
-  ament_add_gtest(test_sounding_uncertainty test/test_sounding_uncertainty.cpp)
-  target_include_directories(test_sounding_uncertainty PRIVATE src)
+  # The CUBE-lab path's offline projection (mbes_projection.{hpp,cpp}, #55):
+  # the offline ProjectorParams defaults, the one cube::Sounding -> MbesSounding
+  # rename site, and the per-ping/per-beam validity guard cube's squared range
+  # gate does not provide. Links sidescan_core (which carries the source and
+  # propagates cube_bathymetry).
+  ament_add_gtest(test_mbes_projection test/test_mbes_projection.cpp)
+  target_link_libraries(test_mbes_projection sidescan_core)
 
   # Position -> time over the nav track: the nearest-fix search under the map
   # cursor and its screen-pixel hit radius (nav_track_hit.hpp, #46) —
