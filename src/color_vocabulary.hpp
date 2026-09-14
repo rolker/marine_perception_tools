@@ -62,13 +62,19 @@ inline const char * color_channel_name(ColorChannel channel)
 
 // Why the POINT cloud cannot offer a channel; nullptr when it can.
 //
-// Uncertainty is the load-bearing one: MbesSounding carries x/y/z, intensity,
-// beam angle and slant range — no uncertainty. The per-sounding vertical and
-// horizontal errors CUBE consumes are a placeholder model computed inside
-// run_cube from that beam angle and slant range (#49), never a measured field
-// of the sounding, so colouring points by "uncertainty" would be colouring
-// them by the model rather than by anything the sonar reported. Uncertainty is
-// a property of the CUBE estimate, not of a beam.
+// Uncertainty is the load-bearing one, and its reason CHANGED with #55.
+// MbesSounding now carries real vertical_variance/horizontal_variance, from
+// cube::ErrorModel — so "a sounding has no uncertainty" is no longer true of
+// every cloud. It is true of some: only the CUBE-lab path (mbes_pass_loader's
+// multi-pass selection) projects through the real error model; the scrub
+// window's own cloud (SidescanBagSession::readMbesWindow) still uses the
+// one-sound-speed projection and leaves both variances NaN.
+//
+// So the channel stays greyed for POINTS, deliberately, until #56 swaps that
+// path over too. Opening it now would mean the same channel silently measured
+// different things depending on which cloud was on screen — real TPU on a
+// selection load, nothing at all on a scrub window — which is a worse failure
+// than not offering it. Both cloud-facing surfaces move together.
 //
 // `has_pass_identity` is false for a cloud loaded as one set of points (the
 // scrub window, a CUBE run's own gather) — there are no passes to tell apart.
@@ -77,11 +83,13 @@ inline const char * point_channel_unavailable_reason(
 {
   switch (channel) {
     case ColorChannel::Uncertainty:
-      return "A sounding carries no uncertainty — the per-beam errors CUBE "
-             "uses are a placeholder computed inside the estimator from the "
-             "beam's angle and slant range, not something the sonar reported. "
-             "Uncertainty is a property of the CUBE surface; colour the "
-             "surface by it instead.";
+      return "Not every cloud carries uncertainty yet. Soundings loaded for "
+             "the CUBE lab now carry real per-beam error-model variances, but "
+             "the scrub window's own cloud does not, so this channel would "
+             "mean different things on different clouds. It opens once both "
+             "sources carry them (mpt#56). Uncertainty is meanwhile a "
+             "property of the CUBE surface; colour the surface by it "
+             "instead.";
     case ColorChannel::Sidescan:
       return "Sidescan is a drape: amplitude is painted onto CUBE nodes by "
              "marching the terrain, not carried by the soundings. Colour the "

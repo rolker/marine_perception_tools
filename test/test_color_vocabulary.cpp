@@ -70,13 +70,14 @@ TEST(ColorVocabulary, PassIsUnavailableWithoutPassIdentityAndSaysWhy)
   EXPECT_FALSE(std::string(reason).empty());
 }
 
-// The verified gap (#36): MbesSounding carries x/y/z, intensity, beam angle
-// and slant range — no uncertainty. The per-beam errors CUBE consumes are a
-// placeholder computed INSIDE run_cube from the beam's angle and slant range
-// (#49), so colouring points by "uncertainty" would be colouring them by that
-// model rather than by anything the sonar reported. The
-// entry stays listed and greyed; it must never be filled with an invented
-// value. Sidescan is likewise a drape onto CUBE nodes, not a sounding field.
+// The gap, restated after #55. It is no longer "a sounding has no
+// uncertainty": MbesSounding now carries real cube::ErrorModel variances, and
+// the CUBE-lab path fills them. What is still true is that only THAT path
+// does — the scrub window's cloud leaves them NaN — so opening the channel
+// now would have it mean real TPU on one cloud and nothing on another. It
+// stays listed and greyed until #56 moves both sources together, and must
+// never be filled with an invented value in the meantime. Sidescan is
+// likewise a drape onto CUBE nodes, not a sounding field.
 TEST(ColorVocabulary, PointsCannotCarryUncertaintyOrSidescanButStillExplainWhy)
 {
   for (const auto channel : {ColorChannel::Uncertainty, ColorChannel::Sidescan}) {
@@ -84,6 +85,20 @@ TEST(ColorVocabulary, PointsCannotCarryUncertaintyOrSidescanButStillExplainWhy)
     ASSERT_NE(reason, nullptr) << color_channel_name(channel);
     EXPECT_FALSE(std::string(reason).empty()) << color_channel_name(channel);
   }
+}
+
+// The reason text has to say WHY it is still greyed now that the variances
+// exist, and name the issue that opens it — otherwise an operator who has
+// read the load note ("real cube::ErrorModel uncertainty") is told something
+// that contradicts it, with no way to tell which is stale.
+TEST(ColorVocabulary, TheUncertaintyReasonIsTheDeferralNotAnAbsence)
+{
+  const std::string reason =
+    point_channel_unavailable_reason(ColorChannel::Uncertainty, true);
+  EXPECT_NE(reason.find("mpt#56"), std::string::npos) << reason;
+  EXPECT_NE(reason.find("real"), std::string::npos) << reason;
+  // The stale claim, in the words it used to be made in.
+  EXPECT_EQ(reason.find("placeholder"), std::string::npos) << reason;
 }
 
 // The surface carries every scalar the estimate produces, and the drape; it
