@@ -6,8 +6,11 @@ https://github.com/rolker/marine_perception_tools/issues/55
 
 ## Context
 
-**Revision 3** (after the second Plan Review, changes-requested: 4 must-fix,
-3 suggestions, all folded in below). Revision 2 (after the first Plan Review)
+**Revision 4** (after the third Plan Review: 2 mechanical must-fixes — drop
+invalid beams by value, not index; the cube_bathymetry link is per-target —
+and 4 suggestions, all folded in below; ship recommended at that round).
+Revision 3 (after the second Plan Review, changes-requested: 4 must-fix,
+3 suggestions) is described next. Revision 2 (after the first Plan Review)
 narrowed scope and settled the design decisions numbered 1–6 below, dated
 2026-09-11 and owed to the operator directly, not inferred. Revision 3 adds
 decision 7 (2026-09-14, operator: proceed on library defaults, park the
@@ -175,7 +178,12 @@ Plan Review's must-fixes):
      sonar head with a spurious 0 m depth. 0.05 m is small enough that no
      genuine M3 return is filtered (its practical near-field range is tens of
      centimetres or more). Chosen to equal `cube::Device::range_error_floor_m`'s
-     value only coincidentally — unrelated gates.
+     value only coincidentally — unrelated gates. Note (suggestion) that
+     this is itself a small divergence from production: the live projector
+     and the three offline tools run the library default `minimum_range =
+     0.0`, so the lab filters a sliver of range they do not. Recorded here
+     and in the constant's comment; #385's record is where the value should
+     eventually live once, for all paths.
 
      **The range gate does not replace the guard `project_detections` had**
      (must-fix): that function skipped a beam when `twtt <= 0` **or**
@@ -183,11 +191,19 @@ Plan Review's must-fixes):
      *negative* travel time or sound speed produces a mirrored sounding whose
      squared range passes. `project_ping` therefore applies the same validity
      guard itself: if `ping_info.sound_speed <= 0` the whole ping is dropped
-     (counted in a new `MbesWindowResult::invalid_pings`); a beam with
-     `two_way_travel_times[i] <= 0` is dropped after projection by index
-     (the projector emits exactly one `cube::Sounding` per beam in order, so
-     the beam index is the sounding index) and counted in
-     `invalid_beams`. Both counts reach the load note (Approach item 7).
+     (counted in a new `MbesWindowResult::invalid_pings`); an invalid beam
+     is dropped **by value, not by index** — `DetectionsProjector::project`
+     applies its range gate before returning (`detections_projector.cpp:200-209`),
+     so sounding index ≠ beam index whenever any beam was filtered, which
+     with `minimum_range > 0` and NaN `rx_angles` beams is the normal case.
+     `cube::Sounding::slant_range` is `twtt · sound_speed / 2`
+     (`sounding.h:45-49`), so `slant_range <= 0 || !std::isfinite(slant_range)`
+     on the returned sounding is an exact, index-free equivalent of the
+     retired `twtt <= 0` guard (given the ping-level `sound_speed > 0` check
+     above). Dropped soundings are counted in `invalid_beams`. Both counts
+     reach the load note (Approach item 7), whose arithmetic is then
+     `beams = soundings + filtered_range + invalid_beams` per ping
+     (suggestion: stated so a reader can check the note adds up).
    - `project_ping(const cube::DetectionsProjector &, detections, tf,
      vessel_speed_mps) -> {std::vector<MbesSounding>, cube::ProjectionDiagnostics}`,
      converting each `cube::Sounding` (`sonar_relative_position.{x,y,z}`,
@@ -376,9 +392,15 @@ Plan Review's must-fixes):
     and after the swap, time `run_cube` over the same multi-pass selection
     from an archived BizzyBoat M3 bag (the 2026-08-20 `bizzy_timing` bag
     used for decision 6, or a `bizzyboat_sonar` recording) at the lab's
-    default cell size, and record wall time, sounding count and node-insert
-    count (if `run_cube` exposes one; otherwise wall time and soundings) in
-    `progress.md`'s Implementation entry and the PR body. A performance
+    default cell size. **How** (suggestion: `run_cube` has no headless
+    caller outside `test_cube_lab`): drive it through the explorer itself —
+    load the passes in the survey explorer, run the CUBE lab, and read the
+    elapsed time from the lab's existing load/run notes (adding a wall-time
+    line to `CloudLoadOutcome::notes` / the CUBE run note if none exists,
+    which is a one-line `std::chrono` addition and stays in). Record wall
+    time, sounding count and node-insert count (if `run_cube` exposes one;
+    otherwise wall time and soundings) in `progress.md`'s Implementation
+    entry and the PR body. A performance
     follow-up is filed only if the measured slowdown makes the lab
     unusable, with the number in it — not on the ~100× prediction alone.
 13. **Tests for the new helper and the two changed readers** (must-fix):
@@ -422,8 +444,8 @@ Plan Review's must-fixes):
 | `test/test_sounding_uncertainty.cpp` | Delete |
 | `test/test_mbes_geometry.cpp` | **No change** — stays; still tests `project_beam`/`project_detections`, which stay until #56 |
 | `test/test_cube_lab.cpp` | Synthetic soundings set `vertical_variance`/`horizontal_variance` directly (local test-only helper formula replaces the deleted production one); update the stale `test_sounding_uncertainty` comment reference |
-| `test/test_tf_lift.cpp` | Extend `sampleSounding()` and the carry-through/rotated-lift assertions to cover the two new fields |
-| `CMakeLists.txt` | Remove only `test_sounding_uncertainty`'s gtest registration; add `mbes_projection.cpp`/`.hpp` to the library + the test targets that need it (`test_mbes_window_reader`, `test_mbes_pass_loader`, `test_cube_lab`); register the new `test_mbes_projection` |
+| `test/test_tf_lift.cpp` | Extend `sampleSounding()` and the carry-through/rotated-lift assertions **and `IdentityTransformCarriesEveryField` (line 52)** to cover the two new fields |
+| `CMakeLists.txt` | Remove only `test_sounding_uncertainty`'s gtest registration; register the new `test_mbes_projection`. **Per-target consequence** (must-fix, round 3): `mbes_window_reader.cpp` lives in `sidescan_core`, whose `SIDESCAN_CORE_DEPS` (line 107) has no `cube_bathymetry` and whose consumers get no `CUBE_BATHYMETRY_INCLUDE_ROOT` SYSTEM include — "no new dependency" is true per-package, false per-target. Adding `mbes_projection.cpp` to `sidescan_core` and `cube::ProjectionRunTotals` to the public `MbesWindowResult` means: add `cube_bathymetry` to `SIDESCAN_CORE_DEPS` and the SYSTEM include to `sidescan_core`'s PUBLIC include dirs, so it propagates to every `sidescan_core` consumer — `sidescan_probe` (128-129), `test_mbes_window_reader`, `test_mbes_pass_loader`, `test_session_index_io` (294-295), `test_cube_lab` — rather than patching each target |
 | `.agents/README.md` | Update `sounding_uncertainty.hpp` (remove) and `mbes_geometry.hpp` (re-describe) rows; add a `mbes_projection.{hpp,cpp}` row |
 
 ## Principles Self-Check
