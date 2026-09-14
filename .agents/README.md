@@ -48,9 +48,9 @@ marine_perception_tools/
 │   ├── nav_track_hit.hpp       # nearest nav-track fix to a cursor position
 │   ├── clamped_entry_spin.hpp  # spin box that clamps typed entry
 │   ├── color_vocabulary.hpp    # point-cloud colour channels + their availability reasons
-│   ├── sounding_uncertainty.hpp  # PLACEHOLDER per-sounding TPU (the real budget is cube::ErrorModel; see mpt#51 and unh_marine_autonomy#373)
 │   ├── tf_lift.hpp             # TF lookup + lift_sounding_to_world(): the one rigid sensor→world sounding lift
-│   ├── mbes_geometry.hpp       # per-beam projection to the sensor frame (QC-grade: one sound speed)
+│   ├── mbes_geometry.hpp       # the shared MbesSounding record + the CLOUD path's own per-beam projection (QC-grade: one sound speed, no error model). The CUBE-lab path projects through mbes_projection.hpp instead; these two functions retire when [mpt#56](https://github.com/rolker/marine_perception_tools/issues/56) swaps the cloud path over
+│   ├── mbes_projection.{hpp,cpp}  # the CUBE-lab path's REAL projection ([mpt#55](https://github.com/rolker/marine_perception_tools/issues/55)): cube::DetectionsProjector + cube::ErrorModel, offline defaults (library vessel/device — no offline config, see [unh_marine_autonomy#385](https://github.com/rolker/unh_marine_autonomy/issues/385); NaN speed-over-ground), the per-ping/per-beam validity guard cube's squared range gate does not provide, and offline_projection_caveat() — the one caveat string the CUBE-tuning dialog and the lab's load note share
 │   ├── cube_lab.{hpp,cpp}      # operator-tunable CUBE run over the region; drives cube::Node directly for settled backscatter
 │   └── cube_export.{hpp,cpp}   # single-file GeoTIFF export of a run (depth / uncertainty / backscatter)
 ├── data/

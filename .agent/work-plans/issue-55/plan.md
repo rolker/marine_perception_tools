@@ -200,7 +200,18 @@ Plan Review's must-fixes):
      (`sounding.h:45-49`), so `slant_range <= 0 || !std::isfinite(slant_range)`
      on the returned sounding is an exact, index-free equivalent of the
      retired `twtt <= 0` guard (given the ping-level `sound_speed > 0` check
-     above). Dropped soundings are counted in `invalid_beams`. Both counts
+     above). Dropped soundings are counted in `invalid_beams`.
+
+     **As built (2026-09-14), one refinement to the above**: a beam whose
+     `twtt` is exactly ZERO never reaches this test. Its range is 0, which is
+     below `kOfflineMinimumRangeM`, so `DetectionsProjector::project` filters
+     it first and the drop lands in `filtered_range`, not `invalid_beams`.
+     Only a NEGATIVE travel time — the case cube's squared gate genuinely
+     admits — reaches the signed test. Both are dropped, both are counted, and
+     the note's arithmetic
+     `beams = soundings + filtered_range + invalid_beams` closes either way;
+     `test_mbes_projection` pins each case to the counter that actually
+     receives it rather than to the one this plan predicted. Both counts
      reach the load note (Approach item 7), whose arithmetic is then
      `beams = soundings + filtered_range + invalid_beams` per ping
      (suggestion: stated so a reader can check the note adds up).
@@ -264,6 +275,10 @@ Plan Review's must-fixes):
    `filtered_range`/`missing_attitude`/`missing_heave`/
    `default_beamwidth_beams`/`missing_rx_angle_beams` += the per-ping
    `ProjectionDiagnostics`' matching fields, `reports_georeferencing = false`
+   (**as built**: the per-ping fold is a named `accumulate_ping()` in
+   `mbes_window_reader.hpp` rather than inline in the read loop — the split
+   Approach item 13 allows for, so the accumulation can be checked without a
+   bag fixture)
    (this path's own "georeferenced" concept — `MbesWindowResult::has_geo` /
    `earth_from_world`, the cross-bag earth-anchor reprojection — is a
    different thing from per-sounding georeferencing, and `report_projection_summary`
@@ -291,6 +306,11 @@ Plan Review's must-fixes):
    `invalid_pings`/`invalid_beams` from Approach item 1, summed across
    passes the same way — so every place a sounding can vanish is visible in
    the same note.
+
+   **As built**: the note assembly is a named `append_projection_notes()` in
+   `mbes_pass_loader.{hpp,cpp}`, for the same reason as item 6 — it is the
+   surface item 13's loader test checks, and driving it through
+   `load_cloud_passes` would need a real bag.
 
    **Why this alone is not sufficient** — the honest-degradation gap the review
    found: missing attitude makes `vertical_error`/`horizontal_error` NaN but
@@ -403,6 +423,15 @@ Plan Review's must-fixes):
     entry and the PR body. A performance
     follow-up is filed only if the measured slowdown makes the lab
     unusable, with the number in it — not on the ~100× prediction alone.
+
+    **As built (2026-09-14)**: the wall-time line is in — `run_cube`'s note
+    now reads "N of M nodes estimated in T.TT s", from a `std::chrono`
+    `steady_clock` span around the whole run, and `RunCube.ReportsItsOwnWallTime`
+    pins it. **The MEASUREMENT ITSELF IS OWED**: it needs the explorer driven
+    over an archived bag by hand, which the implementation agent could not do
+    headlessly, and inventing a number would be worse than not having one. The
+    steps are in the Implementation entry of `progress.md`; the number belongs
+    in the PR body before merge.
 13. **Tests for the new helper and the two changed readers** (must-fix):
     - New `test/test_mbes_projection.cpp` (registered in `CMakeLists.txt`,
       linking `cube_bathymetry`): `offline_projector_params()` returns the
@@ -447,6 +476,7 @@ Plan Review's must-fixes):
 | `test/test_tf_lift.cpp` | Extend `sampleSounding()` and the carry-through/rotated-lift assertions **and `IdentityTransformCarriesEveryField` (line 52)** to cover the two new fields |
 | `CMakeLists.txt` | Remove only `test_sounding_uncertainty`'s gtest registration; register the new `test_mbes_projection`. **Per-target consequence** (must-fix, round 3): `mbes_window_reader.cpp` lives in `sidescan_core`, whose `SIDESCAN_CORE_DEPS` (line 107) has no `cube_bathymetry` and whose consumers get no `CUBE_BATHYMETRY_INCLUDE_ROOT` SYSTEM include — "no new dependency" is true per-package, false per-target. Adding `mbes_projection.cpp` to `sidescan_core` and `cube::ProjectionRunTotals` to the public `MbesWindowResult` means: add `cube_bathymetry` to `SIDESCAN_CORE_DEPS` and the SYSTEM include to `sidescan_core`'s PUBLIC include dirs, so it propagates to every `sidescan_core` consumer — `sidescan_probe` (128-129), `test_mbes_window_reader`, `test_mbes_pass_loader`, `test_session_index_io` (294-295), `test_cube_lab` — rather than patching each target |
 | `.agents/README.md` | Update `sounding_uncertainty.hpp` (remove) and `mbes_geometry.hpp` (re-describe) rows; add a `mbes_projection.{hpp,cpp}` row |
+| `test/test_survey_explorer_window.cpp` | **Not foreseen by this plan; found at implementation (2026-09-14).** The three synthetic bag writers hang `bizzy/base_link` straight off `bizzy/map`, so they carry neither the attitude chain (`base_link_north_up <- base_link`) nor the heave chain (`map_tide <- base_link`) the real error model needs. `ACubeRunAddsASurfaceOverTheSelectionCloud` consequently failed with "the CUBE run never produced a surface" — the honest-degradation path of Approach item 7 firing exactly as designed, on the first end-to-end test to reach it. All three writers now build the real tree shape (base_link under the level frame, tide frame under the map), not only the writer whose test failed |
 
 ## Principles Self-Check
 
