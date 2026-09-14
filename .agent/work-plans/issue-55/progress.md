@@ -262,3 +262,123 @@ findings below; the first is a correctness error in the new guard.
 - [ ] (suggestion) plan ADR table repo labels; `.agents/README.md` test tree row for `test_mbes_projection` — `.agents/README.md:58`
 - [ ] (suggestion) default-beamwidth stated twice per note (library WARNING + caveat item 2) — `src/mbes_projection.cpp:97`
 - [ ] (candidate, proposal only) `.agents/README.md` Common Pitfalls: `cube::ProjectorParams` defaults to unprefixed `base_link`, which BizzyBoat's alias resolves silently to NaN variances; synthetic test bags need the `base_link_north_up ← base_link` and `map_tide ← base_link` chains
+
+## Implementation
+
+**Status**: complete
+**When**: 2026-09-14 12:09 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Source**: Local Review (Pre-Push) round 1 at 8217d1d
+**Branch**: feature/issue-55 at b382aa7
+
+All 5 must-fixes and 9 of the 11 suggestions are addressed in 7 atomic
+commits. Build warning-clean; 804 tests, 0 failures, 97 skipped (796 before,
++8 new); `ament_cpplint` and `ament_uncrustify` clean on every changed file.
+
+**One environment note for whoever runs the suite next**: 22 window tests fail
+with `filesystem error: status: Too many levels of symbolic links
+[$TMPDIR/isolatedbin/printf]` when `TMPDIR` points at an agent sandbox's
+scratch directory — the bag fixtures walk `temp_directory_path()`. Running
+with a plain `TMPDIR` is green. Nothing in the package changed to cause it.
+
+### Resolved
+
+- [x] (must-fix) The false "~5 m influence radius" / "ten times further" /
+  "~100× slowdown" claim — `ff51b28`. `Parameters::influenceRadius`
+  (cube_bathymetry `parameters.cpp:72-110`) computes
+  `distance_scale·(ratio-1)^(1/distance_exponent) − CONF_99PC·√horizontal_error`,
+  caps at that same horizontal term and floors at `distance_scale` (the cell
+  size) LAST, so the floor wins. The horizontal term is SUBTRACTED: the 4 m²
+  floor `cube::Vessel{}`'s `gps_drms = 2.0` puts under every sounding makes it
+  spread LESS, not more; ~5.15 m is a ceiling, reached only at coarse cells
+  under a loose vertical budget. Corrected in `offline_projection_caveat()`,
+  `cube_lab.hpp`, `cube_lab.cpp`, `test_cube_lab.cpp`, and plan decision 7 +
+  Approach item 12. The 2 m GPS assumption itself (operator decision 7) still
+  leads the caveat — only its consequence changed. `OfflineProjectionCaveat`
+  gains a test pinning the corrected wording and refusing the old claim's
+  return.
+- [x] (must-fix) README §"Per-sounding uncertainty in the lab" documented the
+  deleted placeholder — `d98cb9f`. Rewritten for the real chain
+  (DetectionsProjector + ErrorModel) and the three library-default
+  assumptions in the caveat's own order. The colour-channel paragraph's
+  reason for greying **Uncertainty** is brought level with
+  `color_vocabulary.hpp`'s (not "a sounding carries none" but "not every
+  cloud carries one yet", mpt#56).
+- [x] (must-fix) IHO-order tooltip said "PLACEHOLDER per-sounding error" —
+  `d98cb9f`, with a window test pinning the wording out.
+- [x] (must-fix) The ~1.5 kB load note clipped in a width-Ignored `QLabel` —
+  `d1e51e3`. All 46 status writes (and the opening message) now go through
+  `SidescanViewerWindow::setStatusText()`, which mirrors the whole line into
+  the label's tooltip. One helper rather than one tooltip at the note's site:
+  a tooltip set once outlives the text it described and would report a status
+  two operations old. Window test asserts tooltip == text and that it follows
+  a later, shorter status.
+- [x] (must-fix) No explicit line when `missing_attitude > 0` — `547395d`.
+  The note now names the count, the `level <- base_link` chain from
+  `MbesWindowOptions`, and the consequence (soundings load, draw and colour
+  normally; a CUBE run drops every one). Pinned in `test_mbes_pass_loader`,
+  with a companion test that it says nothing on a clean load.
+- [x] (suggestion) Two elapsed times in one status sentence — `6f52490`.
+  "… in 0.42 s in 31.2 s" now distinguishes the estimator's own wall time
+  (run_cube's note) from the whole job's, bag reads included.
+- [x] (suggestion) CLI wording forwarded into the GUI — `547395d`. cube's
+  `pings > 0 && soundings == 0` warning tells the reader to check
+  "`--*-frame` overrides" against a README section; this window has no such
+  flags. Only that sentence is restated, naming the three compiled-in frames;
+  cube's counts in front of it stay verbatim so they cannot drift from the
+  offline tools'. Test asserts the note carries neither `--*-frame` nor
+  `README`, and does carry the frame names.
+- [x] (suggestion) Invalid-sound-speed pings counted in `pings` — `9fb89eb`.
+  `ProjectionRunTotals::pings` means "pings handed to
+  `DetectionsProjector::project()`"; a refused ping never was. It is counted
+  once, in `invalid_pings`. This was the finding's real sting: counting it in
+  both made cube's zero-soundings warning blame the FRAMES for a bag of bad
+  sound speeds. Two tests, including the all-bad-bag case end to end.
+- [x] (suggestion) Totals comment claimed "what the operator actually got" —
+  `9fb89eb`. They are accumulated before the contact clip and before a
+  geo-anchorless pass can be skipped, so they describe the PROJECTION;
+  `sounding_counts` describes what survived into the cloud.
+- [x] (suggestion) Early return on `pings == 0` hid the drop line —
+  `547395d`. The note is silent only when nothing was projected AND nothing
+  was dropped. It hid exactly the case it mattered for: an all-bad-sound-speed
+  bag, whose pings are not in `totals.pings` at all.
+- [x] (suggestion) "The one place the two spellings meet" was false —
+  `6f52490`. There are exactly two translation sites, one each way:
+  `project_ping()` inbound from cube, `run_cube()` outbound back to it. Each
+  now names the other, which is what makes the claim checkable when
+  cube_bathymetry#158 lands.
+- [x] (suggestion) "kongsberg_em_bridge reports no beamwidths" → "currently",
+  with marine_tools#85 — `6f52490`, in the caveat, the note comment, the test
+  comment, the README and the `.agents/README.md` row.
+- [x] (suggestion) Plan sync: item 13's zero-twtt bullet (it lands in
+  `filtered_range`, not `invalid_beams`, as item 1's as-built note already
+  said), `abandon()`'s diagnostics reset, and the round-1 changes recorded
+  against items 6, 7 and 8 — `b382aa7`.
+- [x] (suggestion) Plan ADR table now labels the repo (cube_bathymetry
+  ADR-0007, workspace ADR-0008 — different documents with adjacent numbers);
+  `.agents/README.md` gains a `test_mbes_projection.cpp` test-tree row —
+  `b382aa7` / `6f52490`.
+- [x] (suggestion, host's item) mpt#51: the plan's Open Questions now records
+  that deleting `sounding_uncertainty.hpp` DISSOLVES mpt#51's 0.05 m-floor
+  question rather than answering it — the floor is gone and
+  `cube::ErrorModel` has no equivalent, so there is no decision left to make.
+
+### Deferred
+
+- [ ] (suggestion) "Default beamwidth stated twice per note" — **KEPT
+  DELIBERATELY, and this is the reason**: the library WARNING line does NOT
+  always carry the fact. `report_projection_summary` emits it only when
+  `default_beamwidth_beams > 0`. On a bag whose driver DOES publish per-beam
+  beamwidths (what marine_tools#85 is for), the warning is absent, and the
+  caveat's item 2 would then be the only place the operator learns that the
+  lab falls back to a generic device beamwidth when the ping carries none.
+  Dropping it would make the note's completeness depend on the data. The
+  duplication is one clause on today's M3 bags and load-bearing on tomorrow's.
+- [ ] (candidate) `.agents/README.md` Common Pitfalls entry on
+  `cube::ProjectorParams`' unprefixed `base_link` default — not added, per
+  the task's instruction (it was raised as a proposal only).
+- [ ] (host) The PR body still owes: whether this PR closes mpt#51, and the
+  runtime measurement Approach item 12 asks for. The measurement's RATIONALE
+  changed with the must-fix-1 correction — it is now a confirmation of no
+  regression, not the sizing of a ~100× one — but it is still owed, because
+  an unmeasured expectation of no regression is still an expectation.
