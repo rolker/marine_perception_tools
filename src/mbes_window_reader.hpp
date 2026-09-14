@@ -104,10 +104,21 @@ struct MbesWindowResult
 // `beams` comes from ProjectionDiagnostics::total — the soundings the error
 // model produced BEFORE the range gate, one per beam — so
 // beams = soundings + filtered_range + invalid_beams holds per ping and
-// therefore over the sum.
+// therefore over the sum. A ping refused for an unusable sound speed
+// contributes to none of them: it is counted once, in `invalid_pings`.
 inline void accumulate_ping(MbesWindowResult & result, const PingProjection & p)
 {
-  result.diagnostics.pings += 1;
+  // `ProjectionRunTotals::pings` means "pings handed to
+  // DetectionsProjector::project()", and a ping refused for an unusable sound
+  // speed was never handed to it — project_ping returns before that call. It
+  // is counted in `invalid_pings` instead. Counting it here too would both
+  // double-count it and mislead: cube's summary warns on
+  // `pings > 0 && soundings == 0` by telling the operator to check his
+  // FRAMES, so a bag whose every ping carries a bad sound speed would be
+  // reported as a frame problem (#55 review).
+  if (p.invalid_pings == 0) {
+    result.diagnostics.pings += 1;
+  }
   result.diagnostics.beams += p.diagnostics.total;
   result.diagnostics.soundings += p.soundings.size();
   result.diagnostics.filtered_range += p.diagnostics.filtered_range;

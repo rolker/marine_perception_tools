@@ -262,10 +262,13 @@ TEST(MbesWindowDiagnostics, AccumulateEveryFieldAcrossPings)
     static_cast<std::size_t>(result.invalid_beams));
 }
 
-// A ping refused for a non-positive sound speed contributes no beams and no
-// soundings — it never reached the error model — but is counted, so the note
-// can say that data went missing before the projection rather than during it.
-TEST(MbesWindowDiagnostics, AnInvalidPingIsCountedAndContributesNoBeams)
+// A ping refused for a non-positive sound speed is counted ONCE, in
+// invalid_pings, and not in diagnostics.pings: that field means "pings handed
+// to DetectionsProjector::project()", and this one never was. It is not
+// bookkeeping pedantry — cube's summary warns on `pings > 0 && soundings == 0`
+// by telling the operator to check his FRAMES, so counting these pings there
+// would report a bag of bad sound speeds as a frame problem (#55 review).
+TEST(MbesWindowDiagnostics, AnInvalidPingIsCountedOnlyAsInvalid)
 {
   MbesWindowResult result;
   PingProjection bad;
@@ -274,9 +277,24 @@ TEST(MbesWindowDiagnostics, AnInvalidPingIsCountedAndContributesNoBeams)
   accumulate_ping(result, samplePing(4, 0, 0));
 
   EXPECT_EQ(result.invalid_pings, 1);
-  EXPECT_EQ(result.diagnostics.pings, 2u);
+  EXPECT_EQ(result.diagnostics.pings, 1u);
   EXPECT_EQ(result.diagnostics.beams, 4u);
   EXPECT_EQ(result.diagnostics.soundings, 4u);
+}
+
+// The whole point, end to end: a window in which EVERY ping carries an
+// unusable sound speed must not look like a projection that produced nothing.
+TEST(MbesWindowDiagnostics, AWindowOfBadSoundSpeedsProjectedNoPingsAtAll)
+{
+  MbesWindowResult result;
+  for (int i = 0; i < 12; ++i) {
+    PingProjection bad;
+    bad.invalid_pings = 1;
+    accumulate_ping(result, bad);
+  }
+  EXPECT_EQ(result.invalid_pings, 12);
+  EXPECT_EQ(result.diagnostics.pings, 0u);
+  EXPECT_EQ(result.diagnostics.beams, 0u);
 }
 
 // This path does not georeference per sounding: its earth-anchor reprojection

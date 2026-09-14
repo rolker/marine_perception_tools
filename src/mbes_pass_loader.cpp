@@ -160,7 +160,12 @@ CloudLoadOutcome load_cloud_passes(
   geometry_msgs::msg::TransformStamped ref_earth_from_world;
 
   // The whole load's projection accounting (#55), summed pass by pass so the
-  // note describes what the operator actually got — not what one pass got.
+  // note describes the whole load's PROJECTION rather than one pass's. Note
+  // what it does not describe: these totals are accumulated as each pass is
+  // read, before the contact clip below and before a pass can be skipped for
+  // want of a geo anchor, so `soundings` is what the projector produced, not
+  // what survived into the cloud. The surviving count is per-pass, in
+  // `sounding_counts`, and a clipped or skipped pass leaves its own note.
   cube::ProjectionRunTotals totals;
   totals.reports_georeferencing = false;
   int invalid_pings = 0;
