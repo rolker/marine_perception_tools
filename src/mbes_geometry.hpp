@@ -22,9 +22,22 @@
 
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 
-// Qt-free MBES (M3) beam geometry for the offline viewer's 3D point cloud + the
-// backscatter waterfall. This is a QC-grade projection: a single sound speed, no
-// CUBE error model. The per-beam formula mirrors
+// Qt-free MBES (M3) beam geometry and the MbesSounding type both offline paths
+// carry. OWNERSHIP IS NOW SPLIT, and the split is temporary (#55/#56):
+//
+//   * `MbesSounding` — the shared sounding record. Every path uses it: the
+//     CUBE-lab estimator path, the scrub-window point cloud, the backscatter
+//     waterfall, and tf_lift's sensor->world lift.
+//   * `project_beam` / `project_detections` — the QC-grade projection below
+//     (a single sound speed, no CUBE error model). As of #55 this is the CLOUD
+//     path's projection only: its one remaining caller is
+//     SidescanBagSession::readMbesWindow. The CUBE-lab estimator path
+//     (read_mbes_window -> load_cloud_passes -> run_cube) no longer uses it —
+//     it projects through cube::DetectionsProjector via mbes_projection.hpp,
+//     which carries the real cube::ErrorModel variances. #56 swaps the cloud
+//     path over too and retires these two functions.
+//
+// The per-beam formula mirrors
 // cube_bathymetry/include/cube_bathymetry/sounding.h exactly so the viewer and
 // the production importer agree on geometry:
 //   range = two_way_travel_times[i] * ping_info.sound_speed / 2
@@ -49,6 +62,24 @@ struct MbesSounding
   float intensity = 0.0f;  // backscatter (dB), from detections.intensities[i]
   float beam_angle = std::numeric_limits<float>::quiet_NaN();   // rx, radians
   float slant_range = std::numeric_limits<float>::quiet_NaN();  // metres
+  // Per-sounding uncertainty as VARIANCES (m^2), from cube::ErrorModel via
+  // mbes_projection.hpp's project_ping (#55). NaN when the sounding did not
+  // come through that projector — `project_detections` below (the cloud path
+  // until #56) leaves both unset, and a consumer must drop such a sounding
+  // rather than substitute a value.
+  //
+  // NAMED FOR WHAT THEY ARE. cube::Sounding spells the same two quantities
+  // `vertical_error` / `horizontal_error` even though both are variances;
+  // cube_bathymetry#158 is open to rename them there. These fields are new and
+  // carry no compatibility burden, so they lead that rename instead of
+  // propagating the misnomer. The one place the two spellings meet is
+  // project_ping() in mbes_projection.cpp — no other file translates them.
+  //
+  // `horizontal_variance` is RADIAL (a drms-derived variance in the horizontal
+  // plane), not an error along one axis; cube::Parameters::influenceRadius
+  // consumes it directly as the spread radius.
+  float vertical_variance = std::numeric_limits<float>::quiet_NaN();    // m^2
+  float horizontal_variance = std::numeric_limits<float>::quiet_NaN();  // m^2
 };
 
 // Project a single beam to a sensor-frame point. `tx_angle`/`rx_angle` in radians,

@@ -16,9 +16,12 @@
 // use (#42). The regression it guards is not the arithmetic — that was always
 // right — but the FIELDS: the two call sites used to rebuild the world
 // sounding member by member and silently dropped `beam_angle` / `slant_range`,
-// leaving every bag-loaded sounding with a NaN angle. The angle-aware
-// uncertainty (#49) drops such a sounding outright, so a recurrence is data
-// loss, not a degraded weight.
+// leaving every bag-loaded sounding with a NaN angle. run_cube drops a
+// sounding whose uncertainty is not usable, so a recurrence is data loss, not
+// a degraded weight. The per-sounding VARIANCES (#55) ride the same lift and
+// are asserted here for the same reason: they are measured in neither frame —
+// a rigid transform does not touch them — so the lift must carry them through
+// untouched rather than leave them to a field-by-field rebuild.
 
 #include <gtest/gtest.h>
 
@@ -43,6 +46,8 @@ MbesSounding sampleSounding()
   s.intensity = -21.5f;
   s.beam_angle = 0.7853981634f;   // 45 deg to starboard
   s.slant_range = 17.25f;
+  s.vertical_variance = 0.0036f;     // m^2
+  s.horizontal_variance = 4.25f;     // m^2, radial
   return s;
 }
 
@@ -60,6 +65,8 @@ TEST(TfLift, IdentityTransformCarriesEveryField)
   EXPECT_FLOAT_EQ(s.intensity, w.intensity);
   EXPECT_FLOAT_EQ(s.beam_angle, w.beam_angle);
   EXPECT_FLOAT_EQ(s.slant_range, w.slant_range);
+  EXPECT_FLOAT_EQ(s.vertical_variance, w.vertical_variance);
+  EXPECT_FLOAT_EQ(s.horizontal_variance, w.horizontal_variance);
 }
 
 // THE REGRESSION (#42). A rigid transform moves the position and nothing else:
@@ -76,8 +83,12 @@ TEST(TfLift, BeamGeometryAndIntensitySurviveARotatedTranslatedLift)
   EXPECT_FLOAT_EQ(s.beam_angle, w.beam_angle);
   EXPECT_FLOAT_EQ(s.slant_range, w.slant_range);
   EXPECT_FLOAT_EQ(s.intensity, w.intensity);
+  EXPECT_FLOAT_EQ(s.vertical_variance, w.vertical_variance);
+  EXPECT_FLOAT_EQ(s.horizontal_variance, w.horizontal_variance);
   EXPECT_TRUE(std::isfinite(w.beam_angle));
   EXPECT_TRUE(std::isfinite(w.slant_range));
+  EXPECT_TRUE(std::isfinite(w.vertical_variance));
+  EXPECT_TRUE(std::isfinite(w.horizontal_variance));
 }
 
 // The position itself: 90 deg about +z takes (x, y) -> (-y, x), then translate.
@@ -106,9 +117,17 @@ TEST(TfLift, UnknownGeometryStaysUnknown)
   s.z = 3.0;
   ASSERT_TRUE(std::isnan(s.beam_angle));
   ASSERT_TRUE(std::isnan(s.slant_range));
+  ASSERT_TRUE(std::isnan(s.vertical_variance));
+  ASSERT_TRUE(std::isnan(s.horizontal_variance));
 
   const auto w = lift_sounding_to_world(s, 5.0, 5.0, 5.0, 0.0, 0.0, 0.0, 1.0);
 
   EXPECT_TRUE(std::isnan(w.beam_angle));
   EXPECT_TRUE(std::isnan(w.slant_range));
+  // A sounding that never went through the real projector has no variances,
+  // and must still have none after the lift: run_cube drops it, which is the
+  // honest outcome. A lift that substituted 0 would hand the estimator a
+  // sounding of perfect certainty.
+  EXPECT_TRUE(std::isnan(w.vertical_variance));
+  EXPECT_TRUE(std::isnan(w.horizontal_variance));
 }
