@@ -109,7 +109,7 @@
 #include "session_index_io.hpp"
 #include "sidescan_canvas.hpp"
 #include "sidescan_geometry.hpp"
-#include "sounding_uncertainty.hpp"
+#include "mbes_projection.hpp"
 
 namespace marine_perception_tools
 {
@@ -929,9 +929,13 @@ void SidescanViewerWindow::setupCubeLab(QWidget * cloud_pane)
         budget_tip + "  Depth-proportional part, as a FRACTION of depth "
         "(S-44: 0.0075 … 0.023).");
       // The caveat belongs where the numbers are set, not only in a header
-      // comment (#45): the budget is being compared against a stand-in.
+      // comment (#45). What it says changed with #55: the budget is now being
+      // compared against the REAL cube::ErrorModel, running on library-default
+      // vessel and device settings — so the caveat is about which settings the
+      // offline path cannot configure, not about a synthetic stand-in. Same
+      // string the lab's load note shows, so the two cannot disagree.
       auto * iho_note = new QLabel(
-        QString::fromUtf8(sounding_uncertainty_caveat()), &dialog);
+        QString::fromUtf8(offline_projection_caveat()), &dialog);
       iho_note->setWordWrap(true);
       iho_note->setMaximumWidth(420);
       {
