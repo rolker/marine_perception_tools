@@ -54,6 +54,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <utility>
@@ -1608,6 +1609,59 @@ TEST_F(ExplorerWindowFixture, TheStatusTooltipCarriesTheWholeLineThroughEveryUpd
   // here is that the tooltip never DROPS the line it belongs to.
   EXPECT_TRUE(status->toolTip().startsWith(status->text()))
     << status->toolTip().toStdString();
+}
+
+// The #57 fix, pinned (#58 review). discoverBasemapLayers walks whatever sits
+// beside the index, three levels deep, and used to do it with the THROWING
+// directory_entry::is_directory(). A symlink it could not follow escaped as a
+// filesystem_error out of openSurveyIndex — taking the window down rather
+// than costing it one candidate layer; that is how 22 window tests failed at
+// once against a recursive symlink that happened to be sitting in the shared
+// temp dir. Both shapes that do it are here, beside an ordinary layer: a
+// symlink to nothing (status() -> ENOENT) and one that points at itself
+// (status() -> ELOOP). What must survive is the layer.
+TEST_F(ExplorerWindowFixture, ABrokenSymlinkBesideTheIndexCostsOneEntryNotTheWindow)
+{
+  app();
+  namespace fs = std::filesystem;
+  const fs::path root = fs::path(::testing::TempDir()) / "basemap_symlink_root";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  fs::create_directories(root / "extra_layer", ec);
+  ASSERT_FALSE(ec) << ec.message();
+  {
+    // has_tif() classifies by extension only, and BasemapLod degrades to "no
+    // store tiles" on a name it cannot parse — so the layer needs to exist,
+    // not to be a readable GeoTIFF.
+    std::ofstream tif((root / "extra_layer" / "placeholder.tif").string());
+    tif << "not a real tif";
+  }
+  fs::create_symlink("nowhere_at_all", root / "dangling", ec);
+  ASSERT_FALSE(ec) << ec.message();
+  fs::create_symlink(root / "loop", root / "loop", ec);
+  ASSERT_FALSE(ec) << ec.message();
+
+  const fs::path index = root / "survey_index.db";
+  fs::copy_file(db_path_, index, fs::copy_options::overwrite_existing, ec);
+  ASSERT_FALSE(ec) << ec.message();
+
+  SidescanViewerWindow window;
+  // The throw the fix removed came from HERE, during the open — so the
+  // assertion is the call itself completing.
+  ASSERT_NO_THROW(window.openSurveyIndex(index.string(), std::string()));
+
+  auto * layers = window.findChild<QComboBox *>("basemap_layer_combo");
+  ASSERT_NE(layers, nullptr);
+  bool found = false;
+  for (int i = 0; i < layers->count(); ++i) {
+    if (layers->itemText(i).contains("extra_layer")) {
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found)
+    << "the valid layer beside the bad symlinks was not discovered";
+
+  fs::remove_all(root, ec);
 }
 
 // The point of the whole feature: the click cues. It goes through the same

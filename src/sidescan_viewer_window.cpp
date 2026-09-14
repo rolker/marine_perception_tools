@@ -2098,6 +2098,7 @@ SidescanViewerWindow::SidescanViewerWindow(QWidget * parent)
   // Basemap controls (survey mode): store layer + its own colormap. Hidden
   // until openSurveyIndex discovers the layers.
   basemap_layer_ = new QComboBox(this);
+  basemap_layer_->setObjectName("basemap_layer_combo");
   basemap_layer_->setToolTip("Store layer rendered as the map basemap");
   basemap_layer_->setVisible(false);
   basemap_cmap_ = make_cmap_combo();
@@ -3715,6 +3716,16 @@ void SidescanViewerWindow::discoverBasemapLayers(
         // it one candidate layer. An entry we cannot classify is skipped.
         std::error_code entry_ec;
         if (!e.is_directory(entry_ec) || entry_ec) {
+          // Skipped, but not silently (#58 review): an entry we could not
+          // classify is a layer the operator may have expected in the list,
+          // and "it isn't offered" is the only other symptom. One line per
+          // entry, naming the path and what the filesystem said — an ordinary
+          // non-directory is not an error and says nothing.
+          if (entry_ec) {
+            qWarning() << "Basemap scan skipped"
+                       << QString::fromStdString(e.path().string()) << "—"
+                       << QString::fromStdString(entry_ec.message());
+          }
           continue;
         }
         // The derived overview sidecar is the same layer at coarser levels,
