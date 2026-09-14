@@ -390,7 +390,14 @@ private:
   // hovering recovers it. Every status write goes through here rather than
   // one site setting a tooltip, because a tooltip set once outlives the text
   // it described and would then report an earlier status.
-  void setStatusText(const QString & text);
+  //
+  // `detail` is for the one case where the line is a SUMMARY of something
+  // longer — the cloud load elides past the first few per-pass notes — and
+  // the hover should recover the rest. It is APPENDED to the line rather
+  // than replacing it, so the tooltip always still carries the status it
+  // belongs to, and it still goes through this one function so the mirror
+  // cannot be bypassed.
+  void setStatusText(const QString & text, const QString & detail = QString());
 
   SidescanCanvas * canvas_ = nullptr;
   QSlider * scrub_ = nullptr;

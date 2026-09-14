@@ -1599,6 +1599,15 @@ TEST_F(ExplorerWindowFixture, TheStatusTooltipCarriesTheWholeLineThroughEveryUpd
   QCoreApplication::processEvents();
   EXPECT_TRUE(status->text().contains("CUBE box")) << status->text().toStdString();
   EXPECT_EQ(status->toolTip(), status->text());
+
+  // The invariant the one-way rule actually buys, stated so it also covers
+  // the one site that adds to the tooltip rather than only mirroring it: the
+  // cloud load summarizes past the first few per-pass notes and passes the
+  // rest as setStatusText's `detail`, which is APPENDED. That site needs a
+  // bag-backed async load to reach, so it is not driven here; what is pinned
+  // here is that the tooltip never DROPS the line it belongs to.
+  EXPECT_TRUE(status->toolTip().startsWith(status->text()))
+    << status->toolTip().toStdString();
 }
 
 // The point of the whole feature: the click cues. It goes through the same

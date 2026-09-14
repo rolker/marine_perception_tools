@@ -3360,7 +3360,7 @@ void SidescanViewerWindow::refreshContacts()
   mbes_waterfall_->setContacts(boxes);   // project contacts onto the backscatter pane too
 }
 
-void SidescanViewerWindow::setStatusText(const QString & text)
+void SidescanViewerWindow::setStatusText(const QString & text, const QString & detail)
 {
   if (!status_) {
     return;
@@ -3368,7 +3368,8 @@ void SidescanViewerWindow::setStatusText(const QString & text)
   status_->setText(text);
   // Plain text, not rich: the notes carry '<' and '&' from frame names and
   // arithmetic, and QToolTip word-wraps a long plain string on its own.
-  status_->setToolTip(text);
+  // The tooltip always begins with the line it mirrors; `detail` only adds.
+  status_->setToolTip(detail.isEmpty() ? text : text + "\n" + detail);
 }
 
 void SidescanViewerWindow::updateScrubStep()
@@ -3707,7 +3708,13 @@ void SidescanViewerWindow::discoverBasemapLayers(
       }
       std::error_code ec;
       for (const auto & e : std::filesystem::directory_iterator(dir, ec)) {
-        if (!e.is_directory()) {
+        // is_directory() with an error_code: the no-ec overload THROWS, and
+        // this walks whatever the operator pointed --stores at. A symlink
+        // loop or an unreadable entry anywhere under that root would then
+        // take the whole window down during construction rather than costing
+        // it one candidate layer. An entry we cannot classify is skipped.
+        std::error_code entry_ec;
+        if (!e.is_directory(entry_ec) || entry_ec) {
           continue;
         }
         // The derived overview sidecar is the same layer at coarser levels,
@@ -4325,8 +4332,9 @@ void SidescanViewerWindow::onCloudPassesLoaded()
     }
     message += " — " + shown.join("; ");
   }
-  setStatusText(message);
-  status_->setToolTip(out.notes.join("\n"));   // the full list, on hover
+  // The full list on hover, through setStatusText so the mirror still holds:
+  // the tooltip carries the line AND the notes it summarized.
+  setStatusText(message, out.notes.join("\n"));
 }
 
 }  // namespace marine_perception_tools
