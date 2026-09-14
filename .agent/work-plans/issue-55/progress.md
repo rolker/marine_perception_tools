@@ -231,3 +231,34 @@ findings below; the first is a correctness error in the new guard.
 - [x] **One measured datapoint exists meanwhile**, from the fixture above rather than from a real pass: a windowed load of ~2.05M synthetic soundings (4000 pings x 512 beams) takes ~4.6-4.9 s wall through the real projector on this machine, offscreen. That is the PROJECTION cost, not `run_cube`'s spread cost — which is the half decision 7 is actually worried about, and the half still owed.
 - [x] **Not re-opened**: operator decisions 1-7 stand as settled. No SOG source was added (decision 5 / Open Question 1); `kOfflineMinimumRangeM` stays 0.05 m (Open Question 2); library-default vessel/device is untouched (decision 7).
 - [x] **11 atomic commits**, one logical change each, all under the agent identity, no `--no-verify`. Nothing pushed.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-09-14 12:55 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-55 at `8217d1d`
+**Mode**: pre-push
+**Depth**: Deep (reason: large change, new cross-package dependency at target level)
+**Must-fix**: 5 | **Suggestions**: 11
+**Round**: 1 | **Ship**: continue — five must-fixes, all mechanical; one fix round expected
+
+### Findings
+- [ ] (must-fix) caveat/doc claim "spreads each sounding over ~5 m" is false: `influenceRadius` subtracts the horizontal term and caps at 5.15 m; at lab cell sizes the radius equals the cell; the real model spreads LESS than the placeholder and the ~100× slowdown does not exist — reword `offline_projection_caveat()`, `cube_lab.hpp` doc, `cube_lab.cpp` comment, test comment, plan decision 7 — `src/mbes_projection.cpp:95`, `src/cube_lab.hpp:186`, `src/cube_lab.cpp:197`
+- [ ] (must-fix) root README §"Per-sounding uncertainty in the lab" still documents the deleted placeholder — `README.md:255-285`
+- [ ] (must-fix) IHO-order combo tooltip still says "PLACEHOLDER per-sounding error" — `src/sidescan_viewer_window.cpp:734`
+- [ ] (must-fix) load note (~1.5 kB) joined into a clipping `QLabel` with no tooltip; add `setToolTip` with the full notes — `src/sidescan_viewer_window.cpp:1204,2008`
+- [ ] (must-fix) no explicit line when `missing_attitude > 0`; positions stay finite so the library frame warning never fires and the CUBE run silently drops all — `src/mbes_pass_loader.cpp:56`
+- [ ] (suggestion) two elapsed times in one status sentence — `src/cube_lab.cpp:399`, `src/sidescan_viewer_window.cpp:1204`
+- [ ] (suggestion) CLI wording ("--*-frame overrides", README) forwarded into the GUI note — `src/mbes_pass_loader.cpp:65`
+- [ ] (suggestion) invalid-sound-speed pings counted in `pings`, misattributing an all-bad bag to frames — `src/mbes_window_reader.cpp:237`
+- [ ] (suggestion) totals accumulate before clip/geo-skip; comment says "what the operator actually got" — say "projected" — `src/mbes_pass_loader.cpp:104,128`
+- [ ] (suggestion) early return on `pings == 0` hides the skipped-pings line — `src/mbes_pass_loader.cpp:40`
+- [ ] (suggestion) "the one place the two spellings meet" is false; `cube_lab.cpp` translates back — `src/mbes_geometry.hpp:75`, `src/mbes_projection.cpp:80`
+- [ ] (suggestion) "kongsberg_em_bridge reports no beamwidths" → "currently" (marine_tools#85) — `src/mbes_projection.cpp:596`, `.agents/README.md:53`
+- [ ] (suggestion) plan sync: item 13 zero-twtt text; `abandon()` zeroing diagnostics — `.agent/work-plans/issue-55/plan.md`
+- [ ] (suggestion) PR body: issue scope item 2 half met by design; decide whether this PR closes mpt#51 (its 0.05 m floor code is deleted)
+- [ ] (suggestion) plan ADR table repo labels; `.agents/README.md` test tree row for `test_mbes_projection` — `.agents/README.md:58`
+- [ ] (suggestion) default-beamwidth stated twice per note (library WARNING + caveat item 2) — `src/mbes_projection.cpp:97`
+- [ ] (candidate, proposal only) `.agents/README.md` Common Pitfalls: `cube::ProjectorParams` defaults to unprefixed `base_link`, which BizzyBoat's alias resolves silently to NaN variances; synthetic test bags need the `base_link_north_up ← base_link` and `map_tide ← base_link` chains
