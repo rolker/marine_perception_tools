@@ -6,10 +6,14 @@ https://github.com/rolker/marine_perception_tools/issues/55
 
 ## Context
 
-**Revision 2** (after Plan Review, changes-requested). Scope narrowed and
-several review must-fixes required design changes, not just wording — see
-"Design decisions settled here" below, all dated 2026-09-11 and owed to the
-operator directly, not inferred.
+**Revision 3** (after the second Plan Review, changes-requested: 4 must-fix,
+3 suggestions, all folded in below). Revision 2 (after the first Plan Review)
+narrowed scope and settled the design decisions numbered 1–6 below, dated
+2026-09-11 and owed to the operator directly, not inferred. Revision 3 adds
+decision 7 (2026-09-14, operator: proceed on library defaults, park the
+general fix as unh_marine_autonomy#385), the per-beam validity guard the
+0.05 m gate did not replace, the warnings stream, and tests for the new
+helper.
 
 The CUBE lab currently weights soundings with a homegrown placeholder,
 `src/sounding_uncertainty.hpp` (an angle-aware TPU stand-in whose constants —
@@ -124,6 +128,36 @@ Plan Review's must-fixes):
    default to unprefixed `base_link` while `level_frame`/`tide_frame` were
    namespaced, and the attitude lookup (`level_frame <- base_link_frame`)
    could never resolve to the real boat.
+7. **Library-default vessel/device is what production already runs — say so,
+   measure the cost, do not override** (must-fix: the real model changes the
+   influence radius ~10×; operator decision 2026-09-14). `cube::Vessel{}`'s
+   `gps_drms = 2.0` enters `swath_horizontal` as a constant
+   `total_gps_variance = 4.0 m²` on every sounding (`error_model.cpp:105,395`),
+   so `horizontal_error >= 4 m²` always and `Parameters::influenceRadius`
+   caps spread at `CONF_99PC·sqrt(h) ≈ 5.2 m`, against the placeholder's
+   `0.2 + 0.01·depth ≈ 0.5 m`. `run_cube`'s spread loop is
+   O(radius²/cell²) per sounding, so up to ~100× more node inserts on a run
+   already measured in minutes over ~1M soundings.
+
+   Verified 2026-09-14: this is not a lab-only artefact. The live projector
+   (`detections_to_pointcloud.cpp:128-137`) sets exactly three `Vessel`/
+   `Device` fields from parameters (`ellipsoidal_referenced`,
+   `range_error_percent`, `range_error_floor_m`) and BizzyBoat's config sets
+   only the three frame names, so the boat, `import_bag`, `batch_regen_bag`,
+   `bag_to_geotiff` and this lab all run the identical 2 m default. The lab
+   matching them is not inventing a number; overriding `gps_drms` offline
+   would invent one and make the lab disagree with the store. The general
+   fix — a survey-configuration record the live node publishes and every
+   offline tool reads — is parked for design as
+   [unh_marine_autonomy#385](https://github.com/rolker/unh_marine_autonomy/issues/385)
+   (with [cube_bathymetry#145](https://github.com/rolker/cube_bathymetry/issues/145)
+   as its consumer half). Consequences in this plan:
+   - `offline_projection_caveat()` names the **2 m generic-GPS assumption
+     first**, before lever arms and the device fallback, and says the
+     influence radius is therefore ~5 m (Approach item 1).
+   - Approach item 12 adds a **runtime measurement** on a real pass so the
+     cost is a number in the PR, not a prediction; a performance follow-up
+     is filed only if that number hurts.
 
 ## Approach
 
@@ -133,18 +167,27 @@ Plan Review's must-fixes):
    `DetectionsProjector` setup, and so the CUBE-tuning dialog and the load
    notes share one caveat string instead of two copies drifting apart:
    - `offline_projector_params(base_link_frame, level_frame, tide_frame)` →
-     `cube::ProjectorParams` with library-default `vessel`/`device` (decision
-     4) and **`minimum_range = 0.05 m`** (not the library default `0.0`).
-     Rationale (must-fix: the old `project_detections` skipped a beam with
-     non-positive `twtt` — "no bottom detection" — but `ErrorModel::compute`
-     has no such guard, so a zero-range beam at the sonar head would
-     otherwise pass the range gate and reach the estimator with a spurious
-     0 m depth. 0.05 m is small enough that no genuine M3 return is filtered
-     (its practical near-field range is tens of centimetres or more) while
-     excluding exactly the non-positive-range sentinel case the placeholder
-     guarded against. Chosen to equal `cube::Device::range_error_floor_m`'s
-     value only coincidentally — the two are unrelated gates, and the plan
-     does not read anything into the coincidence.
+     `cube::ProjectorParams` with library-default `vessel`/`device` (decisions
+     4, 7) and **`minimum_range = kOfflineMinimumRangeM`**, a named constant
+     in `mbes_projection.hpp` equal to `0.05` m (suggestion: one site to
+     revisit, carrying the rationale) — not the library default `0.0`.
+     Rationale: a beam whose range is exactly zero would otherwise sit at the
+     sonar head with a spurious 0 m depth. 0.05 m is small enough that no
+     genuine M3 return is filtered (its practical near-field range is tens of
+     centimetres or more). Chosen to equal `cube::Device::range_error_floor_m`'s
+     value only coincidentally — unrelated gates.
+
+     **The range gate does not replace the guard `project_detections` had**
+     (must-fix): that function skipped a beam when `twtt <= 0` **or**
+     `sound_speed <= 0`, while cube's gate tests `range² ∈ [min², max²]`, so a
+     *negative* travel time or sound speed produces a mirrored sounding whose
+     squared range passes. `project_ping` therefore applies the same validity
+     guard itself: if `ping_info.sound_speed <= 0` the whole ping is dropped
+     (counted in a new `MbesWindowResult::invalid_pings`); a beam with
+     `two_way_travel_times[i] <= 0` is dropped after projection by index
+     (the projector emits exactly one `cube::Sounding` per beam in order, so
+     the beam index is the sounding index) and counted in
+     `invalid_beams`. Both counts reach the load note (Approach item 7).
    - `project_ping(const cube::DetectionsProjector &, detections, tf,
      vessel_speed_mps) -> {std::vector<MbesSounding>, cube::ProjectionDiagnostics}`,
      converting each `cube::Sounding` (`sonar_relative_position.{x,y,z}`,
@@ -152,10 +195,13 @@ Plan Review's must-fixes):
      `vertical_error`→`vertical_variance`, `horizontal_error`→
      `horizontal_variance`) to an `MbesSounding`.
    - `offline_projection_caveat()`: the one line of operator-facing text
-     stating the library-defaults condition (decision 4: lever arms zero,
-     generic device, M3 beamwidth = device fallback) **and** the NaN-speed
-     consequence (decision 5: horizontal error is optimistic because the
-     speed-dependent latency terms are floored to zero). Consumed by both
+     stating the library-defaults condition in order of consequence
+     (decision 7 first: a generic 2 m GPS assumption on every sounding, so
+     the influence radius is ~5 m and the same as the live store's; then
+     decision 4: lever arms zero, generic device, M3 beamwidth = device
+     fallback) **and** the NaN-speed consequence (decision 5: horizontal
+     error is optimistic because the speed-dependent latency terms are
+     floored to zero), pointing at unh_marine_autonomy#385 for the fix. Consumed by both
      the CUBE-tuning dialog (Approach item 4) and the lab's load note
      (Approach item 6) so there is exactly one place this wording lives.
 2. **Extend `MbesSounding`** (`mbes_geometry.hpp`) with `vertical_variance` /
@@ -195,7 +241,10 @@ Plan Review's must-fixes):
    warning — `ProjectionRunTotals` is the type that has both the counts and
    the accumulator semantics `cube_bathymetry`'s own offline tools already
    use it for). `read_mbes_window` accumulates one ping at a time: `pings`
-   +=1, `beams` += the ping's beam count, `soundings` += kept soundings,
+   +=1, `beams` += the ping's `ProjectionDiagnostics::total` (suggestion:
+   `ErrorModel::compute` emits exactly one sounding per beam and never
+   skips, so the denominator cannot drift from the numerators), `soundings`
+   += kept soundings,
    `filtered_range`/`missing_attitude`/`missing_heave`/
    `default_beamwidth_beams`/`missing_rx_angle_beams` += the per-ping
    `ProjectionDiagnostics`' matching fields, `reports_georeferencing = false`
@@ -213,8 +262,19 @@ Plan Review's must-fixes):
    reinventing the text — the summary line always includes the
    `missing_attitude`/`missing_heave` counts, not just the warning paths, so
    a frame mismatch is visible even when it does not zero out the sounding
-   count) and append the summary line plus `offline_projection_caveat()`
-   (Approach item 1) to `CloudLoadOutcome::notes`, once per load.
+   count) and append **both streams** — the summary line **and every line of
+   the `err` stream** (must-fix: that is where the default-beamwidth warning
+   lives, and `kongsberg_em_bridge` leaves `rx_beamwidths` empty on every M3
+   ping, so it fires on 100% of beams in exactly this deployment; discarding
+   it would hide the one warning this deployment always produces) — plus
+   `offline_projection_caveat()` (Approach item 1) to
+   `CloudLoadOutcome::notes`, once per load. Alongside, one line per load
+   for the drop populations `ProjectionRunTotals` has no field for
+   (suggestion): `read_mbes_window`'s existing `skipped_pings` (ping dropped
+   for a missing world←sensor TF before projection) and the new
+   `invalid_pings`/`invalid_beams` from Approach item 1, summed across
+   passes the same way — so every place a sounding can vanish is visible in
+   the same note.
 
    **Why this alone is not sufficient** — the honest-degradation gap the review
    found: missing attitude makes `vertical_error`/`horizontal_error` NaN but
@@ -312,17 +372,50 @@ Plan Review's must-fixes):
     add a new row for `mbes_projection.{hpp,cpp}` (suggestion — the CUBE-lab
     path's real projection + error-model wiring, offline defaults, and the
     shared caveat text).
+12. **Measure the runtime cost once, on a real pass** (decision 7). Before
+    and after the swap, time `run_cube` over the same multi-pass selection
+    from an archived BizzyBoat M3 bag (the 2026-08-20 `bizzy_timing` bag
+    used for decision 6, or a `bizzyboat_sonar` recording) at the lab's
+    default cell size, and record wall time, sounding count and node-insert
+    count (if `run_cube` exposes one; otherwise wall time and soundings) in
+    `progress.md`'s Implementation entry and the PR body. A performance
+    follow-up is filed only if the measured slowdown makes the lab
+    unusable, with the number in it — not on the ~100× prediction alone.
+13. **Tests for the new helper and the two changed readers** (must-fix):
+    - New `test/test_mbes_projection.cpp` (registered in `CMakeLists.txt`,
+      linking `cube_bathymetry`): `offline_projector_params()` returns the
+      three frame names it was given, `minimum_range == kOfflineMinimumRangeM`,
+      default-constructed `vessel`/`device`; `project_ping()` on a synthetic
+      `SonarDetections` + identity TF maps `sonar_relative_position`,
+      `intensity`, `beam_angle`, `slant_range` and — the one rename site —
+      `vertical_error`→`vertical_variance`, `horizontal_error`→
+      `horizontal_variance` per beam; a ping with `sound_speed <= 0` yields
+      no soundings and `invalid_pings == 1`; a beam with `twtt <= 0` (zero
+      **and** negative) is dropped with `invalid_beams` counted while its
+      siblings survive; `ProjectionDiagnostics` passes through unchanged.
+    - `test/test_mbes_window_reader.cpp`: `MbesWindowOptions` defaults equal
+      the verified `bizzy/` frames (decision 6); `MbesWindowResult`'s
+      `diagnostics` accumulates `pings`/`beams`/`soundings` correctly across
+      two synthetic pings (unit-level, feeding `read_mbes_window`'s
+      accumulation step directly if the function is split to allow it, else
+      via the smallest in-memory bag fixture the existing tests use).
+    - `test/test_mbes_pass_loader.cpp`: `CloudLoadOutcome::notes` contains the
+      summary line, the `err`-stream warning lines, the skipped/invalid line
+      and `offline_projection_caveat()` exactly once per load.
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
-| `src/mbes_projection.hpp` + `.cpp` (new) | `offline_projector_params()` (library-default vessel/device, `minimum_range = 0.05`), `project_ping()` (maps `cube::Sounding::{vertical,horizontal}_error` → `MbesSounding::{vertical,horizontal}_variance`), `offline_projection_caveat()` shared text |
+| `src/mbes_projection.hpp` + `.cpp` (new) | `kOfflineMinimumRangeM`; `offline_projector_params()` (library-default vessel/device, `minimum_range = kOfflineMinimumRangeM`); `project_ping()` (maps `cube::Sounding::{vertical,horizontal}_error` → `MbesSounding::{vertical,horizontal}_variance`, drops `sound_speed <= 0` pings and `twtt <= 0` beams with counts); `offline_projection_caveat()` shared text, 2 m GPS first |
+| `test/test_mbes_projection.cpp` (new) | Defaults, constant, rename mapping, validity guard (zero and negative), diagnostics passthrough |
+| `test/test_mbes_window_reader.cpp` | Verified frame defaults; `ProjectionRunTotals` accumulation across pings |
+| `test/test_mbes_pass_loader.cpp` | Load note carries summary + `err` warnings + skipped/invalid line + caveat once |
 | `src/mbes_geometry.hpp` | Add `vertical_variance`/`horizontal_variance` to `MbesSounding`; **keep** `project_beam`/`project_detections` (cloud path, until #56); rewrite header comment for the split |
 | `src/sounding_uncertainty.hpp` | Delete |
 | `src/sidescan_viewer_window.cpp` | Line 112: `#include "mbes_projection.hpp"` in place of `sounding_uncertainty.hpp`; line 934: `offline_projection_caveat()` in place of `sounding_uncertainty_caveat()` |
-| `src/mbes_window_reader.{hpp,cpp}` | `MbesWindowOptions` gains `base_link_frame`/`level_frame`/`tide_frame` (verified defaults); `MbesWindowResult` gains `cube::ProjectionRunTotals diagnostics`; `read_mbes_window` holds a `DetectionsProjector`, calls `project_ping`, accumulates totals |
-| `src/mbes_pass_loader.cpp` | Accumulate `MbesWindowResult::diagnostics` across passes into a running `ProjectionRunTotals`; append `report_projection_summary()`'s output + `offline_projection_caveat()` to `CloudLoadOutcome::notes` once per load |
+| `src/mbes_window_reader.{hpp,cpp}` | `MbesWindowOptions` gains `base_link_frame`/`level_frame`/`tide_frame` (verified defaults); `MbesWindowResult` gains `cube::ProjectionRunTotals diagnostics` + `invalid_pings`/`invalid_beams`; `read_mbes_window` holds a `DetectionsProjector`, calls `project_ping`, accumulates totals with `beams` from `ProjectionDiagnostics::total` |
+| `src/mbes_pass_loader.cpp` | Accumulate `MbesWindowResult::diagnostics` (+ `skipped_pings`, `invalid_pings`, `invalid_beams`) across passes; append `report_projection_summary()`'s summary **and `err` warnings**, the skipped/invalid line, and `offline_projection_caveat()` to `CloudLoadOutcome::notes` once per load |
 | `src/cube_lab.{hpp,cpp}` | `run_cube` reads `vertical_variance`/`horizontal_variance` into `cs.vertical_error`/`horizontal_error`; drop gate reuses `params.influenceRadius(cs)`'s own NaN result; skip note reworded (attribution); doc comments updated (real model, library defaults, NaN-speed caveat, `horizontal_variance` feeds `influenceRadius`) |
 | `src/color_vocabulary.hpp` | Reword `ColorChannel::Uncertainty`'s point-unavailable reason (real variances now exist on some sources; channel wiring deferred to #56) |
 | `test/test_color_vocabulary.cpp` | Update comments/assertions to match the reworded reason text |
@@ -330,7 +423,7 @@ Plan Review's must-fixes):
 | `test/test_mbes_geometry.cpp` | **No change** — stays; still tests `project_beam`/`project_detections`, which stay until #56 |
 | `test/test_cube_lab.cpp` | Synthetic soundings set `vertical_variance`/`horizontal_variance` directly (local test-only helper formula replaces the deleted production one); update the stale `test_sounding_uncertainty` comment reference |
 | `test/test_tf_lift.cpp` | Extend `sampleSounding()` and the carry-through/rotated-lift assertions to cover the two new fields |
-| `CMakeLists.txt` | Remove only `test_sounding_uncertainty`'s gtest registration; add `mbes_projection.cpp`/`.hpp` to the library + the test targets that need it (`test_mbes_window_reader`, `test_mbes_pass_loader`, `test_cube_lab`) |
+| `CMakeLists.txt` | Remove only `test_sounding_uncertainty`'s gtest registration; add `mbes_projection.cpp`/`.hpp` to the library + the test targets that need it (`test_mbes_window_reader`, `test_mbes_pass_loader`, `test_cube_lab`); register the new `test_mbes_projection` |
 | `.agents/README.md` | Update `sounding_uncertainty.hpp` (remove) and `mbes_geometry.hpp` (re-describe) rows; add a `mbes_projection.{hpp,cpp}` row |
 
 ## Principles Self-Check
@@ -340,7 +433,7 @@ Plan Review's must-fixes):
 | Human control and transparency | Diagnostics (missing attitude/heave, default-beamwidth, range-filtered beam counts) and the library-defaults + NaN-speed caveat are surfaced in `CloudLoadOutcome::notes` and the CUBE-tuning dialog (Approach items 4, 6, 7), not silently absorbed; the "no beam geometry" skip note is reworded so its cause is correctly attributed instead of misleading (Approach item 8) |
 | A change includes its consequences | The one in-scope call site (`mbes_window_reader.cpp` via `mbes_pass_loader.cpp`), its `cube_lab.cpp` consumer, the CUBE-tuning dialog's caveat, `color_vocabulary.hpp`'s now-stale verified-gap text, retired-file tests, and `.agents/README.md` are all in scope — not just the primary estimator path |
 | Only what's needed | No SOG source is added (decision 5); no new UI diagnostics surface added to the cloud path, which is explicitly out of scope this issue (#56); `mbes_geometry.hpp` keeps its projection functions rather than deleting and re-adding them next issue |
-| Test what breaks | `test_sounding_uncertainty.cpp` deleted with its subject; `test_mbes_geometry.cpp` correctly kept alive since its subject survives; `test_cube_lab.cpp`'s weighting assertions kept alive with an equivalent local formula; `test_tf_lift.cpp` extended to the two new fields instead of asserting the carry-through property in prose only |
+| Test what breaks | `test_sounding_uncertainty.cpp` deleted with its subject; `test_mbes_geometry.cpp` correctly kept alive since its subject survives; `test_cube_lab.cpp`'s weighting assertions kept alive with an equivalent local formula; `test_tf_lift.cpp` extended to the two new fields instead of asserting the carry-through property in prose only; the new helper gets its own `test_mbes_projection.cpp` (rename mapping, validity guard incl. negative inputs) and the two readers whose types change get tests for the new totals and notes (Approach item 13) |
 
 ## ADR Compliance
 
@@ -377,10 +470,14 @@ Plan Review's must-fixes):
   (mirroring `cube_bathymetry import_bag_main`'s `--odom-topic`), given the
   error model floors the speed-dependent horizontal term to 0 without it,
   making horizontal error optimistic? Not in this issue's stated scope.
-- [ ] `minimum_range = 0.05 m` (Approach item 1) is a plan-time choice, not a
-  value verified against the M3's actual near-field spec sheet. If a real M3
-  bag is later found to report legitimate detections inside 5 cm, this value
-  needs revisiting — flagged here rather than treated as settled physics.
+- [ ] `kOfflineMinimumRangeM = 0.05 m` (Approach item 1) is a plan-time
+  choice, not a value verified against the M3's actual near-field spec sheet.
+  If a real M3 bag is later found to report legitimate detections inside
+  5 cm, the one constant needs revisiting — flagged here rather than treated
+  as settled physics.
+- [x] The 2 m generic-GPS default (decision 7): **resolved for this issue** —
+  proceed on library defaults, matching production; the general fix is
+  unh_marine_autonomy#385. Left here so the item stays visible in review.
 
 ## Estimated Scope
 
