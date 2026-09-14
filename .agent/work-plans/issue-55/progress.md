@@ -382,3 +382,24 @@ with a plain `TMPDIR` is green. Nothing in the package changed to cause it.
   changed with the must-fix-1 correction — it is now a confirmation of no
   regression, not the sizing of a ~100× one — but it is still owed, because
   an unmeasured expectation of no regression is still an expectation.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-09-14 14:20 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: approved
+
+**Branch**: feature/issue-55 at `c81505c`
+**Mode**: pre-push
+**Depth**: Light (reason: round-2 fresh read of the round-1 fix delta e1228c4..e175253; cpplint/uncrustify clean; 804 tests pass)
+**Must-fix**: 0 | **Suggestions**: 6 (all applied in `8702f66` + `c81505c`)
+**Round**: 2 | **Ship**: recommended — no must-fix; round-1 findings verified resolved
+
+### Findings
+- [x] (suggestion) "radius is one cell at the lab's cell sizes" bounded: one cell below ~0.75 m at any IHO budget; 1.5–2 m at a 1 m cell under order 2; ≥5.15 m ceiling near 2 m cells; a few ×, not 100× — every site incl. `cube_lab.cpp`, both tests — `8702f66`
+- [x] (suggestion) "bigger horizontal variance spreads LESS" qualified with its condition — `src/cube_lab.hpp` — `8702f66`
+- [x] (suggestion) last direct `status_->setToolTip` routed through `setStatusText(text, detail)` so the tooltip never drops its own line — `src/sidescan_viewer_window.cpp:4328` — `c81505c`
+- [x] (suggestion) cap wording aligned to "≥ ~5.15 m" — README, `mbes_projection.cpp` — `8702f66`
+- [x] (suggestion) stale "#49 placeholder" comment in `test_survey_explorer_window.cpp` rewritten — `8702f66`
+- [x] (suggestion) labelled two-times CUBE sentence left as is (already distinguishable)
+- [x] (out of scope, fixed) `discoverBasemapLayers` `is_directory()` without `error_code` threw the window down on one bad symlink under `--stores` (= mpt#57); fixed with a test in `c81505c` because it blocked the suite in this environment — the PR should say whether it closes #57
